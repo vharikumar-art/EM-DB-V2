@@ -1,0 +1,395 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
+║                    🚀 POSTMAN TESTING SUITE - START HERE 🚀                 ║
+║                                                                              ║
+║                    Cold Email Marketing Backend - Complete API               ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+📦 WHAT YOU GOT:
+═══════════════════════════════════════════════════════════════════════════════
+
+✅ 8 Complete Files Ready to Use:
+
+   1. README_POSTMAN_START_HERE.md ⭐ READ THIS FIRST
+      → Quick overview & setup guide
+
+   2. POSTMAN_COLLECTION.json ⭐ IMPORT THIS INTO POSTMAN
+      → 40+ pre-built API requests, auto-saving variables
+
+   3. QUICK_START_POSTMAN.md
+      → 5-minute quick start with copy-paste requests
+
+   4. POSTMAN_TESTING_GUIDE.md
+      → Detailed 15-step walkthrough with expected responses
+
+   5. POSTMAN_ENDPOINTS_REFERENCE.txt
+      → Quick reference of all endpoints & parameters
+
+   6. POSTMAN_SETUP_SUMMARY.txt
+      → Complete setup overview & troubleshooting
+
+   7. sample_leads.csv
+      → Test data (6 sample leads) for upload
+
+   8. FILES_CREATED.txt
+      → Description of each file
+
+
+⚡ QUICK START (5 MINUTES):
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Download Postman
+   https://www.postman.com/downloads/
+
+2. Import Collection
+   File → Import → Select POSTMAN_COLLECTION.json
+
+3. Create Environment
+   Name: "Email Marketing Dev"
+   Variable: base_url = http://localhost:8000
+
+4. Start Backend
+   cd backend
+   .venv-1\Scripts\activate
+   uvicorn app.main:app --reload --port 8000
+
+5. Test First Request
+   Collection → 1. Authentication → Login → Send
+   ✅ Should save access_token!
+
+
+🔄 COMPLETE TESTING FLOW:
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Login                           (saves access_token)
+2. Add Gmail Account               (saves email_account_id)
+3. Upload Leads                    (sample_leads.csv)
+4. Create Profile                  (saves profile_id)
+5. Activate Profile
+6. Generate Email List
+7. Start Campaign ⭐ (NEW: limitOverride!)  (saves campaign_id)
+8. Monitor Progress
+9. View Dashboard
+10. Export Reports
+
+Total: ~5 minutes
+
+
+⭐ NEW FEATURE: limitOverride
+═══════════════════════════════════════════════════════════════════════════════
+
+Override profile's daily email limit per campaign:
+
+POST /campaigns/start
+
+{
+  "profileId": "{{profile_id}}",
+  "campaignName": "July Campaign",
+  "limitOverride": 200          ← NEW! Optional limit override
+}
+
+Valid Range: 1 - 10,000 (or null for profile default)
+
+Use Cases:
+  • Special campaign: Normal 100, this campaign 500
+  • Test run: Normal 100, this campaign 10
+  • Volume push: Normal 100, this campaign 1000
+
+
+📋 READING ORDER:
+═══════════════════════════════════════════════════════════════════════════════
+
+First:   README_POSTMAN_START_HERE.md          (5 min read)
+Then:    Import POSTMAN_COLLECTION.json        (2 min)
+Then:    Follow QUICK_START_POSTMAN.md         (5 min hands-on)
+Keep:    POSTMAN_ENDPOINTS_REFERENCE.txt       (use while testing)
+If stuck: POSTMAN_SETUP_SUMMARY.txt            (troubleshooting)
+Deep dive: POSTMAN_TESTING_GUIDE.md            (detailed guide)
+
+
+✅ SUCCESS INDICATORS:
+═══════════════════════════════════════════════════════════════════════════════
+
+After following the flow, you should see:
+
+✓ Login returns access_token
+✓ Email account connection verified
+✓ 6 leads uploaded successfully
+✓ Profile created and activated
+✓ Email list generated (6 emails ready)
+✓ Campaign starts with status: "pending"
+✓ Campaign transitions to: "running"
+✓ Emails being sent (sent count increases)
+✓ Campaign completes (sent=6, failed=0)
+✓ Dashboard displays statistics
+
+
+🎯 WHAT EACH FILE DOES:
+═══════════════════════════════════════════════════════════════════════════════
+
+README_POSTMAN_START_HERE.md
+  ├─ Main entry point
+  ├─ Quick overview of all files
+  ├─ How to import & setup
+  ├─ Complete testing flow
+  ├─ Troubleshooting
+  └─ Next steps
+
+POSTMAN_COLLECTION.json
+  ├─ Ready-to-import collection
+  ├─ 40+ pre-built requests
+  ├─ 9 organized categories
+  ├─ Auto-saving variables
+  ├─ Test scripts included
+  └─ NEW: Campaign limitOverride endpoint
+
+QUICK_START_POSTMAN.md
+  ├─ 5-minute quick start
+  ├─ Copy-paste requests
+  ├─ Testing limitOverride feature
+  ├─ Expected responses
+  └─ Quick fixes
+
+POSTMAN_TESTING_GUIDE.md
+  ├─ Detailed 15-step guide
+  ├─ Expected response for each step
+  ├─ Screenshots/examples
+  ├─ Complete explanations
+  ├─ Testing scenarios
+  └─ Troubleshooting
+
+POSTMAN_ENDPOINTS_REFERENCE.txt
+  ├─ All endpoints listed
+  ├─ Parameters explained
+  ├─ Response formats
+  ├─ Status codes
+  ├─ Variables reference
+  └─ Quick lookup
+
+POSTMAN_SETUP_SUMMARY.txt
+  ├─ Complete overview
+  ├─ Common issues & fixes
+  ├─ Gmail setup guide
+  ├─ Testing strategies
+  ├─ Tips & tricks
+  └─ Support info
+
+sample_leads.csv
+  ├─ 6 test leads
+  ├─ Real-world format
+  ├─ Use in upload test
+  └─ Ready to use
+
+FILES_CREATED.txt
+  ├─ Description of each file
+  ├─ Reading order
+  ├─ Checklists
+  └─ Purpose summary
+
+
+🔧 SETUP CHECKLIST:
+═══════════════════════════════════════════════════════════════════════════════
+
+Before Testing:
+  ☐ Install Postman
+  ☐ Download POSTMAN_COLLECTION.json
+  ☐ Import collection into Postman
+  ☐ Create environment "Email Marketing Dev"
+  ☐ Set base_url = http://localhost:8000
+  ☐ Get Gmail App Password (myaccount.google.com/apppasswords)
+  ☐ Start backend server
+
+Testing:
+  ☐ Run: Login
+  ☐ Run: Add Email Account
+  ☐ Run: Upload sample_leads.csv
+  ☐ Run: Create Profile
+  ☐ Run: Activate Profile
+  ☐ Run: Generate Email List
+  ☐ Run: Start Campaign (try limitOverride=200!)
+  ☐ Monitor: Campaign progress
+  ☐ View: Dashboard
+  ☐ Export: Reports
+
+
+🆘 COMMON ISSUES:
+═══════════════════════════════════════════════════════════════════════════════
+
+401 Unauthorized
+  → Solution: Re-run Login endpoint
+
+Profile is not active
+  → Solution: Run /profiles/{id}/activate
+
+No pending emails
+  → Solution: Run /profile-emails/{id}/generate
+
+Campaign already running
+  → Solution: Pause it first or use different profile
+
+Gmail auth failed
+  → Solution: Check Gmail App Password format
+
+limitOverride invalid
+  → Solution: Set value between 1-10000
+
+
+📞 SUPPORT:
+═══════════════════════════════════════════════════════════════════════════════
+
+Not sure what to do?
+  → Read: README_POSTMAN_START_HERE.md
+
+Don't know how to import?
+  → Read: QUICK_START_POSTMAN.md (Step 1-4)
+
+Need endpoint details?
+  → Read: POSTMAN_ENDPOINTS_REFERENCE.txt
+
+Stuck on something?
+  → Read: POSTMAN_SETUP_SUMMARY.txt (Troubleshooting)
+
+Want full understanding?
+  → Read: POSTMAN_TESTING_GUIDE.md (Complete guide)
+
+Got specific error?
+  → Check: POSTMAN_SETUP_SUMMARY.txt (Common Issues & Fixes)
+
+
+📈 TIME ESTIMATES:
+═══════════════════════════════════════════════════════════════════════════════
+
+Setup:              5 minutes
+  • Postman install:     2 min
+  • Import collection:   2 min
+  • Create environment:  1 min
+
+Testing:           15 minutes
+  • Run 10 requests:    10 min
+  • Monitor progress:    5 min
+
+Learning:          20 minutes (optional)
+  • Read guides:        15 min
+  • Try variations:      5 min
+
+Total: ~40 minutes to be fully operational
+
+
+🚀 GET STARTED NOW:
+═══════════════════════════════════════════════════════════════════════════════
+
+STEP 1: Read
+        → Open: README_POSTMAN_START_HERE.md
+        → Time: 5 minutes
+
+STEP 2: Download Postman
+        → https://www.postman.com/downloads/
+        → Time: 3 minutes
+
+STEP 3: Import Collection
+        → File → Import → POSTMAN_COLLECTION.json
+        → Time: 2 minutes
+
+STEP 4: Create Environment
+        → Environments → Create New → "Email Marketing Dev"
+        → Time: 2 minutes
+
+STEP 5: Start Backend
+        → Terminal: uvicorn app.main:app --reload
+        → Time: 1 minute
+
+STEP 6: Run First Request
+        → Login → Send
+        → Time: 30 seconds
+
+STEP 7: Follow Testing Flow
+        → 9 more requests as documented
+        → Time: 10 minutes
+
+TOTAL: ~25 minutes to get running!
+
+
+💡 PRO TIPS:
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Variables Auto-Save
+   After each request, Postman auto-saves to {{variable_name}}
+   Use them in next request with {{access_token}}, {{profile_id}}, etc.
+
+2. Check Backend Logs
+   Keep terminal open to see detailed logs for each request
+   Helpful for debugging
+
+3. Use Postman Console
+   View → Show Console to see full request/response details
+
+4. Save Requests
+   Right-click → Save as to backup working requests
+
+5. Test Different Scenarios
+   Create multiple profiles with different filters
+   Start different campaigns with different limitOverride values
+
+6. Monitor Progress
+   Refresh campaign status every 10 seconds to see real-time updates
+
+7. Use Collections Runner
+   Run multiple requests in sequence with delays
+
+
+✨ WHAT'S NEW IN THIS UPDATE:
+═══════════════════════════════════════════════════════════════════════════════
+
+Campaign Start Endpoint: Now accepts limitOverride!
+
+OLD:
+  { profileId, campaignName }
+
+NEW:
+  { profileId, campaignName, limitOverride }
+
+Example:
+  {
+    "profileId": "507f1f77bcf86cd799439020",
+    "campaignName": "July Campaign",
+    "limitOverride": 200
+  }
+
+Benefits:
+  ✓ Different sending limits per campaign
+  ✓ Test with small limits before going big
+  ✓ Special campaigns can send more/less
+  ✓ Stored in campaign for audit trail
+
+
+🎉 YOU'RE ALL SET!
+═══════════════════════════════════════════════════════════════════════════════
+
+Everything is ready to go. You have:
+
+✅ Complete Postman collection (40+ endpoints)
+✅ Step-by-step guides (5-15 min reads)
+✅ Sample test data (6 leads CSV)
+✅ Quick reference materials
+✅ Troubleshooting guides
+✅ NEW: Campaign limitOverride feature
+
+START HERE:
+  1. Open: README_POSTMAN_START_HERE.md
+  2. Follow: 5-minute quick start
+  3. Import: POSTMAN_COLLECTION.json
+  4. Test: 9 requests in sequence
+  5. Monitor: Campaign progress
+
+Questions? Check the guides - everything is documented!
+
+Happy Testing! 🚀
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
+║                         👉 START WITH THIS FILE 👈                          ║
+║                                                                              ║
+║                        README_POSTMAN_START_HERE.md                          ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
