@@ -22,8 +22,41 @@ def serialize_doc(doc: dict[str, Any] | None) -> dict[str, Any] | None:
     return result
 
 
+def serialize_user_with_password(doc: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Serialize user document and include decrypted password."""
+    if doc is None:
+        return None
+    
+    from app.core.security import decrypt_password
+    
+    result = serialize_doc(doc)
+    
+    if result:
+        # Remove hashed password from response (security) - BEFORE we add decrypted one
+        result.pop("password", None)
+        
+        # Decrypt password if it exists
+        if "passwordEncrypted" in result:
+            try:
+                decrypted_pwd = decrypt_password(result["passwordEncrypted"])
+                result["password"] = decrypted_pwd
+            except Exception:
+                # If decryption fails, don't include password
+                result["password"] = None
+        
+        # Remove the encrypted version from response
+        result.pop("passwordEncrypted", None)
+    
+    return result
+
+
 def serialize_list(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [serialize_doc(d) for d in docs]
+
+
+def serialize_list_users_with_password(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Serialize list of user documents with decrypted passwords."""
+    return [serialize_user_with_password(d) for d in docs]
 
 
 def to_object_id(id_str: str) -> ObjectId:

@@ -19,6 +19,7 @@ class UserOut(BaseModel):
     id: str
     name: str
     email: EmailStr
+    password: str | None = None  # Decrypted password (only in responses)
     role: UserRole
     status: UserStatus
     createdAt: str | None = None

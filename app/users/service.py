@@ -3,7 +3,7 @@ from app.core.security import encrypt_password, hash_password
 from app.database.mongodb import get_collection
 from app.users.model import UserRole, build_user_document
 from app.users.schema import UserCreate, UserUpdate
-from app.utils.response import serialize_doc, to_object_id
+from app.utils.response import serialize_doc, serialize_user_with_password, serialize_list_users_with_password, to_object_id
 
 COLLECTION = "users"
 
@@ -23,7 +23,7 @@ async def create_user(payload: UserCreate) -> dict:
     )
     result = await users.insert_one(doc)
     created = await users.find_one({"_id": result.inserted_id})
-    return serialize_doc(created)
+    return serialize_user_with_password(created)
 
 
 async def create_initial_admin(payload: UserCreate) -> dict:
@@ -52,14 +52,14 @@ async def get_user_by_id(user_id: str) -> dict:
     doc = await users.find_one({"_id": to_object_id(user_id)})
     if not doc:
         raise NotFoundException("User not found")
-    return serialize_doc(doc)
+    return serialize_user_with_password(doc)
 
 
 async def list_users() -> list[dict]:
     users = get_collection(COLLECTION)
     cursor = users.find({})
-    docs = [serialize_doc(d) async for d in cursor]
-    return docs
+    docs = [d async for d in cursor]
+    return serialize_list_users_with_password(docs)
 
 
 async def update_user(user_id: str, payload: UserUpdate) -> dict:
@@ -76,7 +76,7 @@ async def update_user(user_id: str, payload: UserUpdate) -> dict:
     )
     if not result:
         raise NotFoundException("User not found")
-    return serialize_doc(result)
+    return serialize_user_with_password(result)
 
 
 async def delete_user(user_id: str) -> None:
