@@ -8,19 +8,22 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
     role: UserRole = UserRole.EMPLOYEE
+    branch: str | None = None
 
 
 class UserUpdate(BaseModel):
     name: str | None = None
     status: UserStatus | None = None
+    branch: str | None = None
 
 
 class UserOut(BaseModel):
     id: str
     name: str
     email: EmailStr
-    password: str | None = None  # Decrypted password (only in responses)
+    password: str | None = None
     role: UserRole
     status: UserStatus
+    branch: str | None = None
     createdAt: str | None = None
     updatedAt: str | None = None
