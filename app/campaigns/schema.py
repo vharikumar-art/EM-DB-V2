@@ -6,7 +6,8 @@ from app.campaigns.model import CampaignStatus
 class CampaignStartRequest(BaseModel):
     profileId: str
     campaignName: str = Field(default="", max_length=200)
-    limitOverride: int | None = Field(default=None, ge=1, le=10000, description="Optional limit to override profile's dailyLimit for this campaign")
+    dailyLimit: int | None = Field(default=None, ge=1, le=10000, description="Daily email limit for this campaign (required, not optional)")
+    limitOverride: int | None = Field(default=None, ge=1, le=10000, description="[DEPRECATED] Use dailyLimit instead")
 
 
 class CampaignOut(BaseModel):
@@ -21,6 +22,7 @@ class CampaignOut(BaseModel):
     failed: int
     skipped: int
     replies: int
+    dailyLimit: int | None = None
     limitOverride: int | None = None
     startedAt: str | None = None
     completedAt: str | None = None

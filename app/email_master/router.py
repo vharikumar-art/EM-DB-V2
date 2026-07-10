@@ -16,6 +16,7 @@ _ALLOWED_EXTENSIONS = (".csv", ".xlsx", ".xls")
 async def upload_emails(
     file: UploadFile = File(...),
     insertDuplicates: bool = Query(default=False),
+    maxLimit: int | None = Query(default=None, ge=1, le=10000, description="Maximum emails to upload from file"),
     current_user: CurrentUser = Depends(get_current_user),
 ):
     if not any(file.filename.lower().endswith(ext) for ext in _ALLOWED_EXTENSIONS):
@@ -24,7 +25,7 @@ async def upload_emails(
     employee = await get_employee_by_user_id(current_user.user_id)
     file_bytes = await file.read()
     result = await service.upload_file(
-        employee["id"], file_bytes, file.filename, insertDuplicates
+        employee["id"], file_bytes, file.filename, insertDuplicates, maxLimit
     )
     return ApiResponse(message="File processed", data=result)
 

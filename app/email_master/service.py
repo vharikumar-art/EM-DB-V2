@@ -20,10 +20,14 @@ async def upload_file(
     file_bytes: bytes,
     filename: str,
     insert_duplicates: bool = False,
+    max_limit: int | None = None,
 ) -> dict:
     """
     Parse CSV/XLSX, deduplicate per-employee, insert into email_master.
     Email Master records are permanent and never deleted by campaign operations.
+    
+    Args:
+        max_limit: Maximum number of emails to upload from file (1-10000)
     """
     master = get_collection(COLLECTION)
 
@@ -37,6 +41,11 @@ async def upload_file(
 
     if not valid_rows:
         raise BadRequestException("No valid email rows found in the uploaded file")
+
+    # Apply maxLimit if specified
+    if max_limit:
+        valid_rows = valid_rows[:max_limit]
+        failed_count += len(invalid_rows) + (len(validate_and_clean_rows(df)[0]) - len(valid_rows))
 
     upload_batch = f"batch_{uuid.uuid4().hex[:12]}"
     batch_emails = [row["email"] for row in valid_rows]
@@ -88,10 +97,11 @@ async def upload_file(
     )
 
     total_uploaded = len(valid_rows) + failed_count
+    limit_msg = f" (limited to {max_limit})" if max_limit else ""
     await create_notification(
         employee_id=employee_id,
         message=(
-            f"Upload complete: {total_uploaded} records processed "
+            f"Upload complete: {total_uploaded} records processed{limit_msg} "
             f"({unique_count} unique, {duplicate_count} duplicate, {failed_count} invalid)."
         ),
         type=NotificationType.SUCCESS if unique_count > 0 else NotificationType.WARNING,

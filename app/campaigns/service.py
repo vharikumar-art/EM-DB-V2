@@ -27,6 +27,8 @@ async def create_campaign(
     """
     Validate, count pending emails, create the campaign document.
     The actual async send loop is started by the router via BackgroundTasks.
+    
+    Uses dailyLimit from request (not from profile).
     """
     profile = await get_profile(payload.profileId, employee_id, is_admin)
 
@@ -58,6 +60,9 @@ async def create_campaign(
             "Pause or complete it before starting a new one."
         )
 
+    # Use dailyLimit from request, default to profile's dailyLimit if not provided
+    daily_limit = payload.dailyLimit or profile.get("sendingOptions", {}).get("dailyLimit", 100)
+
     campaign_name = (
         payload.campaignName.strip()
         or f"{profile['profileName']} — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
@@ -78,7 +83,9 @@ async def create_campaign(
         "promptSettings": profile.get("promptSettings"),
     }
     
-    # Store limit override if provided (used by the campaign engine)
+    # Store dailyLimit for this campaign
+    doc["dailyLimit"] = daily_limit
+    # Keep limitOverride for backward compatibility
     doc["limitOverride"] = payload.limitOverride
 
     result = await campaigns.insert_one(doc)
@@ -97,7 +104,7 @@ async def create_campaign(
 
     await create_notification(
         employee_id=profile["employeeId"],
-        message=f"Campaign '{campaign_name}' created with {pending_count} pending email(s).",
+        message=f"Campaign '{campaign_name}' created with {pending_count} pending email(s). Daily limit: {daily_limit}",
         type=NotificationType.INFO,
     )
 
