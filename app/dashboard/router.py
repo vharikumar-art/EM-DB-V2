@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, Query
 
@@ -33,12 +33,45 @@ async def employee_dashboard(
     else:
         employee = await get_employee_by_user_id(current_user.user_id)
         target_employee_id = employee["id"]
+    
+    # Get current user details
+    from app.database.mongodb import get_collection
+    users = get_collection("users")
+    from bson import ObjectId
+    user_doc = await users.find_one({"_id": ObjectId(current_user.user_id)})
+    
+    user_info = {
+        "userId": current_user.user_id,
+        "email": user_doc.get("email", "N/A") if user_doc else "N/A",
+        "name": user_doc.get("name", "Unknown") if user_doc else "Unknown",
+        "role": current_user.role,
+        "loginTime": datetime.now(timezone.utc).isoformat(),
+    }
         
     data = await service.get_employee_dashboard(target_employee_id, query)
+    data["currentUser"] = user_info
     return ApiResponse(message="Employee dashboard fetched", data=data)
 
 
 @router.get("/admin", response_model=ApiResponse, dependencies=[Depends(require_admin)])
-async def admin_dashboard(query: DashboardQuery = Depends(_dashboard_query)):
+async def admin_dashboard(
+    query: DashboardQuery = Depends(_dashboard_query),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    # Get current admin user details
+    from app.database.mongodb import get_collection
+    users = get_collection("users")
+    from bson import ObjectId
+    user_doc = await users.find_one({"_id": ObjectId(current_user.user_id)})
+    
+    user_info = {
+        "userId": current_user.user_id,
+        "email": user_doc.get("email", "N/A") if user_doc else "N/A",
+        "name": user_doc.get("name", "Unknown") if user_doc else "Unknown",
+        "role": current_user.role,
+        "loginTime": datetime.now(timezone.utc).isoformat(),
+    }
+    
     data = await service.get_admin_dashboard(query)
+    data["currentUser"] = user_info
     return ApiResponse(message="Admin dashboard fetched", data=data)
