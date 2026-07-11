@@ -12,6 +12,7 @@ def build_profile_document(
     body: str,
     signature: str,
     filters: dict[str, Any],
+    filter_limit: int,
     sending_options: dict[str, Any],
     prompt_settings: dict[str, Any],
 ) -> dict[str, Any]:
@@ -25,6 +26,7 @@ def build_profile_document(
         "signature": signature,
         "isActive": True,
         "filters": filters,
+        "filterLimit": filter_limit,
         "sendingOptions": sending_options,
         "promptSettings": prompt_settings,
         "createdAt": now,

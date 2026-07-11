@@ -15,6 +15,10 @@ class ProfileSendingOptions(BaseModel):
     delayMax: int = Field(default=90, ge=0, description="Maximum delay between sends in seconds")
 
 
+class FilterLimitConfig(BaseModel):
+    limit: int = Field(default=0, ge=0, description="Maximum number of emails to fetch from filtered results (0 = no limit)")
+
+
 class PromptSettings(BaseModel):
     personalizeGreeting: bool = True
     improveGrammar: bool = True
@@ -30,6 +34,7 @@ class ProfileCreate(BaseModel):
     body: str = Field(default="", description="Email body HTML/text (supports [name], [company] placeholders)")
     signature: str = Field(default="", description="HTML signature appended to every email")
     filters: ProfileFilters = Field(default_factory=ProfileFilters)
+    filterLimit: int = Field(default=0, ge=0, description="Maximum emails to fetch from filtered results (0 = no limit)")
     sendingOptions: ProfileSendingOptions = Field(default_factory=ProfileSendingOptions)
     promptSettings: PromptSettings = Field(default_factory=PromptSettings)
 
@@ -41,6 +46,7 @@ class ProfileUpdate(BaseModel):
     body: str | None = None
     signature: str | None = None
     filters: ProfileFilters | None = None
+    filterLimit: int | None = None
     sendingOptions: ProfileSendingOptions | None = None
     promptSettings: PromptSettings | None = None
 
@@ -55,6 +61,7 @@ class ProfileOut(BaseModel):
     signature: str
     isActive: bool
     filters: ProfileFilters
+    filterLimit: int
     sendingOptions: ProfileSendingOptions
     promptSettings: PromptSettings
     createdAt: str | None = None

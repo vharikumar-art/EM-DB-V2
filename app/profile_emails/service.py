@@ -36,12 +36,14 @@ async def generate_list(
     filters: dict = override_filters or profile.get("filters", {})
     sending_opts: dict = profile.get("sendingOptions", {})
     daily_limit: int = limit_override or sending_opts.get("dailyLimit", 100)
+    filter_limit: int = profile.get("filterLimit", 0)
 
     # Pull matching unique records from email_master
     master_records = await query_for_profile(
         employee_id=profile["employeeId"],
         filters=filters,
         daily_limit=daily_limit,
+        filter_limit=filter_limit,
     )
 
     if not master_records:

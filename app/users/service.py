@@ -1,8 +1,8 @@
 from app.core.exceptions import ConflictException, NotFoundException
-from app.core.security import encrypt_password, hash_password
+from app.core.security import encrypt_password, hash_password, verify_password
 from app.database.mongodb import get_collection
 from app.users.model import UserRole, build_user_document
-from app.users.schema import UserCreate, UserUpdate
+from app.users.schema import UserCreate, UserUpdate, PasswordUpdate
 from app.utils.response import serialize_doc, serialize_user_with_password, serialize_list_users_with_password, to_object_id
 
 COLLECTION = "users"
@@ -85,3 +85,58 @@ async def delete_user(user_id: str) -> None:
     result = await users.delete_one({"_id": to_object_id(user_id)})
     if result.deleted_count == 0:
         raise NotFoundException("User not found")
+
+
+async def update_password(user_id: str, payload: PasswordUpdate) -> dict:
+    from app.core.exceptions import BadRequestException
+    from datetime import datetime, timezone
+    
+    users = get_collection(COLLECTION)
+    user_doc = await users.find_one({"_id": to_object_id(user_id)})
+    if not user_doc:
+        raise NotFoundException("User not found")
+    
+    # Verify old password
+    if not verify_password(payload.old_password, user_doc.get("password", "")):
+        raise BadRequestException("Old password is incorrect")
+    
+    # Hash and encrypt new password
+    hashed = hash_password(payload.new_password)
+    encrypted = encrypt_password(payload.new_password)
+    
+    # Update password
+    result = await users.find_one_and_update(
+        {"_id": to_object_id(user_id)},
+        {
+            "$set": {
+                "password": hashed,
+                "passwordEncrypted": encrypted,
+                "updatedAt": datetime.now(timezone.utc)
+            }
+        },
+        return_document=True
+    )
+    
+    return serialize_user_with_password(result)
+
+
+async def migrate_add_branch() -> dict:
+    """Add branch 'Vellore' to all users that don't have it"""
+    from datetime import datetime, timezone
+    
+    users = get_collection(COLLECTION)
+    result = await users.update_many(
+        {"branch": {"$exists": False}},
+        {
+            "$set": {
+                "branch": "Vellore",
+                "updatedAt": datetime.now(timezone.utc)
+            }
+        }
+    )
+    
+    return {
+        "matched_count": result.matched_count,
+        "modified_count": result.modified_count,
+        "message": f"Updated {result.modified_count} users with branch 'Vellore'"
+    }

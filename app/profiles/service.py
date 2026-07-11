@@ -66,6 +66,7 @@ async def create_profile(employee_id: str, payload: ProfileCreate) -> dict:
         body=payload.body,
         signature=payload.signature,
         filters=payload.filters.model_dump(),
+        filter_limit=payload.filterLimit,
         sending_options=payload.sendingOptions.model_dump(),
         prompt_settings=payload.promptSettings.model_dump(),
     )
@@ -100,6 +101,7 @@ async def get_profile(profile_id: str, employee_id: str, is_admin: bool) -> dict
     doc.setdefault("body", "")
     doc.setdefault("signature", "")
     doc.setdefault("filters", _default_filters())
+    doc.setdefault("filterLimit", 0)
     doc.setdefault("sendingOptions", _default_sending_options())
     doc.setdefault("promptSettings", _default_prompt_settings())
     return doc

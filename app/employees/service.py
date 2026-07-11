@@ -77,7 +77,18 @@ async def get_employee_by_user_id(user_id: str) -> dict:
     employees = get_collection(COLLECTION)
     doc = await employees.find_one({"userId": user_id})
     if not doc:
-        raise NotFoundException("Employee record not found for this user")
+        # Auto-create employee record if it doesn't exist
+        # This handles cases where a user was created but no employee record exists
+        users = get_collection("users")
+        user = await users.find_one({"_id": to_object_id(user_id)})
+        if not user:
+            raise NotFoundException("User not found")
+        
+        # Create default employee record
+        emp_doc = build_employee_document(user_id=user_id, branch=None)
+        result = await employees.insert_one(emp_doc)
+        doc = await employees.find_one({"_id": result.inserted_id})
+    
     return await _attach_user_info(serialize_doc(doc))
 
 

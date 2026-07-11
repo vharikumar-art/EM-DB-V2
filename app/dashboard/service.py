@@ -63,7 +63,15 @@ async def get_employee_dashboard(employee_id: str, query: DashboardQuery) -> dic
     active_profiles  = await profiles.count_documents(
         {"employeeId": employee_id, "isActive": True}
     )
-    total_campaigns  = await campaigns.count_documents({"employeeId": employee_id})
+    # Count unique campaigns (by campaignId/name, not all status instances)
+    unique_campaigns_pipeline = [
+        {"$match": {"employeeId": employee_id}},
+        {"$group": {"_id": "$campaignName"}},
+        {"$count": "total"}
+    ]
+    unique_campaigns_result = await campaigns.aggregate(unique_campaigns_pipeline).to_list(length=1)
+    total_campaigns = unique_campaigns_result[0]["total"] if unique_campaigns_result else 0
+    
     running_campaigns = await campaigns.count_documents(
         {"employeeId": employee_id, "status": "running"}
     )
@@ -195,7 +203,14 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
     total_employees   = await employees.count_documents({})
     total_uploads     = await master.count_documents(range_match)
     total_unique      = await master.count_documents({**range_match, "isDuplicate": False})
-    total_campaigns   = await campaigns.count_documents({})
+    # Count unique campaigns (by campaignName, not all status instances)
+    unique_campaigns_pipeline = [
+        {"$group": {"_id": "$campaignName"}},
+        {"$count": "total"}
+    ]
+    unique_campaigns_result = await campaigns.aggregate(unique_campaigns_pipeline).to_list(length=1)
+    total_campaigns = unique_campaigns_result[0]["total"] if unique_campaigns_result else 0
+    
     running_campaigns = await campaigns.count_documents({"status": "running"})
     total_accounts    = await accounts.count_documents({"isActive": True})
 

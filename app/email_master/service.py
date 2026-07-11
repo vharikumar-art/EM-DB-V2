@@ -202,15 +202,10 @@ async def get_dropdown_options(employee_id: str) -> dict:
     }
 
 
-async def query_for_profile(
-    employee_id: str,
-    filters: dict,
-    daily_limit: int,
-    exclude_profile_id: str | None = None,
-) -> list[dict]:
+async def count_filtered_emails(employee_id: str, filters: dict) -> dict:
     """
-    Apply profile filters against email_master and return matching unique records.
-    Used by the profile_emails generator — never modifies email_master.
+    Count total emails matching the filter criteria.
+    Returns both total count and count respecting filter configuration.
     """
     master = get_collection(COLLECTION)
     query: dict = {"employeeId": employee_id, "isDuplicate": False}
@@ -229,7 +224,49 @@ async def query_for_profile(
             {"designation": {"$in": filters["type"]}},
         ]
 
-    cursor = master.find(query).limit(daily_limit * 10)  # pull a larger pool; campaign engine will slice
+    total_count = await master.count_documents(query)
+    return {"totalMatching": total_count}
+
+
+async def query_for_profile(
+    employee_id: str,
+    filters: dict,
+    daily_limit: int,
+    filter_limit: int = 0,
+    exclude_profile_id: str | None = None,
+) -> list[dict]:
+    """
+    Apply profile filters against email_master and return matching unique records.
+    Used by the profile_emails generator — never modifies email_master.
+    
+    Args:
+        employee_id: The employee's ID
+        filters: Filter criteria (country, domain, industry, company, type)
+        daily_limit: Daily limit for sends (used to determine pool size)
+        filter_limit: Maximum emails to return from filtered results (0 = no limit)
+        exclude_profile_id: Profile ID to exclude from results
+    """
+    master = get_collection(COLLECTION)
+    query: dict = {"employeeId": employee_id, "isDuplicate": False}
+
+    if filters.get("country"):
+        query["country"] = {"$in": filters["country"]}
+    if filters.get("domain"):
+        query["domain"] = {"$in": filters["domain"]}
+    if filters.get("industry"):
+        query["industry"] = {"$in": filters["industry"]}
+    if filters.get("company"):
+        query["company"] = {"$in": filters["company"]}
+    if filters.get("type"):
+        query["$or"] = [
+            {"industry": {"$in": filters["type"]}},
+            {"designation": {"$in": filters["type"]}},
+        ]
+
+    # Determine fetch limit: use filter_limit if set, otherwise use daily_limit * 10
+    fetch_limit = filter_limit if filter_limit > 0 else daily_limit * 10
+    
+    cursor = master.find(query).limit(fetch_limit)
     return serialize_list([d async for d in cursor])
 
 

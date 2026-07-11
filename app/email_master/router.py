@@ -47,6 +47,24 @@ async def get_dropdown_options(
     return ApiResponse(message="Dropdown options fetched", data=result)
 
 
+@router.post("/count-filtered", response_model=ApiResponse)
+async def count_filtered_emails(
+    filters: dict,
+    employeeId: str | None = Query(default=None),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    if current_user.role == "admin":
+        if not employeeId:
+            raise BadRequestException("employeeId is required for admins")
+        target_id = employeeId
+    else:
+        employee = await get_employee_by_user_id(current_user.user_id)
+        target_id = employee["id"]
+
+    result = await service.count_filtered_emails(target_id, filters)
+    return ApiResponse(message="Filtered email count", data=result)
+
+
 @router.get("/{email_id}", response_model=ApiResponse)
 async def get_email(
     email_id: str,
