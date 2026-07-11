@@ -129,8 +129,24 @@ async def _run(campaign_id: str) -> None:
     auth_failure_count = 0
     total_sent = 0
     total_failed = 0
+    daily_limit: int = campaign.get("dailyLimit", 100)  # Get from campaign
 
     while True:
+        # Check if daily limit reached
+        if total_sent >= daily_limit:
+            logger.info(
+                "Campaign %s reached daily limit (%d sent). Pausing.",
+                campaign_id, total_sent,
+            )
+            # Pause the campaign so it can be resumed tomorrow
+            try:
+                await campaign_service.set_status(
+                    campaign_id, CampaignStatus.PAUSED, employee_id, is_admin=True
+                )
+            except:
+                pass
+            return
+
         # Respect pause
         if await campaign_service.is_paused(campaign_id):
             logger.info("Campaign %s paused — exiting worker", campaign_id)
@@ -145,6 +161,20 @@ async def _run(campaign_id: str) -> None:
             break
 
         for pe in batch:
+            # Check if daily limit reached before processing each email
+            if total_sent >= daily_limit:
+                logger.info(
+                    "Campaign %s reached daily limit (%d sent). Stopping.",
+                    campaign_id, total_sent,
+                )
+                # Pause the campaign
+                try:
+                    await campaign_service.set_status(
+                        campaign_id, CampaignStatus.PAUSED, employee_id, is_admin=True
+                    )
+                except:
+                    pass
+                return
             # Re-check pause between individual sends
             if await campaign_service.is_paused(campaign_id):
                 logger.info("Campaign %s paused mid-batch — exiting worker", campaign_id)

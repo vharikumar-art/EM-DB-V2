@@ -75,3 +75,10 @@ async def admin_dashboard(
     data = await service.get_admin_dashboard(query)
     data["currentUser"] = user_info
     return ApiResponse(message="Admin dashboard fetched", data=data)
+
+
+@router.get("/dropdown-options", response_model=ApiResponse, dependencies=[Depends(require_admin)])
+async def get_dropdown_options(current_user: CurrentUser = Depends(get_current_user)):
+    """Get dropdown options for admins: employees, profiles, campaigns, and admin users."""
+    data = await service.get_dropdown_options()
+    return ApiResponse(message="Dropdown options fetched", data=data)

@@ -315,3 +315,88 @@ async def get_campaign(
 ) -> dict:
     doc = await _get_campaign_owned(campaign_id, employee_id, is_admin)
     return serialize_doc(doc)
+
+
+async def update_daily_limit(
+    campaign_id: str,
+    new_daily_limit: int,
+    employee_id: str,
+    is_admin: bool,
+) -> dict:
+    """
+    Update the daily limit for a campaign.
+    Can be called while campaign is paused or running.
+    
+    Args:
+        campaign_id: Campaign to update
+        new_daily_limit: New daily limit (1-10000)
+        employee_id: Current user's employee ID
+        is_admin: Whether current user is admin
+        
+    Returns:
+        Updated campaign document
+        
+    Raises:
+        ForbiddenException: If not owner/admin
+        NotFoundException: If campaign not found
+    """
+    doc = await _get_campaign_owned(campaign_id, employee_id, is_admin)
+    
+    campaigns = get_collection(COLLECTION)
+    result = await campaigns.find_one_and_update(
+        {"_id": to_object_id(campaign_id)},
+        {"$set": {
+            "dailyLimit": new_daily_limit,
+            "updatedAt": datetime.now(timezone.utc)
+        }},
+        return_document=True,
+    )
+    
+    await create_notification(
+        employee_id=doc["employeeId"],
+        message=f"Campaign '{doc['campaignName']}' daily limit updated to {new_daily_limit}.",
+        type=NotificationType.INFO,
+    )
+    
+    return serialize_doc(result)
+
+
+async def delete_campaign(
+    campaign_id: str, employee_id: str, is_admin: bool
+) -> None:
+    """
+    Delete a campaign.
+    
+    Can only delete campaigns that are not RUNNING.
+    Deleting a campaign also cleans up associated profile_emails.
+    
+    Args:
+        campaign_id: Campaign to delete
+        employee_id: Current user's employee ID
+        is_admin: Whether current user is admin
+        
+    Raises:
+        ForbiddenException: If not owner/admin
+        BadRequestException: If campaign is RUNNING
+    """
+    doc = await _get_campaign_owned(campaign_id, employee_id, is_admin)
+    
+    # Don't allow deletion of running campaigns
+    if doc.get("status") == CampaignStatus.RUNNING.value:
+        raise BadRequestException(
+            "Cannot delete a running campaign. Pause it first."
+        )
+    
+    campaigns = get_collection(COLLECTION)
+    await campaigns.delete_one({"_id": to_object_id(campaign_id)})
+    
+    # Also clean up associated profile_emails (optional - keep for audit trail)
+    # You can choose to keep them for history, or delete them
+    # profile_emails_col = get_collection("profile_emails")
+    # await profile_emails_col.delete_many({"campaignId": campaign_id})
+    
+    await create_notification(
+        employee_id=doc["employeeId"],
+        message=f"Campaign '{doc['campaignName']}' has been deleted.",
+        type=NotificationType.INFO,
+    )

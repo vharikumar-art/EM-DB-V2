@@ -9,6 +9,7 @@ from app.core.security import (
 )
 from app.database.mongodb import get_collection
 from app.users.service import get_user_by_email
+from app.employees.service import get_employee_by_user_id
 
 
 async def login(payload: LoginRequest) -> TokenPair:
@@ -21,9 +22,19 @@ async def login(payload: LoginRequest) -> TokenPair:
 
     user_id = str(user["_id"])
     role = user["role"]
+    
+    # Get employeeId if user is employee (not admin)
+    employee_id = None
+    if role == "employee":
+        try:
+            employee = await get_employee_by_user_id(user_id)
+            employee_id = employee["id"]
+        except:
+            pass  # If employee record not found, continue without it
+    
     return TokenPair(
-        accessToken=create_access_token(user_id, role),
-        refreshToken=create_refresh_token(user_id, role),
+        accessToken=create_access_token(user_id, role, employee_id),
+        refreshToken=create_refresh_token(user_id, role, employee_id),
     )
 
 
@@ -42,10 +53,11 @@ async def refresh_access_token(refresh_token: str) -> TokenPair:
 
     user_id = payload["sub"]
     role = payload["role"]
+    employee_id = payload.get("employee_id")  # Extract employee_id from token
 
     return TokenPair(
-        accessToken=create_access_token(user_id, role),
-        refreshToken=create_refresh_token(user_id, role),
+        accessToken=create_access_token(user_id, role, employee_id),
+        refreshToken=create_refresh_token(user_id, role, employee_id),
     )
 
 

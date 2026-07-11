@@ -347,3 +347,81 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
         "profileUsage":        profile_usage,
         "recentActivities":    recent_activities,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dropdown Options
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def get_dropdown_options() -> dict:
+    """Get all dropdown options: employees, admins, profiles, campaigns."""
+    employees_col = get_collection("employees")
+    users_col = get_collection("users")
+    profiles_col = get_collection("profiles")
+    campaigns_col = get_collection("campaigns")
+
+    # Get employees with names
+    employees = []
+    async for emp in employees_col.find():
+        emp_id = str(emp["_id"])
+        user = await users_col.find_one({"_id": _safe_oid(emp["userId"])})
+        emp_name = user.get("name", "Unknown") if user else "Unknown"
+        employees.append({
+            "id": emp_id,
+            "name": emp_name,
+            "email": user.get("email", "") if user else ""
+        })
+
+    # Get admins (users with role=admin)
+    admins = []
+    async for user in users_col.find({"role": "admin"}):
+        user_id = str(user["_id"])
+        admins.append({
+            "id": user_id,
+            "name": user.get("name", "Unknown"),
+            "email": user.get("email", "")
+        })
+
+    # Get profiles with employee names
+    profiles = []
+    async for profile in profiles_col.find():
+        profile_id = str(profile["_id"])
+        emp_id = profile.get("employeeId")
+        emp = await employees_col.find_one({"_id": _safe_oid(emp_id)})
+        emp_user = await users_col.find_one({"_id": _safe_oid(emp.get("userId"))}) if emp else None
+        emp_name = emp_user.get("name", "Unknown") if emp_user else "Unknown"
+        
+        profiles.append({
+            "id": profile_id,
+            "name": profile.get("profileName", "Unnamed"),
+            "employeeId": emp_id,
+            "employeeName": emp_name,
+            "email": profile.get("gmailAccount", "")
+        })
+
+    # Get campaigns with names and details
+    campaigns = []
+    async for campaign in campaigns_col.find():
+        campaign_id = str(campaign["_id"])
+        emp_id = campaign.get("employeeId")
+        emp = await employees_col.find_one({"_id": _safe_oid(emp_id)})
+        emp_user = await users_col.find_one({"_id": _safe_oid(emp.get("userId"))}) if emp else None
+        emp_name = emp_user.get("name", "Unknown") if emp_user else "Unknown"
+        
+        campaigns.append({
+            "id": campaign_id,
+            "name": campaign.get("campaignName", "Unnamed"),
+            "status": campaign.get("status", "pending"),
+            "employeeId": emp_id,
+            "employeeName": emp_name,
+            "profileId": campaign.get("profileId", ""),
+            "sent": campaign.get("sent", 0),
+            "totalEmails": campaign.get("totalEmails", 0)
+        })
+
+    return {
+        "employees": employees,
+        "admins": admins,
+        "profiles": profiles,
+        "campaigns": campaigns
+    }

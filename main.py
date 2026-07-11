@@ -18,7 +18,9 @@ from app.employees.router import router as employees_router
 from app.logs.router import router as logs_router
 from app.middleware.error_handler import register_exception_handlers
 from app.middleware.logging_middleware import RequestLoggingMiddleware
+from app.middleware.audit_middleware import AuditLoggingMiddleware
 from app.notifications.router import router as notifications_router
+from app.options.router import router as options_router
 from app.profile_emails.router import router as profile_emails_router
 from app.profiles.router import router as profiles_router
 from app.reports.router import router as reports_router
@@ -52,6 +54,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(AuditLoggingMiddleware)
 app.add_middleware(RequestLoggingMiddleware)
 
 register_exception_handlers(app)
@@ -72,6 +75,7 @@ app.include_router(dashboard_router)
 app.include_router(logs_router)
 app.include_router(reports_router)
 app.include_router(notifications_router)
+app.include_router(options_router)
 
 
 @app.get("/health", tags=["Health"])

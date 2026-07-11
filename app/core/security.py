@@ -36,7 +36,13 @@ def decrypt_password(token: str) -> str:
     return cipher.decrypt(token.encode("utf-8")).decode("utf-8")
 
 
-def _create_token(subject: str, role: str, token_type: Literal["access", "refresh"], expires_delta: timedelta) -> str:
+def _create_token(
+    subject: str, 
+    role: str, 
+    token_type: Literal["access", "refresh"], 
+    expires_delta: timedelta,
+    employee_id: str | None = None
+) -> str:
     now = datetime.now(timezone.utc)
     payload = {
         "sub": subject,
@@ -45,18 +51,22 @@ def _create_token(subject: str, role: str, token_type: Literal["access", "refres
         "iat": now,
         "exp": now + expires_delta,
     }
+    # Add employeeId if provided (for non-admin users)
+    if employee_id:
+        payload["employee_id"] = employee_id
+    
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
-def create_access_token(subject: str, role: str) -> str:
+def create_access_token(subject: str, role: str, employee_id: str | None = None) -> str:
     return _create_token(
-        subject, role, "access", timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+        subject, role, "access", timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES), employee_id
     )
 
 
-def create_refresh_token(subject: str, role: str) -> str:
+def create_refresh_token(subject: str, role: str, employee_id: str | None = None) -> str:
     return _create_token(
-        subject, role, "refresh", timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+        subject, role, "refresh", timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS), employee_id
     )
 
 
