@@ -3,7 +3,7 @@ from typing import Any
 
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
 from app.database.mongodb import get_collection
-from app.email_master.service import mark_assigned_to_profile, query_for_profile
+from app.email_master.service import mark_used_in_profile, mark_emails_assigned_to_employee, query_for_profile
 from app.notifications.schema import NotificationType
 from app.notifications.service import create_notification
 from app.profile_emails.model import SendStatus, build_profile_email_document
@@ -37,22 +37,50 @@ async def generate_list(
     sending_opts: dict = profile.get("sendingOptions", {})
     daily_limit: int = limit_override or sending_opts.get("dailyLimit", 100)
     filter_limit: int = profile.get("filterLimit", 0)
+    
+    # CHECK: Profile email generation LOCK
+    # If profile already has emails generated, cannot generate again
+    # unless they delete them first or send and clear
+    profile_emails_col = get_collection(COLLECTION)
+    existing_emails_count = await profile_emails_col.count_documents(
+        {"profileId": profile_id, "sendStatus": SendStatus.PENDING.value}
+    )
+    
+    if existing_emails_count > 0:
+        raise BadRequestException(
+            f"❌ Cannot generate more emails. This profile already has {existing_emails_count} pending emails. "
+            f"To generate again, you must:\n"
+            f"(1) Send all pending emails via a campaign, then delete the sent emails\n"
+            f"(2) OR manually delete all pending emails from this profile\n"
+            f"Then you can generate a new batch."
+        )
 
-    # Pull matching unique records from email_master
+    # Pull matching unique records from GLOBAL email_master
+    # Pass employee_id so query skips emails assigned to OTHER employees
     master_records = await query_for_profile(
-        employee_id=profile["employeeId"],
         filters=filters,
         daily_limit=daily_limit,
         filter_limit=filter_limit,
+        employee_id=profile["employeeId"],  # Pass employee ID
     )
 
     if not master_records:
-        raise BadRequestException(
-            "No matching records found in Email Master for the current profile filters. "
-            "Adjust the filters or upload more leads."
-        )
-
-    profile_emails_col = get_collection(COLLECTION)
+        # Count total emails in master to help diagnose
+        master_col = get_collection(COLLECTION)
+        total_in_master = await master_col.count_documents({"isDuplicate": False})
+        
+        if total_in_master == 0:
+            raise BadRequestException(
+                "❌ Email Master is empty. Please upload emails first via the 'Email Master' page. "
+                "After uploading, all employees can use them in their profiles."
+            )
+        else:
+            raise BadRequestException(
+                f"❌ No emails match your profile filters. "
+                f"Email Master has {total_in_master} emails, but none match your current filters. "
+                f"Try: (1) Removing filters to use all emails, (2) Uploading more emails, "
+                f"or (3) Checking filter values match your data."
+            )
 
     # Remove only PENDING rows — preserve already-sent/failed/sending rows
     await profile_emails_col.delete_many(
@@ -88,12 +116,21 @@ async def generate_list(
     if new_docs:
         await profile_emails_col.insert_many(new_docs)
 
-    # Update email_master assigned_profiles
+    # Update email_master usedInProfiles tracking
     if master_ids_to_mark:
-        await mark_assigned_to_profile(
+        await mark_used_in_profile(
             master_ids=master_ids_to_mark,
             profile_id=profile_id,
             employee_id=profile["employeeId"],
+        )
+        
+        # Also mark emails as assigned to this employee (claim them)
+        # Get employee name from profile or use employee_id as fallback
+        employee_name = profile.get("employeeName", profile["employeeId"])
+        await mark_emails_assigned_to_employee(
+            master_ids=master_ids_to_mark,
+            employee_id=profile["employeeId"],
+            employee_name=employee_name,
         )
 
     total_pending = await profile_emails_col.count_documents(

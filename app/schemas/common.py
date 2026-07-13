@@ -9,6 +9,7 @@ class ApiResponse(BaseModel, Generic[T]):
     success: bool = True
     message: str = "OK"
     data: T | None = None
+    options: dict | None = None  # For dropdown options in responses
 
 
 class PaginatedResponse(BaseModel, Generic[T]):

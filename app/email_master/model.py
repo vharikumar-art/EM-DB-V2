@@ -3,20 +3,29 @@ from typing import Any
 
 
 def build_email_master_document(
-    employee_id: str,
     upload_batch: str,
     is_duplicate: bool,
+    uploaded_by: str,
+    uploaded_by_name: str,
     row: dict[str, Any],
 ) -> dict[str, Any]:
     """
-    Permanent email record.  Never mutated after creation except for
-    assigned_profiles (updated when a profile list is generated).
+    Permanent email record (GLOBAL POOL).  Never mutated after creation except for
+    usedInProfiles (updated when a profile list is generated).
+    
+    Global: All employees can see and use this email.
+    Tracking: uploadedBy records who contributed the data.
     """
     now = datetime.now(timezone.utc)
     return {
-        "employeeId": employee_id,
+        # Upload tracking
         "uploadBatch": upload_batch,
+        "uploadedBy": uploaded_by,
+        "uploadedByName": uploaded_by_name,
+        "uploadedDate": now,
+        # Duplicate handling (global)
         "isDuplicate": is_duplicate,
+        "duplicateOf": None,  # Will be set if this is a duplicate
         # Contact fields
         "fullName": row.get("fullName", ""),
         "email": row["email"],
@@ -32,9 +41,16 @@ def build_email_master_document(
         "linkedin": row.get("linkedin", ""),
         "citation": row.get("citation", ""),
         "mailSource": row.get("mailSource", ""),
-        # Profile assignment tracking
-        # List of { profileId, employeeId, assignedDate }
-        "assignedProfiles": [],
+        # Profile usage tracking
+        # List of { profileId, employeeId, usedDate }
+        "usedInProfiles": [],
+        
+        # Employee assignment tracking (NEW FIELDS)
+        "inProfileEmails": False,        # YES/NO - Has it been added to any profile?
+        "usedByEmployeeId": None,        # Employee ID who claimed this email
+        "usedByEmployeeName": None,      # Employee name who claimed this email
+        "assignedDate": None,            # When assigned to employee
+        
         "createdAt": now,
         "updatedAt": now,
     }

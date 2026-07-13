@@ -16,17 +16,20 @@ COLLECTION = "email_master"
 
 
 async def upload_file(
-    employee_id: str,
+    uploaded_by_id: str,
+    uploaded_by_name: str,
     file_bytes: bytes,
     filename: str,
     insert_duplicates: bool = False,
     max_limit: int | None = None,
 ) -> dict:
     """
-    Parse CSV/XLSX, deduplicate per-employee, insert into email_master.
-    Email Master records are permanent and never deleted by campaign operations.
+    Parse CSV/XLSX, deduplicate GLOBALLY, insert into email_master.
+    Email Master records are permanent and GLOBAL (all employees can see).
     
     Args:
+        uploaded_by_id: User ID who uploaded
+        uploaded_by_name: User name who uploaded
         max_limit: Maximum number of emails to upload from file (1-10000)
     """
     master = get_collection(COLLECTION)
@@ -50,11 +53,12 @@ async def upload_file(
     upload_batch = f"batch_{uuid.uuid4().hex[:12]}"
     batch_emails = [row["email"] for row in valid_rows]
 
+    # GLOBAL deduplication: check entire collection
     existing_cursor = master.find(
-        {"employeeId": employee_id, "email": {"$in": batch_emails}},
-        {"email": 1},
+        {"email": {"$in": batch_emails}},
+        {"email": 1, "_id": 1},
     )
-    existing_emails = {doc["email"] async for doc in existing_cursor}
+    existing_emails = {doc["email"]: str(doc["_id"]) async for doc in existing_cursor}
 
     docs_to_insert: list[dict] = []
     seen_in_batch: set[str] = set()
@@ -75,7 +79,13 @@ async def upload_file(
             seen_in_batch.add(email_addr)
 
         docs_to_insert.append(
-            build_email_master_document(employee_id, upload_batch, is_dup, row)
+            build_email_master_document(
+                upload_batch=upload_batch,
+                is_duplicate=is_dup,
+                uploaded_by=uploaded_by_id,
+                uploaded_by_name=uploaded_by_name,
+                row=row,
+            )
         )
 
     if docs_to_insert:
@@ -85,7 +95,7 @@ async def upload_file(
     logs = get_collection("logs")
     await logs.insert_one(
         build_log_document(
-            employee_id=employee_id,
+            employee_id=uploaded_by_id,
             profile_id=None,
             action=LogAction.UPLOAD,
             uploaded_count=len(valid_rows) + failed_count,
@@ -99,10 +109,10 @@ async def upload_file(
     total_uploaded = len(valid_rows) + failed_count
     limit_msg = f" (limited to {max_limit})" if max_limit else ""
     await create_notification(
-        employee_id=employee_id,
+        employee_id=uploaded_by_id,
         message=(
-            f"Upload complete: {total_uploaded} records processed{limit_msg} "
-            f"({unique_count} unique, {duplicate_count} duplicate, {failed_count} invalid)."
+            f"Email upload complete: {total_uploaded} records processed{limit_msg} "
+            f"({unique_count} new, {duplicate_count} duplicate, {failed_count} invalid)."
         ),
         type=NotificationType.SUCCESS if unique_count > 0 else NotificationType.WARNING,
     )
@@ -120,20 +130,19 @@ async def upload_file(
 
 
 async def list_emails(
-    employee_id: str | None,
     params: PaginationParams,
     country: str | None = None,
     domain: str | None = None,
     industry: str | None = None,
     company: str | None = None,
+    uploaded_by: str | None = None,
     include_duplicates: bool = True,
     search: str | None = None,
 ) -> dict:
+    """List emails from GLOBAL pool with optional filters."""
     master = get_collection(COLLECTION)
     query: dict = {}
 
-    if employee_id:
-        query["employeeId"] = employee_id
     if country:
         query["country"] = country
     if domain:
@@ -142,6 +151,8 @@ async def list_emails(
         query["industry"] = industry
     if company:
         query["company"] = {"$regex": company, "$options": "i"}
+    if uploaded_by:
+        query["uploadedBy"] = uploaded_by
     if not include_duplicates:
         query["isDuplicate"] = False
     if search:
@@ -154,7 +165,7 @@ async def list_emails(
     total = await master.count_documents(query)
     cursor = (
         master.find(query)
-        .sort("createdAt", -1)
+        .sort("uploadedDate", -1)
         .skip(params.skip)
         .limit(params.pageSize)
     )
@@ -171,44 +182,89 @@ async def get_email(email_id: str) -> dict:
     return serialize_doc(doc)
 
 
-async def get_dropdown_options(employee_id: str) -> dict:
-    """Returns distinct filter values for the frontend dropdowns."""
+async def delete_email(email_id: str) -> None:
+    """ADMIN ONLY: Delete email from global pool."""
     master = get_collection(COLLECTION)
-    profiles_col = get_collection("profiles")
+    result = await master.delete_one({"_id": to_object_id(email_id)})
+    if result.deleted_count == 0:
+        from app.core.exceptions import NotFoundException
+        raise NotFoundException("Email record not found")
 
-    domains = await master.distinct("domain", {"employeeId": employee_id})
-    countries = await master.distinct("country", {"employeeId": employee_id})
-    states = await master.distinct("state", {"employeeId": employee_id})
-    industries = await master.distinct("industry", {"employeeId": employee_id})
-    companies = await master.distinct("company", {"employeeId": employee_id})
+
+async def get_dropdown_options() -> dict:
+    """Returns distinct filter values for the GLOBAL email pool."""
+    master = get_collection(COLLECTION)
+
+    domains = await master.distinct("domain", {"isDuplicate": False})
+    countries = await master.distinct("country", {"isDuplicate": False})
+    states = await master.distinct("state", {"isDuplicate": False})
+    industries = await master.distinct("industry", {"isDuplicate": False})
+    companies = await master.distinct("company", {"isDuplicate": False})
+    
+    # Get all uploaders for the uploadedBy filter
+    uploaders_raw = await master.distinct("uploadedBy", {})
+    uploaders_names = await master.distinct("uploadedByName", {})
 
     def clean(lst: list) -> list:
         return sorted([x for x in lst if x])
 
-    cursor = profiles_col.find({"employeeId": employee_id}, {"profileName": 1})
-    profiles_raw = serialize_list([p async for p in cursor])
-    profiles_list = [
-        {"id": p["id"], "name": p.get("profileName", "Unnamed Profile")}
-        for p in profiles_raw
-    ]
+    uploaders = list(zip(uploaders_raw, uploaders_names)) if uploaders_raw and uploaders_names else []
 
     return {
-        "profiles": profiles_list,
         "domains": clean(domains),
         "countries": clean(countries),
         "states": clean(states),
         "industries": clean(industries),
         "companies": clean(companies),
+        "uploaders": [{"id": uid, "name": uname} for uid, uname in uploaders],
     }
 
 
-async def count_filtered_emails(employee_id: str, filters: dict) -> dict:
+async def get_uploader_stats() -> dict:
+    """Get upload contribution statistics by user."""
+    master = get_collection(COLLECTION)
+    
+    try:
+        pipeline = [
+            {
+                "$group": {
+                    "_id": {"uploadedBy": "$uploadedBy", "uploadedByName": "$uploadedByName"},
+                    "totalEmails": {"$sum": 1},
+                    "uniqueEmails": {"$sum": {"$cond": [{"$eq": ["$isDuplicate", False]}, 1, 0]}},
+                    "duplicateEmails": {"$sum": {"$cond": [{"$eq": ["$isDuplicate", True]}, 1, 0]}},
+                    "lastUploadDate": {"$max": "$uploadedDate"},
+                }
+            },
+            {"$sort": {"totalEmails": -1}},
+        ]
+        
+        results = await master.aggregate(pipeline).to_list(None)
+        return {
+            "stats": [
+                {
+                    "uploadedBy": r["_id"]["uploadedBy"],
+                    "uploadedByName": r["_id"]["uploadedByName"] or r["_id"]["uploadedBy"],
+                    "totalEmails": r["totalEmails"],
+                    "uniqueEmails": r["uniqueEmails"],
+                    "duplicateEmails": r["duplicateEmails"],
+                    "lastUploadDate": r["lastUploadDate"],
+                }
+                for r in results
+            ]
+        }
+    except Exception as exc:
+        import logging
+        logging.error(f"Error getting uploader stats: {exc}")
+        return {"stats": []}
+
+
+async def count_filtered_emails(filters: dict) -> dict:
     """
-    Count total emails matching the filter criteria.
+    Count total emails matching the filter criteria from GLOBAL pool.
     Returns both total count and count respecting filter configuration.
     """
     master = get_collection(COLLECTION)
-    query: dict = {"employeeId": employee_id, "isDuplicate": False}
+    query: dict = {"isDuplicate": False}
 
     if filters.get("country"):
         query["country"] = {"$in": filters["country"]}
@@ -229,25 +285,32 @@ async def count_filtered_emails(employee_id: str, filters: dict) -> dict:
 
 
 async def query_for_profile(
-    employee_id: str,
     filters: dict,
     daily_limit: int,
     filter_limit: int = 0,
-    exclude_profile_id: str | None = None,
+    employee_id: str | None = None,
 ) -> list[dict]:
     """
-    Apply profile filters against email_master and return matching unique records.
-    Used by the profile_emails generator — never modifies email_master.
+    Apply profile filters against GLOBAL email_master and return matching unique records.
+    Skips emails already assigned to OTHER employees (doesn't count them against filter_limit).
     
     Args:
-        employee_id: The employee's ID
         filters: Filter criteria (country, domain, industry, company, type)
         daily_limit: Daily limit for sends (used to determine pool size)
         filter_limit: Maximum emails to return from filtered results (0 = no limit)
-        exclude_profile_id: Profile ID to exclude from results
+        employee_id: Current employee ID (to track who claims emails)
     """
     master = get_collection(COLLECTION)
-    query: dict = {"employeeId": employee_id, "isDuplicate": False}
+    query: dict = {"isDuplicate": False}
+
+    # Track if user provided explicit filters
+    has_explicit_filters = any([
+        filters.get("country"),
+        filters.get("domain"),
+        filters.get("industry"),
+        filters.get("company"),
+        filters.get("type"),
+    ])
 
     if filters.get("country"):
         query["country"] = {"$in": filters["country"]}
@@ -266,11 +329,27 @@ async def query_for_profile(
     # Determine fetch limit: use filter_limit if set, otherwise use daily_limit * 10
     fetch_limit = filter_limit if filter_limit > 0 else daily_limit * 10
     
-    cursor = master.find(query).limit(fetch_limit)
-    return serialize_list([d async for d in cursor])
+    # Fetch all matching records (including already-assigned)
+    cursor = master.find(query).limit(fetch_limit * 2)  # Fetch extra to account for skipped
+    all_results = serialize_list([d async for d in cursor])
+    
+    # Filter in application code: skip emails assigned to OTHER employees
+    available_results = []
+    for email_record in all_results:
+        used_by_id = email_record.get("usedByEmployeeId")
+        
+        # Include if:
+        # 1. Not assigned to anyone (used_by_id is None)
+        # 2. Assigned to current employee (can use own assignments)
+        if used_by_id is None or used_by_id == employee_id:
+            available_results.append(email_record)
+        # SKIP if assigned to different employee (don't count against limit)
+    
+    # Return only the requested limit
+    return available_results[:fetch_limit]
 
 
-async def mark_assigned_to_profile(master_ids: list[str], profile_id: str, employee_id: str) -> None:
+async def mark_used_in_profile(master_ids: list[str], profile_id: str, employee_id: str) -> None:
     """Record that these email_master records were added to a profile's list."""
     from datetime import datetime, timezone
     master = get_collection(COLLECTION)
@@ -283,12 +362,39 @@ async def mark_assigned_to_profile(master_ids: list[str], profile_id: str, emplo
         {"_id": {"$in": object_ids}},
         {
             "$addToSet": {
-                "assignedProfiles": {
+                "usedInProfiles": {
                     "profileId": profile_id,
                     "employeeId": employee_id,
-                    "assignedDate": now,
+                    "usedDate": now,
                 }
             },
             "$set": {"updatedAt": now},
+        },
+    )
+
+
+async def mark_emails_assigned_to_employee(
+    master_ids: list[str], 
+    employee_id: str, 
+    employee_name: str
+) -> None:
+    """Mark emails as assigned to a specific employee (claim them)."""
+    from datetime import datetime, timezone
+    master = get_collection(COLLECTION)
+    from bson import ObjectId
+
+    object_ids = [ObjectId(mid) for mid in master_ids if ObjectId.is_valid(mid)]
+    now = datetime.now(timezone.utc)
+
+    await master.update_many(
+        {"_id": {"$in": object_ids}},
+        {
+            "$set": {
+                "inProfileEmails": True,
+                "usedByEmployeeId": employee_id,
+                "usedByEmployeeName": employee_name,
+                "assignedDate": now,
+                "updatedAt": now,
+            }
         },
     )

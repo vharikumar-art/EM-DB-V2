@@ -49,15 +49,25 @@ async def create_campaign(
             "Generate the list first or retry failed emails."
         )
 
-    # Block if there's already a running campaign for this profile
+    # Block if there's already an active/paused campaign for this profile
     campaigns = get_collection(COLLECTION)
-    running = await campaigns.find_one(
-        {"profileId": payload.profileId, "status": CampaignStatus.RUNNING.value}
+    active_campaign = await campaigns.find_one(
+        {
+            "profileId": payload.profileId, 
+            "status": {"$in": [
+                CampaignStatus.RUNNING.value,
+                CampaignStatus.PAUSED.value,
+            ]}
+        }
     )
-    if running:
+    if active_campaign:
         raise BadRequestException(
-            "A campaign is already running for this profile. "
-            "Pause or complete it before starting a new one."
+            f"❌ Cannot create new campaign. This profile already has an active campaign: '{active_campaign.get('campaignName')}'\n"
+            f"Status: {active_campaign.get('status')}\n"
+            f"Options:\n"
+            f"(1) Pause the active campaign → then create new one\n"
+            f"(2) Wait for campaign to complete → then create new one\n"
+            f"(3) Delete the active campaign → then create new one"
         )
 
     # Use dailyLimit from request, default to profile's dailyLimit if not provided

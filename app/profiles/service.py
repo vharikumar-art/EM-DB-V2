@@ -165,4 +165,10 @@ async def delete_profile(profile_id: str, employee_id: str, is_admin: bool) -> N
     await _assert_owns_profile_or_admin(
         serialize_doc(existing), employee_id, is_admin
     )
+    
+    # Delete the profile
     await profiles.delete_one({"_id": to_object_id(profile_id)})
+    
+    # Also delete all profile_emails records for this profile (cleanup orphaned records)
+    profile_emails = get_collection("profile_emails")
+    await profile_emails.delete_many({"profileId": profile_id})
