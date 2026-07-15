@@ -86,3 +86,17 @@ async def test_connection(
         data=result,
         success=result["success"],
     )
+
+
+@router.post("/test-credentials/validate", response_model=ApiResponse)
+async def test_credentials_directly(
+    payload: EmailAccountCreate,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Test SMTP credentials without saving them. For validating new/edited credentials before saving."""
+    result = await service.test_credentials_directly(payload)
+    return ApiResponse(
+        message=result["message"],
+        data=result,
+        success=result["success"],
+    )

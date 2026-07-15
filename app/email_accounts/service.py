@@ -64,6 +64,13 @@ async def update_account(
     update_data: dict = {}
     raw = payload.model_dump(exclude_unset=True)
 
+    # Check if trying to change email to one that already exists
+    if "email" in raw and raw["email"]:
+        new_email = str(raw["email"])
+        existing = await col.find_one({"employeeId": employee_id, "email": new_email, "_id": {"$ne": doc["_id"]}})
+        if existing:
+            raise ConflictException(f"An account for {new_email} already exists for this employee")
+
     if "appPassword" in raw and raw["appPassword"]:
         update_data["encryptedPassword"] = encrypt_password(raw.pop("appPassword"))
     else:
@@ -139,6 +146,26 @@ def _smtp_login_check(host: str, port: int, email: str, password: str, use_tls: 
         server.login(email, password)
     finally:
         server.quit()
+
+
+async def test_credentials_directly(payload: EmailAccountCreate) -> dict:
+    """
+    Test SMTP credentials directly from the payload (for form validation).
+    Does NOT require authentication or database access.
+    Used when user clicks 'Test SMTP' before saving changes.
+    """
+    try:
+        _smtp_login_check(
+            host=payload.smtpHost,
+            port=payload.smtpPort,
+            email=payload.email,
+            password=payload.appPassword,
+            use_tls=payload.useTls,
+        )
+        return {"success": True, "message": "SMTP connection successful!"}
+    except Exception as exc:
+        error_msg = str(exc)[:300]
+        return {"success": False, "message": error_msg}
 
 
 # ---------------------------------------------------------------------------

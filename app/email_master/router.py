@@ -24,8 +24,14 @@ async def upload_emails(
 
     file_bytes = await file.read()
     
-    # Use user_id as the name (since CurrentUser doesn't have email or name)
-    uploaded_by_name = current_user.user_id
+    # Get employee name from database
+    from app.employees.service import get_employee_by_user_id
+    try:
+        employee = await get_employee_by_user_id(current_user.user_id)
+        uploaded_by_name = employee.get("name") or current_user.user_id
+    except:
+        # Fallback to user_id if employee not found
+        uploaded_by_name = current_user.user_id
     
     result = await service.upload_file(
         uploaded_by_id=current_user.user_id,

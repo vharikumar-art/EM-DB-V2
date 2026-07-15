@@ -17,6 +17,7 @@ class EmailAccountCreate(BaseModel):
 
 
 class EmailAccountUpdate(BaseModel):
+    email: EmailStr | None = Field(default=None)
     appPassword: str | None = Field(default=None, min_length=1)
     displayName: str | None = Field(default=None, max_length=100)
     smtpHost: str | None = None

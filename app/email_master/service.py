@@ -129,6 +129,7 @@ async def upload_file(
     }
 
 
+
 async def list_emails(
     params: PaginationParams,
     country: str | None = None,
@@ -201,14 +202,19 @@ async def get_dropdown_options() -> dict:
     industries = await master.distinct("industry", {"isDuplicate": False})
     companies = await master.distinct("company", {"isDuplicate": False})
     
-    # Get all uploaders for the uploadedBy filter
-    uploaders_raw = await master.distinct("uploadedBy", {})
-    uploaders_names = await master.distinct("uploadedByName", {})
+    # Get all uploaders with their names
+    uploaders_data = {}
+    cursor = master.find({}, {"uploadedBy": 1, "uploadedByName": 1})
+    async for doc in cursor:
+        uid = doc.get("uploadedBy")
+        uname = doc.get("uploadedByName") or uid
+        if uid and uid not in uploaders_data:
+            uploaders_data[uid] = uname
 
     def clean(lst: list) -> list:
         return sorted([x for x in lst if x])
 
-    uploaders = list(zip(uploaders_raw, uploaders_names)) if uploaders_raw and uploaders_names else []
+    uploaders = [{"id": uid, "name": uname} for uid, uname in uploaders_data.items()] if uploaders_data else []
 
     return {
         "domains": clean(domains),
@@ -216,7 +222,7 @@ async def get_dropdown_options() -> dict:
         "states": clean(states),
         "industries": clean(industries),
         "companies": clean(companies),
-        "uploaders": [{"id": uid, "name": uname} for uid, uname in uploaders],
+        "uploaders": uploaders,
     }
 
 
