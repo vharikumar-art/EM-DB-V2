@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -30,9 +31,13 @@ from app.users.router import router as users_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Startup
     await connect_to_mongo()
     await create_indexes()
+    
     yield
+    
+    # Shutdown
     await close_mongo_connection()
 
 
@@ -77,6 +82,10 @@ app.include_router(reports_router)
 app.include_router(notifications_router)
 app.include_router(options_router)
 
+
+# ────────────────────────────────────────────────────────────────────────────
+# DEBUG ENDPOINTS - Remove in production
+# ────────────────────────────────────────────────────────────────────────────
 
 @app.get("/health", tags=["Health"])
 async def health_check():

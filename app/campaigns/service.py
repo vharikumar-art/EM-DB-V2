@@ -121,6 +121,113 @@ async def create_campaign(
     return serialize_doc(created)
 
 
+async def create_scheduled_campaign(
+    payload,  # CampaignScheduleRequest
+    employee_id: str,
+    is_admin: bool,
+) -> dict:
+    """
+    Create a campaign scheduled for future execution via Linux Cron.
+    
+    The campaign will not execute immediately. It will be queued and executed
+    when the scheduled_for time arrives.
+    """
+    from app.campaigns.schema import CampaignScheduleRequest
+    
+    profile = await get_profile(payload.profileId, employee_id, is_admin)
+
+    if not profile.get("isActive", False):
+        raise BadRequestException(
+            "Profile is not active. Activate it before scheduling a campaign."
+        )
+
+    # Count how many PENDING rows exist in profile_emails for this profile
+    profile_emails_col = get_collection("profile_emails")
+    pending_count = await profile_emails_col.count_documents(
+        {"profileId": payload.profileId, "sendStatus": SendStatus.PENDING.value}
+    )
+
+    if pending_count == 0:
+        raise BadRequestException(
+            "No pending emails in this profile's list. "
+            "Generate the list first or retry failed emails."
+        )
+
+    # Block if there's already a pending/scheduled campaign for this profile
+    campaigns = get_collection(COLLECTION)
+    conflicting_campaign = await campaigns.find_one(
+        {
+            "profileId": payload.profileId, 
+            "status": {"$in": [
+                CampaignStatus.PENDING.value,
+                CampaignStatus.RUNNING.value,
+                CampaignStatus.PAUSED.value,
+                CampaignStatus.SCHEDULED.value,
+                CampaignStatus.PROCESSING.value,
+            ]}
+        }
+    )
+    if conflicting_campaign:
+        raise BadRequestException(
+            f"Cannot schedule campaign. This profile has an existing campaign: '{conflicting_campaign.get('campaignName')}'\n"
+            f"Status: {conflicting_campaign.get('status')}\n"
+            f"Please wait for it to complete or delete it first."
+        )
+
+    # Use dailyLimit from request, default to profile's dailyLimit if not provided
+    daily_limit = payload.dailyLimit or profile.get("sendingOptions", {}).get("dailyLimit", 100)
+
+    campaign_name = (
+        payload.campaignName.strip()
+        or f"{profile['profileName']} — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
+    )
+
+    # Build campaign with scheduled_for parameter
+    doc = build_campaign_document(
+        profile_id=payload.profileId,
+        employee_id=profile["employeeId"],
+        campaign_name=campaign_name,
+        total_emails=pending_count,
+        scheduled_for=payload.scheduledFor,  # This sets status to SCHEDULED
+    )
+    
+    # Snapshot relevant profile fields for audit trail
+    doc["profileSnapshot"] = {
+        "profileName": profile.get("profileName"),
+        "gmailAccount": profile.get("gmailAccount"),
+        "subject": profile.get("subject"),
+        "sendingOptions": profile.get("sendingOptions"),
+        "promptSettings": profile.get("promptSettings"),
+    }
+    
+    # Store dailyLimit and retry settings
+    doc["dailyLimit"] = daily_limit
+    doc["maxRetries"] = payload.maxRetries
+
+    result = await campaigns.insert_one(doc)
+    created = await campaigns.find_one({"_id": result.inserted_id})
+
+    # Tag all PENDING profile_emails with this campaign_id
+    await profile_emails_col.update_many(
+        {"profileId": payload.profileId, "sendStatus": SendStatus.PENDING.value},
+        {
+            "$set": {
+                "campaignId": str(result.inserted_id),
+                "updatedAt": datetime.now(timezone.utc),
+            }
+        },
+    )
+
+    scheduled_time_str = payload.scheduledFor.strftime('%Y-%m-%d %H:%M:%S UTC')
+    await create_notification(
+        employee_id=profile["employeeId"],
+        message=f"Campaign '{campaign_name}' scheduled for {scheduled_time_str} with {pending_count} pending email(s). Daily limit: {daily_limit}",
+        type=NotificationType.INFO,
+    )
+
+    return serialize_doc(created)
+
+
 # ---------------------------------------------------------------------------
 # Status transitions
 # ---------------------------------------------------------------------------
@@ -410,3 +517,4 @@ async def delete_campaign(
         message=f"Campaign '{doc['campaignName']}' has been deleted.",
         type=NotificationType.INFO,
     )
+

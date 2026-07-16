@@ -2,7 +2,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Query
 
 from app.campaigns import service
 from app.campaigns.model import CampaignStatus
-from app.campaigns.schema import CampaignStartRequest
+from app.campaigns.schema import CampaignStartRequest, CampaignScheduleRequest, SchedulerProcessResponse, SchedulerStatusResponse
+from app.campaigns.scheduler import process_scheduled_campaigns, get_scheduler_status
 from app.core.dependencies import CurrentUser, get_current_user, resolve_employee_context, require_admin
 from app.core.exceptions import BadRequestException
 from app.schemas.common import ApiResponse, PaginationParams
@@ -106,17 +107,70 @@ async def delete_campaign(
     return ApiResponse(message="Campaign deleted")
 
 
-@router.patch("/{campaign_id}/daily-limit", response_model=ApiResponse)
-async def update_campaign_daily_limit(
-    campaign_id: str,
-    dailyLimit: int = Query(..., ge=1, le=10000),
+# ---------------------------------------------------------------------------
+# Scheduling
+# ---------------------------------------------------------------------------
+
+@router.post("/schedule", response_model=ApiResponse)
+async def schedule_campaign(
+    payload: CampaignScheduleRequest,
     employeeId: str | None = Query(default=None),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    """Update campaign's daily limit. Can be updated anytime. Admins can specify employeeId."""
+    """
+    Create a campaign scheduled for future execution.
+    
+    The campaign will not execute immediately. It will be queued and executed
+    by the Linux Cron scheduler when the scheduled_for time arrives.
+    """
     employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
-    campaign = await service.update_daily_limit(campaign_id, dailyLimit, employee_id, is_admin)
-    return ApiResponse(message="Daily limit updated", data=campaign)
+    campaign = await service.create_scheduled_campaign(payload, employee_id, is_admin)
+    return ApiResponse(message="Campaign scheduled successfully", data=campaign)
+
+
+@router.post("/process-scheduled", response_model=ApiResponse)
+async def process_scheduled_campaigns_endpoint(
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """
+    Process all campaigns due for execution.
+    
+    Called by Linux Cron every minute. This endpoint:
+    1. Finds all campaigns where status='scheduled' and scheduledFor <= now
+    2. Atomically transitions each to 'processing' status
+    3. Executes each campaign using existing run_campaign() logic
+    4. Updates status to 'completed' or 'scheduled' (for retry)
+    
+    Returns execution summary with counts and errors.
+    
+    NOTE: This endpoint must be called by an automated process (Linux Cron).
+    Manual calls are allowed for testing/debugging.
+    """
+    # Only admins should call this endpoint in production
+    # For now, allow any authenticated user for testing
+    result = await process_scheduled_campaigns()
+    return ApiResponse(
+        message="Scheduled campaigns processed",
+        data=result
+    )
+
+
+@router.get("/scheduler/status", response_model=ApiResponse)
+async def get_scheduler_status_endpoint(
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """
+    Get current scheduler health and status.
+    
+    Returns:
+    - campaigns_awaiting_execution: Due campaigns not yet executed
+    - campaigns_currently_processing: Campaigns being processed
+    - campaigns_completed_24h: Completed campaigns (last 24 hours)
+    - campaigns_failed_24h: Failed campaigns (last 24 hours)
+    - health: Scheduler health status
+    """
+    status = await get_scheduler_status()
+    return ApiResponse(message="Scheduler status", data=status)
 
 
 # ---------------------------------------------------------------------------
