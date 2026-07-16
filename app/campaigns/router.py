@@ -128,10 +128,12 @@ async def schedule_campaign(
     return ApiResponse(message="Campaign scheduled successfully", data=campaign)
 
 
-@router.post("/process-scheduled", response_model=ApiResponse)
-async def process_scheduled_campaigns_endpoint(
-    current_user: CurrentUser = Depends(get_current_user),
-):
+# @router.post("/process-scheduled", response_model=ApiResponse)
+# async def process_scheduled_campaigns_endpoint(
+#     current_user: CurrentUser = Depends(get_current_user),
+# ):
+@router.post("/process-scheduled",response_model=ApiResponse)
+async def process_scheduled_campaigns_endpoint():
     """
     Process all campaigns due for execution.
     
