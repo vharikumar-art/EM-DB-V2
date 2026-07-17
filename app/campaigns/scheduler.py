@@ -65,12 +65,18 @@ async def find_due_campaigns() -> list[dict]:
     campaigns = get_collection(COLLECTION)
     now = datetime.now(timezone.utc)
     
+    print(f"[SCHEDULER DEBUG] find_due_campaigns - current time: {now.isoformat()}")
+    
     query = {
         "status": CampaignStatus.SCHEDULED.value,
         "scheduledFor": {"$lte": now}
     }
     
     due_campaigns = await campaigns.find(query).to_list(length=None)
+    print(f"[SCHEDULER DEBUG] Found {len(due_campaigns)} due campaigns")
+    for c in due_campaigns:
+        print(f"[SCHEDULER DEBUG] Campaign: {c.get('campaignName')} - scheduled for {c.get('scheduledFor')}")
+    
     return due_campaigns
 
 

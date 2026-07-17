@@ -150,6 +150,9 @@ async def process_scheduled_campaigns_endpoint():
     """
     # Only admins should call this endpoint in production
     # For now, allow any authenticated user for testing
+    from datetime import datetime, timezone
+    print(f"[SCHEDULER DEBUG] Current server time: {datetime.now(timezone.utc).isoformat()}")
+    
     result = await process_scheduled_campaigns()
     return ApiResponse(
         message="Scheduled campaigns processed",
