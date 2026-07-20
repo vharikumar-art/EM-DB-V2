@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+from datetime import datetime, timezone, timedelta
 from app.campaigns.model import CampaignStatus, build_campaign_document
 from app.campaigns.schema import CampaignStartRequest
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
@@ -182,13 +183,33 @@ async def create_scheduled_campaign(
         or f"{profile['profileName']} — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
     )
 
+    # Convert local time to UTC
+    # Parse the local time string
+    from datetime import datetime as dt
+    local_dt = dt.fromisoformat(payload.scheduledForLocal)
+    
+    # Convert to UTC
+    # Browser's getTimezoneOffset() returns negative values for timezones ahead of UTC
+    # For IST (UTC+5:30): offset = -330 minutes
+    # To get UTC from local: UTC_time = local_time + offset_in_ms
+    # Example: 10:06 IST with offset -330 min = 10:06 + (-330 min) = 10:06 - 5:30 = 04:36 UTC
+    utc_dt = local_dt + timedelta(minutes=payload.timezoneOffsetMinutes)
+    utc_dt = utc_dt.replace(tzinfo=timezone.utc)
+    
+    print(f"[SCHEDULER] Local time: {payload.scheduledForLocal}, offset: {payload.timezoneOffsetMinutes} min, UTC: {utc_dt.isoformat()}")
+    
+    # Validate it's in the future
+    now = datetime.now(timezone.utc)
+    if utc_dt <= now:
+        raise BadRequestException("Scheduled time must be in the future")
+
     # Build campaign with scheduled_for parameter
     doc = build_campaign_document(
         profile_id=payload.profileId,
         employee_id=profile["employeeId"],
         campaign_name=campaign_name,
         total_emails=pending_count,
-        scheduled_for=payload.scheduledFor,  # This sets status to SCHEDULED
+        scheduled_for=utc_dt,  # This sets status to SCHEDULED
     )
     
     # Snapshot relevant profile fields for audit trail
@@ -203,6 +224,7 @@ async def create_scheduled_campaign(
     # Store dailyLimit and retry settings
     doc["dailyLimit"] = daily_limit
     doc["maxRetries"] = payload.maxRetries
+    doc["scheduledForDisplay"] = payload.scheduledForLocal  # Store the display time
 
     result = await campaigns.insert_one(doc)
     created = await campaigns.find_one({"_id": result.inserted_id})

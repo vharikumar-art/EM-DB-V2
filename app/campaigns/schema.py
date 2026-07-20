@@ -15,19 +15,10 @@ class CampaignScheduleRequest(BaseModel):
     """Request to create a scheduled campaign"""
     profileId: str
     campaignName: str = Field(default="", max_length=200)
-    scheduledFor: datetime = Field(description="UTC datetime when campaign should run")
+    scheduledForLocal: str = Field(description="Local datetime string (YYYY-MM-DDTHH:MM:SS)")
+    timezoneOffsetMinutes: int = Field(description="Browser timezone offset in minutes (e.g., -330 for IST UTC+5:30)")
     dailyLimit: int | None = Field(default=None, ge=1, le=10000, description="Daily email limit")
     maxRetries: int = Field(default=3, ge=0, le=10, description="Maximum retry attempts if campaign fails")
-    
-    @field_validator('scheduledFor')
-    @classmethod
-    def validate_scheduled_for(cls, v: datetime) -> datetime:
-        """Ensure scheduled_for is in the future"""
-        from datetime import timezone
-        now = datetime.now(timezone.utc)
-        if v <= now:
-            raise ValueError("scheduled_for must be in the future")
-        return v
 
 
 class SchedulerProcessResponse(BaseModel):
@@ -73,6 +64,7 @@ class CampaignOut(BaseModel):
     updatedAt: str | None = None
     # Scheduling fields
     scheduledFor: str | None = None
+    scheduledForDisplay: str | None = None
     processingStartedAt: str | None = None
     executionDuration: float | None = None
     errorMessage: str | None = None
