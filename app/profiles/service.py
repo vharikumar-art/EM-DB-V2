@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 import logging
 
+from fastapi import UploadFile
 from app.core.exceptions import (
     BadRequestException,
     ConflictException,
@@ -67,6 +68,7 @@ async def create_profile(employee_id: str, payload: ProfileCreate) -> dict:
         gmail_account=str(payload.gmailAccount),
         signature=payload.signature,
         templates=[t.model_dump() for t in payload.templates],
+        attachments=[a.model_dump() for a in payload.attachments] if payload.attachments else [],
         filters=payload.filters.model_dump(),
         filter_limit=payload.filterLimit,
         sending_options=payload.sendingOptions.model_dump(),
@@ -437,3 +439,120 @@ def _delete_file(filepath: str) -> None:
             os.remove(full_path)
     except Exception as e:
         logger.warning(f"Failed to delete file {filepath}: {e}")
+
+
+async def upload_profile_attachment(
+    profile_id: str, file: UploadFile, employee_id: str, is_admin: bool
+) -> dict:
+    """Upload an attachment file for the profile (shared across all templates)"""
+    import os
+    import uuid
+    
+    profiles = get_collection(COLLECTION)
+    existing = await profiles.find_one({"_id": to_object_id(profile_id)})
+    if not existing:
+        raise NotFoundException("Profile not found")
+    await _assert_owns_profile_or_admin(
+        serialize_doc(existing), employee_id, is_admin
+    )
+    
+    # Validate file size (max 10MB)
+    max_size = 10 * 1024 * 1024  # 10MB
+    file_content = await file.read()
+    if len(file_content) > max_size:
+        raise BadRequestException("File too large. Maximum size is 10MB")
+    
+    # Validate file type (allow common attachment types)
+    allowed_types = {
+        "application/pdf",
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "image/jpeg",
+        "image/png",
+        "image/gif",
+        "text/plain",
+        "text/csv",
+    }
+    
+    if file.content_type not in allowed_types:
+        raise BadRequestException("File type not allowed. Allowed: PDF, DOC, XLS, images, etc.")
+    
+    # Generate unique filename
+    file_id = str(uuid.uuid4())[:8]
+    file_ext = os.path.splitext(file.filename)[1]
+    safe_filename = f"{file_id}_{file.filename}"
+    
+    # Save to local filesystem
+    upload_dir = os.path.join(os.path.dirname(__file__), "..", "..", "uploads", "profiles")
+    os.makedirs(upload_dir, exist_ok=True)
+    
+    filepath = os.path.join(upload_dir, safe_filename)
+    with open(filepath, "wb") as f:
+        f.write(file_content)
+    
+    # Only one attachment per profile - replace if exists
+    relative_filepath = f"uploads/profiles/{safe_filename}"
+    attachment = {
+        "id": file_id,
+        "filename": file.filename,
+        "filepath": relative_filepath,
+        "size": len(file_content),
+    }
+    
+    result = await profiles.find_one_and_update(
+        {"_id": to_object_id(profile_id)},
+        {
+            "$set": {
+                "attachments": [attachment],  # Replace all attachments with this one
+                "updatedAt": datetime.now(timezone.utc)
+            }
+        },
+        return_document=True,
+    )
+    
+    return serialize_doc(result)
+
+
+async def delete_profile_attachment(
+    profile_id: str, attachment_id: str, employee_id: str, is_admin: bool
+) -> dict:
+    """Delete an attachment from a profile"""
+    profiles = get_collection(COLLECTION)
+    existing = await profiles.find_one({"_id": to_object_id(profile_id)})
+    if not existing:
+        raise NotFoundException("Profile not found")
+    await _assert_owns_profile_or_admin(
+        serialize_doc(existing), employee_id, is_admin
+    )
+    
+    # Find attachment to delete
+    attachments = existing.get("attachments", [])
+    attachment_idx = None
+    filepath_to_delete = None
+    
+    for idx, att in enumerate(attachments):
+        if att.get("id") == attachment_id:
+            attachment_idx = idx
+            filepath_to_delete = att.get("filepath")
+            break
+    
+    if attachment_idx is None:
+        raise NotFoundException(f"Attachment {attachment_id} not found")
+    
+    # Delete from filesystem
+    if filepath_to_delete:
+        _delete_file(filepath_to_delete)
+    
+    # Remove from profile
+    result = await profiles.find_one_and_update(
+        {"_id": to_object_id(profile_id)},
+        {
+            "$pull": {"attachments": {"id": attachment_id}},
+            "$set": {"updatedAt": datetime.now(timezone.utc)}
+        },
+        return_document=True,
+    )
+    
+    return serialize_doc(result)

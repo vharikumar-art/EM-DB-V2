@@ -163,3 +163,29 @@ async def delete_attachment(
     result = await service.delete_attachment(profile_id, template_id, attachment_id, employee_id, is_admin)
     return ApiResponse(message="Attachment deleted", data=result)
 
+
+@router.post("/{profile_id}/attachments/upload", response_model=ApiResponse)
+async def upload_profile_attachment(
+    profile_id: str,
+    file: UploadFile = File(...),
+    employeeId: str | None = Query(default=None),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Upload an attachment file for the profile (shared across all templates)"""
+    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    result = await service.upload_profile_attachment(profile_id, file, employee_id, is_admin)
+    return ApiResponse(message="Attachment uploaded", data=result)
+
+
+@router.delete("/{profile_id}/attachments/{attachment_id}", response_model=ApiResponse)
+async def delete_profile_attachment(
+    profile_id: str,
+    attachment_id: str,
+    employeeId: str | None = Query(default=None),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Delete an attachment from a profile"""
+    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    result = await service.delete_profile_attachment(profile_id, attachment_id, employee_id, is_admin)
+    return ApiResponse(message="Attachment deleted", data=result)
+

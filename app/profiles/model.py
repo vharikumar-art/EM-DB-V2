@@ -14,6 +14,7 @@ def build_profile_document(
     sending_options: dict[str, Any],
     prompt_settings: dict[str, Any],
     templates: list[dict[str, str]],
+    attachments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     
@@ -22,6 +23,7 @@ def build_profile_document(
         "profileName": profile_name,
         "gmailAccount": gmail_account,
         "templates": templates,
+        "attachments": attachments or [],
         "signature": signature,
         "isActive": True,
         "filters": filters,

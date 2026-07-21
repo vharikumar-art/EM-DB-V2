@@ -259,16 +259,21 @@ async def _run(campaign_id: str) -> None:
             # ----------------------------------------------------------
             # Send
             # ----------------------------------------------------------
+            attachments_to_send = [{
+                "filename": att.get("filename"),
+                "filepath": att.get("filepath")
+            } for att in profile.get("attachments", [])]
+            
+            if attachments_to_send:
+                logger.info(f"Campaign {campaign_id}: Sending with {len(attachments_to_send)} attachment(s): {[a['filename'] for a in attachments_to_send]}")
+            
             result = await send_email(
                 credentials=credentials,
                 to=payload["to"],
                 subject=payload["subject"],
                 body_plain=payload["body"],
                 body_html=payload["html"],
-                attachments=[{
-                    "filename": att.get("filename"),
-                    "filepath": att.get("filepath")
-                } for att in selected_template.get("attachments", [])]
+                attachments=attachments_to_send
             )
 
             if result.success:

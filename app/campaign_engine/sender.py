@@ -77,9 +77,13 @@ def _attach_file(msg: MIMEMultipart, filepath: str, filename: str) -> None:
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
         full_path = os.path.join(base_dir, filepath)
         
+        logger.info(f"Attempting to attach file: {filename} from path: {full_path}")
+        
         if not os.path.exists(full_path):
             logger.warning(f"Attachment file not found: {full_path}")
             return
+        
+        logger.info(f"File found, size: {os.path.getsize(full_path)} bytes")
         
         with open(full_path, "rb") as attachment:
             part = MIMEBase("application", "octet-stream")
@@ -87,6 +91,7 @@ def _attach_file(msg: MIMEMultipart, filepath: str, filename: str) -> None:
             encoders.encode_base64(part)
             part.add_header("Content-Disposition", f'attachment; filename= {filename}')
             msg.attach(part)
+            logger.info(f"Successfully attached file: {filename}")
     except Exception as e:
         logger.warning(f"Failed to attach file {filepath}: {e}")
 
