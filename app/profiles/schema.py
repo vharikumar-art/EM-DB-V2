@@ -27,12 +27,27 @@ class PromptSettings(BaseModel):
     customInstruction: str = ""
 
 
+class Attachment(BaseModel):
+    """File attachment for templates"""
+    filename: str = Field(description="Original filename (e.g., document.pdf)")
+    filepath: str = Field(description="Server path to file (e.g., uploads/templates/abc123_document.pdf)")
+    size: int = Field(description="File size in bytes")
+
+
+class Template(BaseModel):
+    """Template model for A/B testing"""
+    name: str = Field(default="", max_length=100, description="Template name (e.g., 'Aggressive', 'Friendly')")
+    subject: str = Field(default="", max_length=500, description="Email subject line")
+    body: str = Field(default="", description="Email body content")
+    weight: int = Field(default=1, ge=1, le=100, description="Selection weight (higher = more likely)")
+    attachments: list[Attachment] = Field(default_factory=list, description="File attachments for this template")
+
+
 class ProfileCreate(BaseModel):
     profileName: str = Field(min_length=1, max_length=100)
     gmailAccount: EmailStr
-    subject: str = Field(default="", max_length=500, description="Email subject line (supports [name], [company] placeholders)")
-    body: str = Field(default="", description="Email body HTML/text (supports [name], [company] placeholders)")
     signature: str = Field(default="", description="HTML signature appended to every email")
+    templates: list[Template] = Field(min_length=1, max_length=3, description="1-3 A/B testing templates (required)")
     filters: ProfileFilters = Field(default_factory=ProfileFilters)
     filterLimit: int = Field(default=0, ge=0, description="Maximum emails to fetch from filtered results (0 = no limit)")
     sendingOptions: ProfileSendingOptions = Field(default_factory=ProfileSendingOptions)
@@ -42,9 +57,8 @@ class ProfileCreate(BaseModel):
 class ProfileUpdate(BaseModel):
     profileName: str | None = None
     gmailAccount: EmailStr | None = None
-    subject: str | None = None
-    body: str | None = None
     signature: str | None = None
+    templates: list[Template] | None = None
     filters: ProfileFilters | None = None
     filterLimit: int | None = None
     sendingOptions: ProfileSendingOptions | None = None
@@ -56,9 +70,8 @@ class ProfileOut(BaseModel):
     employeeId: str
     profileName: str
     gmailAccount: str
-    subject: str
-    body: str
     signature: str
+    templates: list[Template]
     isActive: bool
     filters: ProfileFilters
     filterLimit: int
@@ -66,3 +79,24 @@ class ProfileOut(BaseModel):
     promptSettings: PromptSettings
     createdAt: str | None = None
     updatedAt: str | None = None
+
+
+class TemplateAdd(BaseModel):
+    """Add a new template to a profile"""
+    name: str = Field(min_length=1, max_length=100, description="Template name (e.g., 'Aggressive', 'Friendly')")
+    subject: str = Field(min_length=1, max_length=500, description="Email subject line")
+    body: str = Field(min_length=1, description="Email body content")
+    weight: int = Field(default=1, ge=1, le=100, description="Selection weight (higher = more likely)")
+
+
+class TemplateUpdate(BaseModel):
+    """Update an existing template"""
+    name: str | None = None
+    subject: str | None = None
+    body: str | None = None
+    weight: int | None = Field(default=None, ge=1, le=100)
+
+
+class TemplateDelete(BaseModel):
+    """Delete a template"""
+    templateId: str = Field(description="ID of template to delete")

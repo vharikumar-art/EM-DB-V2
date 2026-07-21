@@ -240,7 +240,7 @@ async def create_scheduled_campaign(
         },
     )
 
-    scheduled_time_str = payload.scheduledFor.strftime('%Y-%m-%d %H:%M:%S UTC')
+    scheduled_time_str = payload.scheduledForLocal
     await create_notification(
         employee_id=profile["employeeId"],
         message=f"Campaign '{campaign_name}' scheduled for {scheduled_time_str} with {pending_count} pending email(s). Daily limit: {daily_limit}",

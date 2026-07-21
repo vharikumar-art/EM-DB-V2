@@ -14,6 +14,9 @@ import uuid
 from dataclasses import dataclass, field
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+import os
 
 logger = logging.getLogger("campaign_engine.sender")
 
@@ -43,6 +46,7 @@ def _build_mime_message(
     body_plain: str,
     body_html: str,
     message_id: str,
+    attachments: list[dict] | None = None,
 ) -> MIMEMultipart:
     msg = MIMEMultipart("alternative")
     msg["From"] = (
@@ -57,7 +61,34 @@ def _build_mime_message(
     # Attach both plain-text and HTML parts; mail clients prefer HTML
     msg.attach(MIMEText(body_plain, "plain", "utf-8"))
     msg.attach(MIMEText(body_html, "html", "utf-8"))
+    
+    # Attach files if any
+    if attachments:
+        for attachment in attachments:
+            _attach_file(msg, attachment.get("filepath"), attachment.get("filename"))
+    
     return msg
+
+
+def _attach_file(msg: MIMEMultipart, filepath: str, filename: str) -> None:
+    """Attach a file to the email message"""
+    try:
+        # Construct full path
+        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        full_path = os.path.join(base_dir, filepath)
+        
+        if not os.path.exists(full_path):
+            logger.warning(f"Attachment file not found: {full_path}")
+            return
+        
+        with open(full_path, "rb") as attachment:
+            part = MIMEBase("application", "octet-stream")
+            part.set_payload(attachment.read())
+            encoders.encode_base64(part)
+            part.add_header("Content-Disposition", f'attachment; filename= {filename}')
+            msg.attach(part)
+    except Exception as e:
+        logger.warning(f"Failed to attach file {filepath}: {e}")
 
 
 def _send_sync(
@@ -66,13 +97,14 @@ def _send_sync(
     subject: str,
     body_plain: str,
     body_html: str,
+    attachments: list[dict] | None = None,
 ) -> SendResult:
     """
     Synchronous SMTP send.  Called from a thread pool by the async wrapper
     so it never blocks the event loop.
     """
     message_id = f"<{uuid.uuid4().hex}@{credentials.email.split('@')[1]}>"
-    msg = _build_mime_message(credentials, to, subject, body_plain, body_html, message_id)
+    msg = _build_mime_message(credentials, to, subject, body_plain, body_html, message_id, attachments)
 
     try:
         if credentials.use_tls:
@@ -122,6 +154,7 @@ async def send_email(
     subject: str,
     body_plain: str,
     body_html: str,
+    attachments: list[dict] | None = None,
 ) -> SendResult:
     """
     Async wrapper — runs the blocking SMTP call in a thread pool
@@ -136,5 +169,6 @@ async def send_email(
         subject,
         body_plain,
         body_html,
+        attachments,
     )
     return result

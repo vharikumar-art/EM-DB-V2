@@ -49,6 +49,32 @@ BATCH_SIZE = 50
 MAX_AUTH_FAILURES = 3
 
 
+def select_template_weighted(templates: list[dict]) -> dict:
+    """
+    Select a template using weighted random selection.
+    
+    Each template can have a 'weight' field (default 1).
+    Higher weight = higher chance of selection.
+    
+    Example:
+      [
+        {"id": "t1", "weight": 2, "subject": "...", "body": "..."},  # 50% chance (2/4)
+        {"id": "t2", "weight": 1, "subject": "...", "body": "..."},  # 25% chance (1/4)
+        {"id": "t3", "weight": 1, "subject": "...", "body": "..."},  # 25% chance (1/4)
+      ]
+    """
+    if not templates:
+        return {"id": "default", "subject": "", "body": ""}
+    
+    if len(templates) == 1:
+        return templates[0]
+    
+    # Use random.choices with weights
+    weights = [t.get("weight", 1) for t in templates]
+    selected = random.choices(templates, weights=weights, k=1)[0]
+    return selected
+
+
 async def run_campaign(campaign_id: str) -> None:
     """
     Entry point called by the campaigns router via BackgroundTasks.
@@ -187,19 +213,47 @@ async def _run(campaign_id: str) -> None:
             await pe_service.mark_sending(pe_id)
 
             # ----------------------------------------------------------
+            # Select random template (A/B testing) - using weighted selection
+            # ----------------------------------------------------------
+            templates = profile.get("templates", [])
+            
+            if not templates:
+                # Templates are now required - this should never happen
+                logger.error(f"Campaign {campaign_id}: Profile has no templates! This should not happen.")
+                await campaign_service.abort_campaign(campaign_id, "Profile has no templates")
+                return
+            
+            # Use weighted random selection from templates
+            selected_template = select_template_weighted(templates)
+            logger.debug(f"Selected template '{selected_template.get('name', 'unnamed')}' (ID: {selected_template.get('id', 'unknown')}) for campaign {campaign_id}")
+            
+            # Extract subject and body from template (required fields)
+            subject_text = selected_template.get("subject", "")
+            body_text = selected_template.get("body", "")
+            
+            # Validate template has content
+            if not subject_text or not body_text:
+                logger.error(f"Campaign {campaign_id}: Template missing subject or body. Subject: '{subject_text}' Body: '{body_text[:50] if body_text else 'empty'}...'")
+                await campaign_service.abort_campaign(campaign_id, "Template missing subject or body")
+                return
+            
+            # ----------------------------------------------------------
             # Personalize with LangChain (placeholder replacement only)
             # ----------------------------------------------------------
             try:
-                payload = build_email_payload(profile=profile, lead=pe)
+                payload = build_email_payload(
+                    profile={**profile, "subject": subject_text, "body": body_text},
+                    lead=pe
+                )
             except Exception as exc:
                 logger.warning(
                     "Personalization failed for %s: %s — using raw template", lead_email, exc
                 )
                 payload = {
                     "to": lead_email,
-                    "subject": profile.get("subject", "(no subject)"),
-                    "body": profile.get("body", ""),
-                    "html": profile.get("body", "").replace("\n", "<br>"),
+                    "subject": subject_text,
+                    "body": body_text,
+                    "html": body_text.replace("\n", "<br>"),
                 }
 
             # ----------------------------------------------------------
@@ -211,10 +265,14 @@ async def _run(campaign_id: str) -> None:
                 subject=payload["subject"],
                 body_plain=payload["body"],
                 body_html=payload["html"],
+                attachments=[{
+                    "filename": att.get("filename"),
+                    "filepath": att.get("filepath")
+                } for att in selected_template.get("attachments", [])]
             )
 
             if result.success:
-                await pe_service.mark_sent(pe_id, result.thread_id, result.message_id)
+                await pe_service.mark_sent(pe_id, result.thread_id, result.message_id, template_id=selected_template.get("id"))
                 await campaign_service.increment_counters(campaign_id, sent=1)
                 await record_send(account_id)
                 total_sent += 1

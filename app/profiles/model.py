@@ -8,21 +8,20 @@ def build_profile_document(
     employee_id: str,
     profile_name: str,
     gmail_account: str,
-    subject: str,
-    body: str,
     signature: str,
     filters: dict[str, Any],
     filter_limit: int,
     sending_options: dict[str, Any],
     prompt_settings: dict[str, Any],
+    templates: list[dict[str, str]],
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
+    
     return {
         "employeeId": employee_id,
         "profileName": profile_name,
         "gmailAccount": gmail_account,
-        "subject": subject,
-        "body": body,
+        "templates": templates,
         "signature": signature,
         "isActive": True,
         "filters": filters,

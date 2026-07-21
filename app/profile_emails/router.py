@@ -1,7 +1,6 @@
 from fastapi import APIRouter, Depends, Query, status
 
-from app.core.dependencies import CurrentUser, get_current_user
-from app.employees.service import get_employee_by_user_id
+from app.core.dependencies import CurrentUser, get_current_user, resolve_employee_context
 from app.profile_emails import service
 from app.profile_emails.schema import (
     GenerateListRequest,
@@ -13,15 +12,6 @@ from app.utils.pagination import pagination_params
 router = APIRouter(prefix="/profile-emails", tags=["Profile Emails"])
 
 
-async def _resolve_employee(current_user: CurrentUser) -> tuple[str, bool]:
-    """Returns (employee_id, is_admin)."""
-    is_admin = current_user.role == "admin"
-    if is_admin:
-        return "", True
-    employee = await get_employee_by_user_id(current_user.user_id)
-    return employee["id"], False
-
-
 # ---------------------------------------------------------------------------
 # Generate list
 # ---------------------------------------------------------------------------
@@ -30,13 +20,14 @@ async def _resolve_employee(current_user: CurrentUser) -> tuple[str, bool]:
 async def generate_list(
     profile_id: str,
     payload: GenerateListRequest = None,
+    employeeId: str | None = Query(default=None),
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """
     Apply profile filters against email_master and populate the working list.
     Existing PENDING rows are replaced; SENT / FAILED rows are preserved.
     """
-    employee_id, is_admin = await _resolve_employee(current_user)
+    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
     payload = payload or GenerateListRequest()
     result = await service.generate_list(
         profile_id=profile_id,
@@ -55,9 +46,10 @@ async def generate_list(
 @router.get("/{profile_id}/stats", response_model=ApiResponse)
 async def get_stats(
     profile_id: str,
+    employeeId: str | None = Query(default=None),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    employee_id, is_admin = await _resolve_employee(current_user)
+    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
     stats = await service.get_stats(profile_id, employee_id, is_admin)
     return ApiResponse(message="Stats fetched", data=stats)
 
@@ -69,10 +61,11 @@ async def list_profile_emails(
     search: str | None = Query(default=None),
     country: str | None = Query(default=None),
     domain: str | None = Query(default=None),
+    employeeId: str | None = Query(default=None),
     params: PaginationParams = Depends(pagination_params),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    employee_id, is_admin = await _resolve_employee(current_user)
+    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
     result = await service.list_profile_emails(
         profile_id=profile_id,
         employee_id=employee_id,
@@ -93,9 +86,10 @@ async def list_profile_emails(
 @router.get("/record/{profile_email_id}", response_model=ApiResponse)
 async def get_profile_email(
     profile_email_id: str,
+    employeeId: str | None = Query(default=None),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    employee_id, is_admin = await _resolve_employee(current_user)
+    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
     record = await service.get_profile_email(profile_email_id, employee_id, is_admin)
     return ApiResponse(message="Record fetched", data=record)
 
@@ -104,9 +98,10 @@ async def get_profile_email(
 async def update_profile_email(
     profile_email_id: str,
     payload: ProfileEmailUpdate,
+    employeeId: str | None = Query(default=None),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    employee_id, is_admin = await _resolve_employee(current_user)
+    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
     updated = await service.update_profile_email(
         profile_email_id,
         employee_id,
@@ -123,10 +118,11 @@ async def update_profile_email(
 )
 async def delete_profile_email(
     profile_email_id: str,
+    employeeId: str | None = Query(default=None),
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Delete a single row. Email Master is never affected."""
-    employee_id, is_admin = await _resolve_employee(current_user)
+    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
     await service.delete_profile_email(profile_email_id, employee_id, is_admin)
     return ApiResponse(message="Record deleted")
 
@@ -138,10 +134,11 @@ async def delete_profile_email(
 @router.post("/{profile_id}/retry-failed", response_model=ApiResponse)
 async def retry_failed(
     profile_id: str,
+    employeeId: str | None = Query(default=None),
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Reset all FAILED emails in this profile to PENDING for re-sending."""
-    employee_id, is_admin = await _resolve_employee(current_user)
+    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
     result = await service.retry_failed(profile_id, employee_id, is_admin)
     return ApiResponse(message="Failed emails reset to pending", data=result)
 
@@ -149,10 +146,11 @@ async def retry_failed(
 @router.delete("/{profile_id}/clear", response_model=ApiResponse)
 async def clear_profile_list(
     profile_id: str,
+    employeeId: str | None = Query(default=None),
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Delete the entire working list for this profile. Email Master is never affected."""
-    employee_id, is_admin = await _resolve_employee(current_user)
+    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
     result = await service.clear_profile_list(profile_id, employee_id, is_admin)
     return ApiResponse(message="Profile list cleared", data=result)
 
@@ -160,9 +158,10 @@ async def clear_profile_list(
 @router.post("/bulk-delete", response_model=ApiResponse)
 async def bulk_delete(
     ids: list[str],
+    employeeId: str | None = Query(default=None),
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Delete multiple profile_email rows by ID."""
-    employee_id, is_admin = await _resolve_employee(current_user)
+    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
     result = await service.bulk_delete(ids, employee_id, is_admin)
     return ApiResponse(message="Records deleted", data=result)

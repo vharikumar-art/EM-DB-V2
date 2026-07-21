@@ -404,3 +404,20 @@ async def mark_emails_assigned_to_employee(
             }
         },
     )
+
+
+async def clear_all_emails() -> dict:
+    """ADMIN ONLY: Delete ALL emails from email_master collection. WARNING: Irreversible!"""
+    master = get_collection(COLLECTION)
+    
+    # Get count before deletion
+    total_count = await master.count_documents({})
+    
+    # Delete all documents
+    result = await master.delete_many({})
+    
+    return {
+        "message": "Email master table cleared",
+        "deletedCount": result.deleted_count,
+        "previousTotal": total_count,
+    }

@@ -14,6 +14,13 @@ async def create_initial_admin(payload: UserCreate):
     return ApiResponse(message="Initial admin created", data=user)
 
 
+@router.post("", response_model=ApiResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
+async def create_user(payload: UserCreate):
+    """Create a new user (admin or employee based on role field)"""
+    user = await service.create_user(payload)
+    return ApiResponse(message="User created successfully", data=user)
+
+
 # ── must be before /{user_id} routes so FastAPI doesn't treat "migrate-branch" as a user_id
 @router.post("/migrate-branch", response_model=ApiResponse, dependencies=[Depends(require_admin)])
 async def migrate_branch():

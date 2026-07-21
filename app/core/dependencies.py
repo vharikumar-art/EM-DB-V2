@@ -67,32 +67,26 @@ async def resolve_employee_context(
     Returns tuple: (employee_id, is_admin)
     
     For admins:
-        - If employee_id_param provided: acts as that employee
+        - If employee_id_param provided: acts as that user/employee
         - If employee_id_param None: returns ("", True) for all-employees context
         
     For employees:
-        - Always returns their own employee record id
+        - Always uses their own user_id
         - Ignores employee_id_param (cannot act as others)
     
     Args:
-        current_user: Authenticated user from token
-        employee_id_param: Optional employeeId from query/path parameter
+        current_user: Authenticated user from token (has user_id field)
+        employee_id_param: Optional employeeId/userId from query/path parameter
         
     Returns:
         (employee_id, is_admin): employee context and admin flag
-        
-    Raises:
-        BadRequestException: If admin but no employeeId provided and required
-        NotFoundException: If employee record not found
     """
     if current_user.role == "admin":
-        # Admin can act as specific employee or all employees (empty string means all)
+        # Admin can act as specific employee/user or all employees (empty string means all)
         return employee_id_param or "", True
     
-    # Non-admin: must be employee, get their own employee record
-    from app.employees.service import get_employee_by_user_id
-    employee = await get_employee_by_user_id(current_user.user_id)
-    return employee["id"], False
+    # Non-admin: must be employee, use their own user_id
+    return current_user.user_id, False
 
 
 async def validate_data_ownership(

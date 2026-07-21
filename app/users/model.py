@@ -20,6 +20,7 @@ def build_user_document(
     role: UserRole,
     encrypted_password: str,
     branch: str | None = None,
+    status: UserStatus = UserStatus.ACTIVE,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     return {
@@ -28,8 +29,8 @@ def build_user_document(
         "password": hashed_password,
         "passwordEncrypted": encrypted_password,
         "role": role.value,
-        "status": UserStatus.ACTIVE.value,
-        "branch": branch,
+        "status": status.value,
+        "branch": branch or "Default",  # All users get a branch (admin or employee)
         "createdAt": now,
         "updatedAt": now,
     }

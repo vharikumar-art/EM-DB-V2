@@ -21,6 +21,7 @@ async def create_user(payload: UserCreate) -> dict:
         role=UserRole(payload.role),
         encrypted_password=encrypt_password(payload.password),
         branch=payload.branch,
+        status=payload.status,
     )
     result = await users.insert_one(doc)
     created = await users.find_one({"_id": result.inserted_id})

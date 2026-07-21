@@ -9,9 +9,9 @@ from fastapi import APIRouter, Depends, Query
 
 from app.campaigns.service import list_campaigns
 from app.core.dependencies import CurrentUser, get_current_user, require_admin
-from app.employees.service import list_employees, get_employee_by_user_id
 from app.profiles.service import list_profiles
 from app.schemas.common import ApiResponse
+from app.users.service import list_users
 from app.utils.pagination import PaginationParams
 from app.utils.response import serialize_doc
 
@@ -23,11 +23,13 @@ async def get_employees_options(
     current_user: CurrentUser = Depends(require_admin),
 ):
     """
-    Get list of employees for dropdown (admin only).
+    Get list of employees (users with role=employee) for dropdown (admin only).
     
     Returns: List of {id, name, email, branch}
     """
-    employees = await list_employees()
+    all_users = await list_users()
+    # Filter only employees
+    employees = [u for u in all_users if u.get("role") == "employee"]
     options = [
         {
             "id": emp["id"],

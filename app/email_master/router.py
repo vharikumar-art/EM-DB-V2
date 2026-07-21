@@ -92,6 +92,15 @@ async def delete_email(
     return ApiResponse(message="Email deleted")
 
 
+@router.post("/admin/clear-all", response_model=ApiResponse)
+async def clear_all_emails(
+    current_user: CurrentUser = Depends(require_admin),
+):
+    """ADMIN ONLY: Delete ALL emails from email_master table. WARNING: Irreversible!"""
+    result = await service.clear_all_emails()
+    return ApiResponse(message="Email master cleared", data=result)
+
+
 @router.get("", response_model=ApiResponse)
 async def list_emails(
     country: str | None = Query(default=None),

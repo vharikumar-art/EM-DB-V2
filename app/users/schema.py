@@ -8,7 +8,8 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
     role: UserRole = UserRole.EMPLOYEE
-    branch: str | None = None
+    branch: str | None = Field(default=None, max_length=100, description="Branch name (department, location, etc.)")
+    status: UserStatus = UserStatus.ACTIVE
 
 
 class UserUpdate(BaseModel):
@@ -21,7 +22,6 @@ class UserOut(BaseModel):
     id: str
     name: str
     email: EmailStr
-    password: str | None = None
     role: UserRole
     status: UserStatus
     branch: str | None = None

@@ -369,6 +369,7 @@ async def mark_sent(
     profile_email_id: str,
     thread_id: str | None,
     message_id: str | None,
+    template_id: str | None = None,
 ) -> None:
     col = get_collection(COLLECTION)
     now = datetime.now(timezone.utc)
@@ -381,6 +382,7 @@ async def mark_sent(
                 "messageId": message_id,
                 "sentDate": now,
                 "errorMessage": None,
+                "templateId": template_id or "default",  # Track which template was used
                 "updatedAt": now,
             }
         },

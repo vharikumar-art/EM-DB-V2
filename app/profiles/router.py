@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, UploadFile, File
 
 from app.core.dependencies import CurrentUser, get_current_user, resolve_employee_context
 from app.core.exceptions import BadRequestException
@@ -94,3 +94,72 @@ async def delete_profile(
     employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
     await service.delete_profile(profile_id, employee_id, is_admin)
     return ApiResponse(message="Profile deleted")
+
+
+@router.post("/{profile_id}/templates", response_model=ApiResponse)
+async def add_template(
+    profile_id: str,
+    payload: dict,  # TemplateAdd
+    employeeId: str | None = Query(default=None),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Add a new template to a profile"""
+    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    profile = await service.add_template(profile_id, employee_id, is_admin, payload)
+    return ApiResponse(message="Template added", data=profile)
+
+
+@router.patch("/{profile_id}/templates/{template_id}", response_model=ApiResponse)
+async def update_template(
+    profile_id: str,
+    template_id: str,
+    payload: dict,  # TemplateUpdate
+    employeeId: str | None = Query(default=None),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Update a template in a profile"""
+    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    profile = await service.update_template(profile_id, employee_id, is_admin, template_id, payload)
+    return ApiResponse(message="Template updated", data=profile)
+
+
+@router.delete("/{profile_id}/templates/{template_id}", response_model=ApiResponse)
+async def delete_template(
+    profile_id: str,
+    template_id: str,
+    employeeId: str | None = Query(default=None),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Delete a template from a profile"""
+    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    profile = await service.delete_template(profile_id, employee_id, is_admin, template_id)
+    return ApiResponse(message="Template deleted", data=profile)
+
+
+@router.post("/{profile_id}/templates/{template_id}/upload-attachment", response_model=ApiResponse)
+async def upload_attachment(
+    profile_id: str,
+    template_id: str,
+    file: UploadFile = File(...),
+    employeeId: str | None = Query(default=None),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Upload an attachment file for a template"""
+    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    result = await service.upload_attachment(profile_id, template_id, file, employee_id, is_admin)
+    return ApiResponse(message="Attachment uploaded", data=result)
+
+
+@router.delete("/{profile_id}/templates/{template_id}/attachments/{attachment_id}", response_model=ApiResponse)
+async def delete_attachment(
+    profile_id: str,
+    template_id: str,
+    attachment_id: str,
+    employeeId: str | None = Query(default=None),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Delete an attachment from a template"""
+    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    result = await service.delete_attachment(profile_id, template_id, attachment_id, employee_id, is_admin)
+    return ApiResponse(message="Attachment deleted", data=result)
+
