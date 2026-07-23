@@ -137,6 +137,7 @@ async def list_emails(
     industry: str | None = None,
     company: str | None = None,
     uploaded_by: str | None = None,
+    used_by_employee: str | None = None,
     include_duplicates: bool = True,
     search: str | None = None,
 ) -> dict:
@@ -154,6 +155,8 @@ async def list_emails(
         query["company"] = {"$regex": company, "$options": "i"}
     if uploaded_by:
         query["uploadedBy"] = uploaded_by
+    if used_by_employee:
+        query["usedByEmployeeId"] = used_by_employee
     if not include_duplicates:
         query["isDuplicate"] = False
     if search:
@@ -171,7 +174,69 @@ async def list_emails(
         .limit(params.pageSize)
     )
     docs = serialize_list([d async for d in cursor])
+    
+    # Enrich with employee names
+    docs = await _enrich_emails_with_employee_names(docs)
+    
     return build_paginated_response(docs, total, params)
+
+
+async def _enrich_emails_with_employee_names(docs: list[dict]) -> list[dict]:
+    """Populate employee names from usedInProfiles or usedByEmployeeId.
+    
+    IMPORTANT: usedInProfiles[].employeeId and usedByEmployeeId actually contain
+    the USER's _id (not the employee collection _id). Must look up in users directly.
+    """
+    if not docs:
+        return docs
+    
+    from bson import ObjectId
+    users_col = get_collection("users")
+    
+    # Cache for user names (keyed by user_id string)
+    name_cache: dict[str, str] = {}
+    
+    for doc in docs:
+        # Get user ID from usedByEmployeeId or usedInProfiles
+        # (despite the name "employeeId", this is actually the user's _id)
+        user_id_str = doc.get("usedByEmployeeId")
+        if not user_id_str:
+            used_profiles = doc.get("usedInProfiles", [])
+            if used_profiles and len(used_profiles) > 0:
+                user_id_str = used_profiles[0].get("employeeId")
+        if user_id_str:
+            # Ensure it's a string
+            user_id_str = str(user_id_str)
+            
+            # Check cache first
+            if user_id_str in name_cache:
+                doc["usedByEmployeeName"] = name_cache[user_id_str]
+                doc["usedByEmployeeId"] = user_id_str
+                doc["inProfileEmails"] = True
+            else:
+                # Look up user name - user_id_str is the users._id value
+                emp_name = None
+                
+                try:
+                    # users._id is stored as ObjectId
+                    if ObjectId.is_valid(user_id_str):
+                        user = await users_col.find_one({"_id": ObjectId(user_id_str)})
+                        if user:
+                            emp_name = user.get("name")
+                except Exception as e:
+                    print(f"DEBUG: Error looking up user {user_id_str}: {e}", flush=True)
+                
+                # Fallback to ID if name not found
+                if not emp_name:
+                    emp_name = user_id_str
+                
+                # Cache and update document
+                name_cache[user_id_str] = emp_name
+                doc["usedByEmployeeName"] = emp_name
+                doc["usedByEmployeeId"] = user_id_str
+                doc["inProfileEmails"] = True
+    
+    return docs
 
 
 async def get_email(email_id: str) -> dict:
@@ -180,7 +245,12 @@ async def get_email(email_id: str) -> dict:
     if not doc:
         from app.core.exceptions import NotFoundException
         raise NotFoundException("Email record not found")
-    return serialize_doc(doc)
+    
+    doc = serialize_doc(doc)
+    
+    # Enrich with employee name
+    docs = await _enrich_emails_with_employee_names([doc])
+    return docs[0] if docs else doc
 
 
 async def delete_email(email_id: str) -> None:
@@ -195,6 +265,8 @@ async def delete_email(email_id: str) -> None:
 async def get_dropdown_options() -> dict:
     """Returns distinct filter values for the GLOBAL email pool."""
     master = get_collection(COLLECTION)
+    employees_col = get_collection("employees")
+    users_col = get_collection("users")
 
     domains = await master.distinct("domain", {"isDuplicate": False})
     countries = await master.distinct("country", {"isDuplicate": False})
@@ -211,10 +283,68 @@ async def get_dropdown_options() -> dict:
         if uid and uid not in uploaders_data:
             uploaders_data[uid] = uname
 
+    # Get all employees who have used emails
+    used_by_employees_data = {}
+    
+    # From usedInProfiles
+    cursor = master.find(
+        {"usedInProfiles": {"$exists": True, "$ne": []}},
+        {"usedInProfiles": 1}
+    )
+    async for doc in cursor:
+        used_profiles = doc.get("usedInProfiles", [])
+        for profile in used_profiles:
+            emp_id = profile.get("employeeId")
+            if emp_id and emp_id not in used_by_employees_data:
+                # Try to get employee name
+                try:
+                    employee = await employees_col.find_one({"_id": emp_id})
+                    if employee:
+                        user_id = employee.get("userId")
+                        if user_id:
+                            user = await users_col.find_one({"_id": user_id})
+                            if user:
+                                emp_name = user.get("name", emp_id)
+                                used_by_employees_data[emp_id] = emp_name
+                                continue
+                except Exception:
+                    pass
+                # Fallback to ID
+                used_by_employees_data[emp_id] = emp_id
+    
+    # From usedByEmployeeId field
+    cursor = master.find(
+        {"usedByEmployeeId": {"$exists": True, "$ne": None}},
+        {"usedByEmployeeId": 1, "usedByEmployeeName": 1}
+    )
+    async for doc in cursor:
+        emp_id = doc.get("usedByEmployeeId")
+        emp_name = doc.get("usedByEmployeeName")
+        
+        if emp_id:
+            if emp_name and emp_id not in used_by_employees_data:
+                used_by_employees_data[emp_id] = emp_name
+            elif emp_id not in used_by_employees_data:
+                # Try to fetch
+                try:
+                    employee = await employees_col.find_one({"_id": emp_id})
+                    if employee:
+                        user_id = employee.get("userId")
+                        if user_id:
+                            user = await users_col.find_one({"_id": user_id})
+                            if user:
+                                emp_name = user.get("name", emp_id)
+                                used_by_employees_data[emp_id] = emp_name
+                                continue
+                except Exception:
+                    pass
+                used_by_employees_data[emp_id] = emp_id
+
     def clean(lst: list) -> list:
         return sorted([x for x in lst if x])
 
     uploaders = [{"id": uid, "name": uname} for uid, uname in uploaders_data.items()] if uploaders_data else []
+    used_by_employees = [{"id": eid, "name": ename} for eid, ename in used_by_employees_data.items()] if used_by_employees_data else []
 
     return {
         "domains": clean(domains),
@@ -223,6 +353,7 @@ async def get_dropdown_options() -> dict:
         "industries": clean(industries),
         "companies": clean(companies),
         "uploaders": uploaders,
+        "usedByEmployees": used_by_employees,
     }
 
 

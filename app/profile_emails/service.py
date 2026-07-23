@@ -125,8 +125,14 @@ async def generate_list(
         )
         
         # Also mark emails as assigned to this employee (claim them)
-        # Get employee name from profile or use employee_id as fallback
-        employee_name = profile.get("employeeName", profile["employeeId"])
+        # Get employee name from employees collection
+        from app.employees.service import get_employee
+        try:
+            employee = await get_employee(profile["employeeId"])
+            employee_name = employee.get("name", profile["employeeId"])
+        except:
+            employee_name = profile["employeeId"]
+        
         await mark_emails_assigned_to_employee(
             master_ids=master_ids_to_mark,
             employee_id=profile["employeeId"],

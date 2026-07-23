@@ -1,6 +1,5 @@
-from datetime import datetime, timezone
-
 from datetime import datetime, timezone, timedelta
+
 from app.campaigns.model import CampaignStatus, build_campaign_document
 from app.campaigns.schema import CampaignStartRequest
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
@@ -183,25 +182,22 @@ async def create_scheduled_campaign(
         or f"{profile['profileName']} — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
     )
 
-    # Convert local time to UTC
-    # Parse the local time string
-    from datetime import datetime as dt
-    local_dt = dt.fromisoformat(payload.scheduledForLocal)
+    # Simple approach: just store the provided time and recurrence settings
+    # The scheduler will handle when to run based on recurrence type and days
     
-    # Convert to UTC
-    # Browser's getTimezoneOffset() returns negative values for timezones ahead of UTC
-    # For IST (UTC+5:30): offset = -330 minutes
-    # To get UTC from local: UTC_time = local_time + offset_in_ms
-    # Example: 10:06 IST with offset -330 min = 10:06 + (-330 min) = 10:06 - 5:30 = 04:36 UTC
-    utc_dt = local_dt + timedelta(minutes=payload.timezoneOffsetMinutes)
-    utc_dt = utc_dt.replace(tzinfo=timezone.utc)
-    
-    print(f"[SCHEDULER] Local time: {payload.scheduledForLocal}, offset: {payload.timezoneOffsetMinutes} min, UTC: {utc_dt.isoformat()}")
-    
-    # Validate it's in the future
     now = datetime.now(timezone.utc)
-    if utc_dt <= now:
-        raise BadRequestException("Scheduled time must be in the future")
+    
+    from app.campaigns.scheduler import calculate_next_run
+    utc_dt = calculate_next_run(
+        recurrence_type=payload.recurrenceType,
+        scheduled_time_local=payload.scheduledTimeLocal,
+        timezone_offset_minutes=payload.timezoneOffsetMinutes,
+        recurrence_days=payload.recurrenceDays,
+        scheduled_date_local=payload.scheduledDateLocal,
+        current_utc=now,
+    )
+    
+    print(f"[SCHEDULER] Local time: {payload.scheduledTimeLocal}, offset: {payload.timezoneOffsetMinutes} min, UTC: {utc_dt.isoformat()}, Recurrence: {payload.recurrenceType}, Days: {payload.recurrenceDays}")
 
     # Build campaign with scheduled_for parameter
     doc = build_campaign_document(
@@ -224,7 +220,16 @@ async def create_scheduled_campaign(
     # Store dailyLimit and retry settings
     doc["dailyLimit"] = daily_limit
     doc["maxRetries"] = payload.maxRetries
-    doc["scheduledForDisplay"] = payload.scheduledForLocal  # Store the display time
+    
+    display_time = payload.scheduledTimeLocal
+    if payload.scheduledDateLocal:
+        display_time = f"{payload.scheduledDateLocal}T{payload.scheduledTimeLocal}"
+    doc["scheduledForDisplay"] = display_time  # Store the display time
+    
+    # Store recurrence settings
+    doc["recurrenceType"] = payload.recurrenceType
+    doc["recurrenceDays"] = payload.recurrenceDays
+    doc["recurrenceEndDate"] = payload.recurrenceEndDate
 
     result = await campaigns.insert_one(doc)
     created = await campaigns.find_one({"_id": result.inserted_id})
@@ -240,7 +245,9 @@ async def create_scheduled_campaign(
         },
     )
 
-    scheduled_time_str = payload.scheduledForLocal
+    scheduled_time_str = payload.scheduledTimeLocal
+    if payload.scheduledDateLocal:
+        scheduled_time_str = f"{payload.scheduledDateLocal} {payload.scheduledTimeLocal}"
     await create_notification(
         employee_id=profile["employeeId"],
         message=f"Campaign '{campaign_name}' scheduled for {scheduled_time_str} with {pending_count} pending email(s). Daily limit: {daily_limit}",
@@ -278,10 +285,12 @@ async def set_status(
     # Allowed transitions
     allowed: dict[str, set] = {
         CampaignStatus.PENDING.value: {CampaignStatus.RUNNING, CampaignStatus.FAILED},
-        CampaignStatus.RUNNING.value: {CampaignStatus.PAUSED, CampaignStatus.COMPLETED, CampaignStatus.FAILED},
-        CampaignStatus.PAUSED.value: {CampaignStatus.RUNNING, CampaignStatus.FAILED},
+        CampaignStatus.SCHEDULED.value: {CampaignStatus.PROCESSING, CampaignStatus.PAUSED, CampaignStatus.FAILED},
+        CampaignStatus.PROCESSING.value: {CampaignStatus.RUNNING, CampaignStatus.FAILED},
+        CampaignStatus.RUNNING.value: {CampaignStatus.PAUSED, CampaignStatus.COMPLETED, CampaignStatus.FAILED, CampaignStatus.SCHEDULED},
+        CampaignStatus.PAUSED.value: {CampaignStatus.RUNNING, CampaignStatus.FAILED, CampaignStatus.SCHEDULED},
         CampaignStatus.COMPLETED.value: set(),
-        CampaignStatus.FAILED.value: {CampaignStatus.RUNNING},
+        CampaignStatus.FAILED.value: {CampaignStatus.RUNNING, CampaignStatus.SCHEDULED},
     }
 
     if new_status not in allowed.get(current, set()):

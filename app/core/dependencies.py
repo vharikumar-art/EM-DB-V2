@@ -63,30 +63,21 @@ async def resolve_employee_context(
 ) -> tuple[str, bool]:
     """
     Centralized employee context resolution for all routers.
-    
-    Returns tuple: (employee_id, is_admin)
-    
-    For admins:
-        - If employee_id_param provided: acts as that user/employee
-        - If employee_id_param None: returns ("", True) for all-employees context
-        
-    For employees:
-        - Always uses their own user_id
-        - Ignores employee_id_param (cannot act as others)
-    
-    Args:
-        current_user: Authenticated user from token (has user_id field)
-        employee_id_param: Optional employeeId/userId from query/path parameter
-        
-    Returns:
-        (employee_id, is_admin): employee context and admin flag
     """
+    from app.employees.service import get_employee_by_user_id
+    
     if current_user.role == "admin":
-        # Admin can act as specific employee/user or all employees (empty string means all)
         return employee_id_param or "", True
     
-    # Non-admin: must be employee, use their own user_id
-    return current_user.user_id, False
+    # Non-admin: must be employee, get their actual employee_id from employees collection
+    try:
+        employee = await get_employee_by_user_id(current_user.user_id)
+        # The employee document's id (converted from _id by serialize_doc) IS the employeeId
+        employee_id = str(employee.get("id", current_user.user_id))
+    except Exception:
+        employee_id = current_user.user_id
+    
+    return employee_id, False
 
 
 async def validate_data_ownership(

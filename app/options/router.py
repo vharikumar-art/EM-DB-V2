@@ -9,9 +9,11 @@ from fastapi import APIRouter, Depends, Query
 
 from app.campaigns.service import list_campaigns
 from app.core.dependencies import CurrentUser, get_current_user, require_admin
+from app.employees.service import get_employee_by_user_id
 from app.profiles.service import list_profiles
 from app.schemas.common import ApiResponse
 from app.users.service import list_users
+from app.database.mongodb import get_collection
 from app.utils.pagination import PaginationParams
 from app.utils.response import serialize_doc
 
@@ -25,21 +27,37 @@ async def get_employees_options(
     """
     Get list of employees (users with role=employee) for dropdown (admin only).
     
-    Returns: List of {id, name, email, branch}
+    Returns: List of {id, name, email, branch} where id is the EMPLOYEE ID
     """
-    all_users = await list_users()
-    # Filter only employees
-    employees = [u for u in all_users if u.get("role") == "employee"]
-    options = [
-        {
-            "id": emp["id"],
-            "name": emp.get("name", ""),
-            "email": emp.get("email", ""),
-            "branch": emp.get("branch", ""),
-        }
-        for emp in employees
-    ]
+    users_col = get_collection("users")
+    employees_col = get_collection("employees")
+    from bson import ObjectId
+
+    # Get all users with role 'employee'
+    users_docs = await users_col.find({"role": "employee"}).to_list(None)
+
+    options = []
+    for user_doc in users_docs:
+        user_id = str(user_doc["_id"])
+        # Find their employee record (this is the ID stored in profiles/campaigns)
+        emp_doc = await employees_col.find_one({"userId": user_id})
+        if not emp_doc:
+            # Auto-create employee record so the ID system stays consistent
+            from app.employees.model import build_employee_document
+            new_emp = build_employee_document(user_id=user_id, branch=user_doc.get("branch"))
+            result = await employees_col.insert_one(new_emp)
+            emp_doc = await employees_col.find_one({"_id": result.inserted_id})
+
+        options.append({
+            "id": str(emp_doc["_id"]),   # employee._id — matches profileId, campaignId, etc.
+            "userId": user_id,
+            "name": user_doc.get("name", "Unknown"),
+            "email": user_doc.get("email", ""),
+            "branch": user_doc.get("branch", emp_doc.get("branch", "")),
+        })
+
     return ApiResponse(message="Employees fetched", data=options)
+
 
 
 @router.get("/profiles", response_model=ApiResponse)

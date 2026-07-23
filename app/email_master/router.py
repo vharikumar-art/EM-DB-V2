@@ -108,6 +108,7 @@ async def list_emails(
     industry: str | None = Query(default=None),
     company: str | None = Query(default=None),
     uploadedBy: str | None = Query(default=None),
+    usedByEmployee: str | None = Query(default=None),
     search: str | None = Query(default=None),
     includeDuplicates: bool = Query(default=True),
     params: PaginationParams = Depends(pagination_params),
@@ -121,6 +122,7 @@ async def list_emails(
         industry=industry,
         company=company,
         uploaded_by=uploadedBy,
+        used_by_employee=usedByEmployee,
         include_duplicates=includeDuplicates,
         search=search,
     )

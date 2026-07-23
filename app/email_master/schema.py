@@ -20,6 +20,12 @@ class EmailMasterOut(BaseModel):
     linkedin: str = ""
     citation: str = ""
     mailSource: str = ""
+    # Employee usage tracking
+    uploadedByName: str | None = None
+    usedByEmployeeId: str | None = None
+    usedByEmployeeName: str | None = None
+    inProfileEmails: bool = False
+    assignedDate: str | None = None
     assignedProfiles: list[dict] = Field(default_factory=list)
     createdAt: str | None = None
     updatedAt: str | None = None

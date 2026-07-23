@@ -15,10 +15,14 @@ class CampaignScheduleRequest(BaseModel):
     """Request to create a scheduled campaign"""
     profileId: str
     campaignName: str = Field(default="", max_length=200)
-    scheduledForLocal: str = Field(description="Local datetime string (YYYY-MM-DDTHH:MM:SS)")
+    scheduledDateLocal: str | None = Field(default=None, description="Local date string (YYYY-MM-DD), required for 'once'")
+    scheduledTimeLocal: str = Field(description="Local time string (HH:MM)")
     timezoneOffsetMinutes: int = Field(description="Browser timezone offset in minutes (e.g., -330 for IST UTC+5:30)")
     dailyLimit: int | None = Field(default=None, ge=1, le=10000, description="Daily email limit")
     maxRetries: int = Field(default=3, ge=0, le=10, description="Maximum retry attempts if campaign fails")
+    recurrenceType: str = Field(default="once", description="Recurrence type: 'once', 'daily', or 'weekly'")
+    recurrenceDays: list[int] = Field(default_factory=list, description="Days for weekly recurrence (0=Mon, 6=Sun)")
+    recurrenceEndDate: str | None = Field(default=None, description="End date for recurring campaigns (YYYY-MM-DD)")
 
 
 class SchedulerProcessResponse(BaseModel):
@@ -70,6 +74,10 @@ class CampaignOut(BaseModel):
     errorMessage: str | None = None
     retryCount: int = 0
     maxRetries: int = 3
+    # Recurrence fields
+    recurrenceType: str = "once"
+    recurrenceDays: list[int] = []
+    recurrenceEndDate: str | None = None
 
 
 class CampaignStatusUpdate(BaseModel):

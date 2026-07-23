@@ -222,15 +222,16 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
     
     running_campaigns = await campaigns.count_documents({"status": "running"})
     total_accounts    = await accounts.count_documents({"isActive": True})
+    total_profiles    = await profiles.count_documents({})  # Count all profiles
 
     # Total sent to profiles (count of profile_emails records)
     total_sent_profiles = await pe_col.count_documents(
         {"sentDate": {"$gte": start_dt, "$lte": end_dt}}
     )
     
-    # Total actually sent (profile_emails with sent status)
+    # Total actually sent (profile_emails with sent status) - count ALL sent emails, not date-filtered
     total_sent = await pe_col.count_documents(
-        {"sendStatus": "sent", "sentDate": {"$gte": start_dt, "$lte": end_dt}}
+        {"sendStatus": "sent"}
     )
 
     # Global pending / failed
@@ -343,13 +344,21 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
         emp_id = str(emp["_id"])
         emp_name = await _employee_name(emp_id)
         
-        # Get uploads and duplicates from logs
-        total_emp_uploads = await master.count_documents({
-            "employeeId": emp_id,
-            **range_match
-        })
+        # Get employee's userId to track uploads
+        user_id = str(emp.get("userId", "")) if emp.get("userId") else None
         
-        # Get duplicate count from logs for this employee
+        # DEBUG: Log employee and their userId
+        import sys
+        print(f"[DEBUG] Employee: {emp_name} | emp_id: {emp_id} | user_id: {user_id}", file=sys.stderr)
+        
+        # Get uploads (count by userId who uploaded)
+        total_emp_uploads = await master.count_documents({
+            "uploadedBy": user_id
+        }) if user_id else 0
+        
+        print(f"[DEBUG] {emp_name} uploads: {total_emp_uploads}", file=sys.stderr)
+        
+        # Get duplicate count from logs for this employee (by userId)
         emp_duplicates_pipeline = [
             {
                 "$match": {
@@ -369,23 +378,67 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
             "sentDate": {"$gte": start_dt, "$lte": end_dt}
         })
         
-        # Get actually sent (sendStatus: sent)
+        # Get actually sent (sendStatus: sent) - count ALL, not date-filtered
         emp_sent = await pe_col.count_documents({
             "employeeId": emp_id,
-            "sendStatus": "sent",
-            "sentDate": {"$gte": start_dt, "$lte": end_dt}
+            "sendStatus": "sent"
         })
         
-        if total_emp_uploads > 0 or emp_sent_profiles > 0 or emp_sent > 0:
-            employee_performance.append({
-                "employeeId": emp_id,
-                "employeeName": emp_name,
-                "totalUploads": total_emp_uploads,
-                "totalDuplicates": emp_duplicates,
-                "totalSentToProfiles": emp_sent_profiles,
-                "totalSent": emp_sent,
-                "successRate": round((emp_sent / emp_sent_profiles * 100), 1) if emp_sent_profiles > 0 else 0
-            })
+        # Get employee's profiles count (using employeeId)
+        emp_total_profiles = await profiles.count_documents({
+            "employeeId": emp_id
+        })
+        
+        profiles_with_emp_id = await profiles.find({"employeeId": emp_id}).to_list(None)
+        print(f"[DEBUG] {emp_name} - Query employeeId: {emp_id} | Found profiles: {len(profiles_with_emp_id) if profiles_with_emp_id else 0}", file=sys.stderr)
+        if profiles_with_emp_id:
+            print(f"[DEBUG] Profile employeeIds: {[p.get('employeeId') for p in profiles_with_emp_id]}", file=sys.stderr)
+        
+        # DEBUG: Find ALL profiles for this employee (regardless of employeeId)
+        all_user_profiles = await profiles.find({"employeeId": {"$exists": True}}).to_list(None)
+        matching_profiles = [p for p in all_user_profiles if emp_name.lower() in str(p.get("profileName", "")).lower() or emp_id in str(p.get("employeeId", ""))]
+        if matching_profiles:
+            print(f"[DEBUG] Found matching profiles for {emp_name}: {[(p.get('profileName'), p.get('employeeId')) for p in matching_profiles]}", file=sys.stderr)
+        
+        # Get employee's total campaigns (unique campaigns by campaignName, using employeeId)
+        emp_total_campaigns_pipeline = [
+            {"$match": {"employeeId": emp_id}},
+            {"$group": {"_id": "$campaignName"}},
+            {"$count": "total"}
+        ]
+        emp_total_campaigns_result = await campaigns.aggregate(emp_total_campaigns_pipeline).to_list(length=1)
+        emp_total_campaigns = emp_total_campaigns_result[0]["total"] if emp_total_campaigns_result else 0
+        
+        campaigns_with_emp_id = await campaigns.find({"employeeId": emp_id}).to_list(None)
+        print(f"[DEBUG] {emp_name} - Query employeeId: {emp_id} | Found campaigns: {len(campaigns_with_emp_id) if campaigns_with_emp_id else 0}", file=sys.stderr)
+        if campaigns_with_emp_id:
+            print(f"[DEBUG] Campaign employeeIds: {[c.get('employeeId') for c in campaigns_with_emp_id]}", file=sys.stderr)
+        
+        # DEBUG: Find campaigns with user_id instead (legacy data)
+        campaigns_with_user_id = await campaigns.find({"employeeId": user_id}).to_list(None)
+        if campaigns_with_user_id:
+            print(f"[DEBUG] {emp_name} HAS CAMPAIGNS under user_id {user_id}: {[(c.get('campaignName'), c.get('employeeId')) for c in campaigns_with_user_id]}", file=sys.stderr)
+        
+        # Get employee's running campaigns (status: "running", using employeeId)
+        emp_running_campaigns = await campaigns.count_documents({
+            "employeeId": emp_id,
+            "status": "running"
+        })
+        
+        print(f"[DEBUG] {emp_name} running campaigns: {emp_running_campaigns}", file=sys.stderr)
+        
+        employee_performance.append({
+            "employeeId": emp_id,
+            "employeeName": emp_name,
+            "totalUploads": total_emp_uploads,
+            "totalDuplicates": emp_duplicates,
+            "totalSentToProfiles": emp_sent_profiles,
+            "totalSent": emp_sent,
+            "totalProfiles": emp_total_profiles,
+            "totalCampaigns": emp_total_campaigns,
+            "runningCampaigns": emp_running_campaigns,
+            "successRate": round((emp_sent / emp_sent_profiles * 100), 1) if emp_sent_profiles > 0 else 0
+        })
 
     return {
         "totalEmployees":      total_employees,
@@ -397,8 +450,21 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
         "totalCampaigns":      total_campaigns,
         "runningCampaigns":    running_campaigns,
         "activeEmailAccounts": total_accounts,
+        "totalProfiles":       total_profiles,
         "totalPending":        total_pending,
         "totalFailed":         total_failed,
+        # Overall metrics (not date-filtered)
+        "overallEmailMaster":  await master.count_documents({}),
+        "overallProfileEmails": await pe_col.count_documents({}),
+        "overallSent":         await pe_col.count_documents({"sendStatus": "sent"}),
+        "overallPending":      await pe_col.count_documents({"sendStatus": "pending"}),
+        # Sent today
+        "sentToday":           await pe_col.count_documents(
+            {"sendStatus": "sent", "sentDate": {"$gte": now.replace(hour=0, minute=0, second=0, microsecond=0)}}
+        ),
+        # Total campaigns (overall, not date-filtered)
+        "totalAllCampaigns":   total_campaigns,
+        "totalAllRunningCampaigns": running_campaigns,
         "employeeRanking":     employee_ranking,
         "top7DaysUploadRanking": top7_ranking,
         "campaignPerformance": campaign_performance,

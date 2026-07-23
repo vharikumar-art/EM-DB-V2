@@ -16,6 +16,62 @@ from app.notifications.schema import NotificationType
 COLLECTION = "emails"
 
 
+async def _enrich_with_uploader_name(docs: list[dict]) -> list[dict]:
+    """Add uploaded_by_name by looking up the employee/user name."""
+    if not docs:
+        return docs
+    
+    employees_col = get_collection("employees")
+    users_col = get_collection("users")
+    name_cache: dict[str, str] = {}
+    
+    for doc in docs:
+        # If name already exists, skip
+        if doc.get("uploadedByName"):
+            continue
+        
+        # Get employee ID
+        employee_id = doc.get("employeeId")
+        if not employee_id:
+            continue
+        
+        # Check cache
+        if employee_id in name_cache:
+            doc["uploadedByName"] = name_cache[employee_id]
+        else:
+            # Fetch employee name
+            emp_name = None
+            try:
+                employee = await employees_col.find_one({"_id": employee_id})
+                if employee:
+                    user_id = employee.get("userId")
+                    if user_id:
+                        user = await users_col.find_one({"_id": user_id})
+                        if user:
+                            emp_name = user.get("name")
+            except Exception as e:
+                print(f"DEBUG: Error looking up employee {employee_id}: {e}")
+            
+            # If not found in employees, try users directly
+            if not emp_name:
+                try:
+                    user = await users_col.find_one({"_id": employee_id})
+                    if user:
+                        emp_name = user.get("name")
+                except Exception:
+                    pass
+            
+            # Fallback to ID
+            if not emp_name:
+                emp_name = employee_id
+            
+            name_cache[employee_id] = emp_name
+            doc["uploadedByName"] = emp_name
+    
+    return docs
+
+
+
 async def upload_file(employee_id: str, file_bytes: bytes, filename: str, insert_duplicates: bool = False) -> dict:
     emails = get_collection(COLLECTION)
 
@@ -121,6 +177,10 @@ async def list_emails(
         .limit(params.pageSize)
     )
     docs = serialize_list([d async for d in cursor])
+    
+    # ENRICHED: Add uploaded_by_name if it doesn't exist
+    docs = await _enrich_with_uploader_name(docs)
+    
     return build_paginated_response(docs, total, params)
 
 

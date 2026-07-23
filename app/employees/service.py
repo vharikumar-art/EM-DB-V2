@@ -76,6 +76,7 @@ async def get_employee(employee_id: str) -> dict:
 async def get_employee_by_user_id(user_id: str) -> dict:
     employees = get_collection(COLLECTION)
     doc = await employees.find_one({"userId": user_id})
+    
     if not doc:
         # Auto-create employee record if it doesn't exist
         # This handles cases where a user was created but no employee record exists

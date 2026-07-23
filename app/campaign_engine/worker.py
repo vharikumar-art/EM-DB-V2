@@ -27,6 +27,7 @@ Error handling:
 import asyncio
 import logging
 import random
+from datetime import datetime, timezone
 
 from app.campaign_engine.sender import SMTPCredentials, send_email
 from app.campaigns import service as campaign_service
@@ -148,6 +149,36 @@ async def _run(campaign_id: str) -> None:
         "Campaign %s started | profile=%s | account=%s",
         campaign_id, profile_id, gmail_account,
     )
+
+    # ------------------------------------------------------------------
+    # 3.5. Claim new pending emails (for recurring campaigns)
+    # ------------------------------------------------------------------
+    if campaign.get("recurrenceType") in ["daily", "weekly"]:
+        from app.profile_emails.model import SendStatus
+        profile_emails_col = get_collection("profile_emails")
+        try:
+            update_result = await profile_emails_col.update_many(
+                {
+                    "profileId": profile_id, 
+                    "sendStatus": SendStatus.PENDING.value,
+                    "campaignId": {"$exists": False}
+                },
+                {
+                    "$set": {
+                        "campaignId": campaign_id,
+                        "updatedAt": datetime.now(timezone.utc)
+                    }
+                }
+            )
+            if update_result.modified_count > 0:
+                logger.info(f"Campaign {campaign_id} claimed {update_result.modified_count} new pending emails")
+                campaigns_col = get_collection("campaigns")
+                await campaigns_col.update_one(
+                    {"_id": to_object_id(campaign_id)},
+                    {"$inc": {"totalEmails": update_result.modified_count}}
+                )
+        except Exception as e:
+            logger.error(f"Failed to claim new pending emails for campaign {campaign_id}: {e}")
 
     # ------------------------------------------------------------------
     # 4. Send loop

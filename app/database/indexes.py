@@ -21,9 +21,15 @@ async def create_indexes() -> None:
     await db["email_master"].create_index("industry")
     await db["email_master"].create_index("company")
     await db["email_master"].create_index("createdAt")
+    await db["email_master"].create_index("usedByEmployeeId")
+    await db["email_master"].create_index("inProfileEmails")
     # Dedup check is scoped per employee
     await db["email_master"].create_index(
         [("employeeId", 1), ("email", 1)], unique=True
+    )
+    # Index for finding emails used by specific employee
+    await db["email_master"].create_index(
+        [("usedByEmployeeId", 1), ("inProfileEmails", 1)]
     )
 
     # ── profiles ─────────────────────────────────────────────────────────────

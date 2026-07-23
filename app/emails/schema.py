@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 class EmailRecordOut(BaseModel):
     id: str
     employeeId: str
+    uploadedByName: str | None = None
     fullName: str
     email: str
     company: str

@@ -21,6 +21,66 @@ logger = logging.getLogger(__name__)
 COLLECTION = "campaigns"
 
 
+def calculate_next_run(
+    recurrence_type: str,
+    scheduled_time_local: str,  # format HH:MM
+    timezone_offset_minutes: int,
+    recurrence_days: list[int] = None,
+    scheduled_date_local: str = None,  # format YYYY-MM-DD
+    current_utc: datetime = None
+) -> datetime:
+    """
+    Calculate the next UTC datetime a campaign should run.
+    """
+    if current_utc is None:
+        current_utc = datetime.now(timezone.utc)
+        
+    # User's local time right now
+    local_now = current_utc - timedelta(minutes=timezone_offset_minutes)
+    
+    # Parse the target time
+    target_hour, target_minute = map(int, scheduled_time_local.split(':'))
+    
+    if recurrence_type == "once":
+        if not scheduled_date_local:
+            raise ValueError("scheduledDateLocal is required for 'once' campaigns")
+        target_year, target_month, target_day = map(int, scheduled_date_local.split('-'))
+        local_next = local_now.replace(
+            year=target_year, month=target_month, day=target_day,
+            hour=target_hour, minute=target_minute, second=0, microsecond=0
+        )
+    elif recurrence_type == "daily":
+        local_next = local_now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+        if local_next <= local_now:
+            local_next += timedelta(days=1)
+    elif recurrence_type == "weekly":
+        if not recurrence_days:
+            raise ValueError("recurrenceDays is required for 'weekly' campaigns")
+        
+        # Current local weekday (0=Mon, 6=Sun)
+        current_weekday = local_now.weekday()
+        
+        # Check today first
+        if current_weekday in recurrence_days:
+            candidate = local_now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+            if candidate > local_now:
+                local_next = candidate
+            else:
+                # Need a future day. Find the next day in the list.
+                days_ahead = min((day - current_weekday) % 7 if (day - current_weekday) % 7 != 0 else 7 for day in recurrence_days)
+                local_next = local_now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0) + timedelta(days=days_ahead)
+        else:
+            # Find the next day in the list.
+            days_ahead = min((day - current_weekday) % 7 for day in recurrence_days if (day - current_weekday) % 7 > 0)
+            local_next = local_now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0) + timedelta(days=days_ahead)
+    else:
+        raise ValueError(f"Unknown recurrence_type: {recurrence_type}")
+        
+    # Convert local_next back to UTC
+    utc_next = local_next.replace(tzinfo=timezone.utc) + timedelta(minutes=timezone_offset_minutes)
+    return utc_next
+
+
 class SchedulerResult:
     """Result of a scheduler run"""
     def __init__(self):
@@ -162,7 +222,47 @@ async def finalize_campaign_execution(
         execution_duration = duration.total_seconds()
     
     if success:
-        # Campaign completed successfully
+        # Check if it should reschedule
+        recurrence_type = campaign.get("recurrenceType", "once")
+        if recurrence_type in ["daily", "weekly"]:
+            try:
+                # Calculate next run time
+                # We need the local time string from scheduledForDisplay (e.g. '2026-07-23T09:00' or just '09:00')
+                display_str = campaign.get("scheduledForDisplay", "00:00")
+                time_str = display_str.split("T")[-1] if "T" in display_str else display_str[-5:]
+                
+                next_run = calculate_next_run(
+                    recurrence_type=recurrence_type,
+                    scheduled_time_local=time_str,
+                    timezone_offset_minutes=0, # Simplification: assume server UTC if offset not available, or extract it if stored
+                    recurrence_days=campaign.get("recurrenceDays", []),
+                )
+                
+                # Reschedule the campaign
+                await campaigns.update_one(
+                    {"_id": to_object_id(campaign_id)},
+                    {
+                        "$set": {
+                            "status": CampaignStatus.SCHEDULED.value,
+                            "scheduledFor": next_run,
+                            "executionDuration": execution_duration,
+                            "updatedAt": now,
+                            "errorMessage": None,
+                        }
+                    }
+                )
+                
+                await create_notification(
+                    employee_id=campaign.get("employeeId"),
+                    message=f"Campaign '{campaign['campaignName']}' finished current batch and is scheduled for next run at {next_run.strftime('%Y-%m-%d %H:%M')} UTC.",
+                    type=NotificationType.INFO,
+                )
+                return
+            except Exception as e:
+                logger.error(f"Failed to calculate next run for campaign {campaign_id}: {e}", exc_info=True)
+                # Fall through to standard completion if rescheduling fails
+        
+        # Standard completion (once, or rescheduling failed)
         await campaigns.update_one(
             {"_id": to_object_id(campaign_id)},
             {
