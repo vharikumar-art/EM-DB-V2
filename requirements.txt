@@ -14,11 +14,5 @@ slowapi==0.1.9
 httpx==0.27.2
 openpyxl==3.1.5
 
-# LangChain / AI
-langchain==0.3.25
-langchain-openai==0.3.18
-langchain-core==0.3.61
-openai==1.82.1
-
 # Cryptography (Fernet — already pulled by python-jose but pinned explicitly)
 cryptography==44.0.3

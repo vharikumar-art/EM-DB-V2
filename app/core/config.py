@@ -17,9 +17,6 @@ class Settings(BaseSettings):
 
     CORS_ORIGINS: str = "http://localhost:3000"
 
-    # n8n (kept for backward compat during transition; will be removed in Phase 9)
-    N8N_WEBHOOK_URL: str = "http://localhost:5678/webhook/start-campaign"
-    N8N_API_KEY: str = "insecure-n8n-secret-change-me"
 
     PASSWORD_ENCRYPTION_KEY: str = "dev-password-encryption-key-123456"
 

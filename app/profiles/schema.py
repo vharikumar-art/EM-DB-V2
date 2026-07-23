@@ -7,6 +7,7 @@ class ProfileFilters(BaseModel):
     industry: list[str] = Field(default_factory=list)
     company: list[str] = Field(default_factory=list)
     type: list[str] = Field(default_factory=list)  # maps to designation / industry
+    mailSource: list[str] = Field(default_factory=list)  # Google Scholar, University, Other
 
 
 class ProfileSendingOptions(BaseModel):

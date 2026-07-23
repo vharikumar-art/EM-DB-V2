@@ -230,6 +230,7 @@ async def create_scheduled_campaign(
     doc["recurrenceType"] = payload.recurrenceType
     doc["recurrenceDays"] = payload.recurrenceDays
     doc["recurrenceEndDate"] = payload.recurrenceEndDate
+    doc["timezoneOffsetMinutes"] = payload.timezoneOffsetMinutes
 
     result = await campaigns.insert_one(doc)
     created = await campaigns.find_one({"_id": result.inserted_id})

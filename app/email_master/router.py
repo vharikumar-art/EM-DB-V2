@@ -16,6 +16,7 @@ async def upload_emails(
     file: UploadFile = File(...),
     insertDuplicates: bool = Query(default=False),
     maxLimit: int | None = Query(default=None, ge=1, le=10000, description="Maximum emails to upload from file"),
+    mailSource: str | None = Query(default=None, description="Mail source: Google Scholar, University, Other"),
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Upload email CSV/Excel file to global pool. Tracks who uploaded."""
@@ -40,6 +41,7 @@ async def upload_emails(
         filename=file.filename,
         insert_duplicates=insertDuplicates,
         max_limit=maxLimit,
+        mail_source=mailSource,
     )
     return ApiResponse(message="File processed", data=result)
 
@@ -109,6 +111,7 @@ async def list_emails(
     company: str | None = Query(default=None),
     uploadedBy: str | None = Query(default=None),
     usedByEmployee: str | None = Query(default=None),
+    mailSource: str | None = Query(default=None),
     search: str | None = Query(default=None),
     includeDuplicates: bool = Query(default=True),
     params: PaginationParams = Depends(pagination_params),
@@ -123,6 +126,7 @@ async def list_emails(
         company=company,
         uploaded_by=uploadedBy,
         used_by_employee=usedByEmployee,
+        mail_source=mailSource,
         include_duplicates=includeDuplicates,
         search=search,
     )

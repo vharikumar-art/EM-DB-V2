@@ -51,11 +51,6 @@ require_admin = require_roles("admin")
 require_any_role = require_roles("admin", "employee")
 
 
-async def verify_n8n_api_key(x_api_key: str | None = Header(default=None)) -> None:
-    """Guards webhooks called by n8n using a shared secret instead of a user JWT."""
-    if not x_api_key or x_api_key != settings.N8N_API_KEY:
-        raise UnauthorizedException("Invalid or missing n8n API key")
-
 
 async def resolve_employee_context(
     current_user: CurrentUser, 

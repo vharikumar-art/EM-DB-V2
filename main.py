@@ -1,4 +1,3 @@
-import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -44,7 +43,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.APP_NAME,
     version="2.0.0",
-    description="Cold Email Management Platform — FastAPI + MongoDB + LangChain",
+    description="Cold Email Management Platform — FastAPI + MongoDB + Motor",
     lifespan=lifespan,
 )
 

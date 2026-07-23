@@ -31,21 +31,6 @@ class EmployeeDashboard(BaseModel):
     totalUploadCount: int
     uniqueEmailCount: int
     sentEmailCount: int
-    profileStatistics: list[ProfileStat]
-    recentUploadHistory: list[dict]
-
-
-class EmployeeRanking(BaseModel):
-    employeeId: str
-    employeeName: str
-    uploadedCount: int
-    sentCount: int
-
-
-class Top7DaysRanking(BaseModel):
-    employeeId: str
-    employeeName: str
-    uploadedCount: int
 
 
 class AdminDashboard(BaseModel):
@@ -53,8 +38,4 @@ class AdminDashboard(BaseModel):
     totalUploads: int
     totalUniqueEmails: int
     totalSentEmails: int
-    employeeRanking: list[EmployeeRanking]
-    top7DaysUploadRanking: list[Top7DaysRanking]
     employeeStatistics: list[dict]
-    recentActivities: list[dict]
-    profileUsage: list[dict]

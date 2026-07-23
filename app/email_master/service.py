@@ -22,6 +22,7 @@ async def upload_file(
     filename: str,
     insert_duplicates: bool = False,
     max_limit: int | None = None,
+    mail_source: str | None = None,
 ) -> dict:
     """
     Parse CSV/XLSX, deduplicate GLOBALLY, insert into email_master.
@@ -31,6 +32,7 @@ async def upload_file(
         uploaded_by_id: User ID who uploaded
         uploaded_by_name: User name who uploaded
         max_limit: Maximum number of emails to upload from file (1-10000)
+        mail_source: Source of emails - Google Scholar, University, Other (overrides CSV value)
     """
     master = get_collection(COLLECTION)
 
@@ -77,6 +79,10 @@ async def upload_file(
         else:
             unique_count += 1
             seen_in_batch.add(email_addr)
+
+        # If a mail_source was provided during upload UI, override the CSV value for every row
+        if mail_source:
+            row["mailSource"] = mail_source
 
         docs_to_insert.append(
             build_email_master_document(
@@ -138,6 +144,7 @@ async def list_emails(
     company: str | None = None,
     uploaded_by: str | None = None,
     used_by_employee: str | None = None,
+    mail_source: str | None = None,
     include_duplicates: bool = True,
     search: str | None = None,
 ) -> dict:
@@ -157,6 +164,8 @@ async def list_emails(
         query["uploadedBy"] = uploaded_by
     if used_by_employee:
         query["usedByEmployeeId"] = used_by_employee
+    if mail_source:
+        query["mailSource"] = mail_source
     if not include_duplicates:
         query["isDuplicate"] = False
     if search:
@@ -184,59 +193,72 @@ async def list_emails(
 async def _enrich_emails_with_employee_names(docs: list[dict]) -> list[dict]:
     """Populate employee names from usedInProfiles or usedByEmployeeId.
     
-    IMPORTANT: usedInProfiles[].employeeId and usedByEmployeeId actually contain
-    the USER's _id (not the employee collection _id). Must look up in users directly.
+    The employeeId stored can be either:
+    - employees._id  (assigned after profile email generation)
+    - users._id      (assigned directly in older records)
+    We try both to resolve the name.
     """
     if not docs:
         return docs
     
     from bson import ObjectId
     users_col = get_collection("users")
+    employees_col = get_collection("employees")
     
-    # Cache for user names (keyed by user_id string)
+    # Cache for resolved names (keyed by raw id string)
     name_cache: dict[str, str] = {}
     
+    async def resolve_name(id_str: str) -> str:
+        """Try employees._id first, then users._id directly."""
+        if id_str in name_cache:
+            return name_cache[id_str]
+        
+        if not ObjectId.is_valid(id_str):
+            name_cache[id_str] = id_str
+            return id_str
+        
+        emp_name = None
+        
+        # 1) Try as employees._id → get linked user name
+        try:
+            emp_doc = await employees_col.find_one({"_id": ObjectId(id_str)})
+            if emp_doc and emp_doc.get("userId"):
+                user_doc = await users_col.find_one({"_id": ObjectId(emp_doc["userId"])})
+                if user_doc:
+                    emp_name = user_doc.get("name")
+        except Exception:
+            pass
+        
+        # 2) Try as users._id directly
+        if not emp_name:
+            try:
+                user_doc = await users_col.find_one({"_id": ObjectId(id_str)})
+                if user_doc:
+                    emp_name = user_doc.get("name")
+            except Exception:
+                pass
+        
+        # 3) Fall back to raw ID
+        result = emp_name or id_str
+        name_cache[id_str] = result
+        return result
+    
     for doc in docs:
-        # Get user ID from usedByEmployeeId or usedInProfiles
-        # (despite the name "employeeId", this is actually the user's _id)
-        user_id_str = doc.get("usedByEmployeeId")
-        if not user_id_str:
+        id_str = doc.get("usedByEmployeeId")
+        if not id_str:
             used_profiles = doc.get("usedInProfiles", [])
-            if used_profiles and len(used_profiles) > 0:
-                user_id_str = used_profiles[0].get("employeeId")
-        if user_id_str:
-            # Ensure it's a string
-            user_id_str = str(user_id_str)
-            
-            # Check cache first
-            if user_id_str in name_cache:
-                doc["usedByEmployeeName"] = name_cache[user_id_str]
-                doc["usedByEmployeeId"] = user_id_str
-                doc["inProfileEmails"] = True
-            else:
-                # Look up user name - user_id_str is the users._id value
-                emp_name = None
-                
-                try:
-                    # users._id is stored as ObjectId
-                    if ObjectId.is_valid(user_id_str):
-                        user = await users_col.find_one({"_id": ObjectId(user_id_str)})
-                        if user:
-                            emp_name = user.get("name")
-                except Exception as e:
-                    print(f"DEBUG: Error looking up user {user_id_str}: {e}", flush=True)
-                
-                # Fallback to ID if name not found
-                if not emp_name:
-                    emp_name = user_id_str
-                
-                # Cache and update document
-                name_cache[user_id_str] = emp_name
-                doc["usedByEmployeeName"] = emp_name
-                doc["usedByEmployeeId"] = user_id_str
-                doc["inProfileEmails"] = True
+            if used_profiles:
+                id_str = used_profiles[0].get("employeeId")
+        
+        if id_str:
+            id_str = str(id_str)
+            resolved = await resolve_name(id_str)
+            doc["usedByEmployeeName"] = resolved
+            doc["usedByEmployeeId"] = id_str
+            doc["inProfileEmails"] = True
     
     return docs
+
 
 
 async def get_email(email_id: str) -> dict:
@@ -273,6 +295,7 @@ async def get_dropdown_options() -> dict:
     states = await master.distinct("state", {"isDuplicate": False})
     industries = await master.distinct("industry", {"isDuplicate": False})
     companies = await master.distinct("company", {"isDuplicate": False})
+    mail_sources = await master.distinct("mailSource", {"isDuplicate": False})
     
     # Get all uploaders with their names
     uploaders_data = {}
@@ -352,6 +375,7 @@ async def get_dropdown_options() -> dict:
         "states": clean(states),
         "industries": clean(industries),
         "companies": clean(companies),
+        "mailSources": clean(mail_sources),
         "uploaders": uploaders,
         "usedByEmployees": used_by_employees,
     }
@@ -411,6 +435,8 @@ async def count_filtered_emails(filters: dict) -> dict:
         query["industry"] = {"$in": filters["industry"]}
     if filters.get("company"):
         query["company"] = {"$in": filters["company"]}
+    if filters.get("mailSource"):
+        query["mailSource"] = {"$in": filters["mailSource"]}
     if filters.get("type"):
         query["$or"] = [
             {"industry": {"$in": filters["type"]}},
@@ -447,6 +473,7 @@ async def query_for_profile(
         filters.get("industry"),
         filters.get("company"),
         filters.get("type"),
+        filters.get("mailSource"),
     ])
 
     if filters.get("country"):
@@ -457,6 +484,8 @@ async def query_for_profile(
         query["industry"] = {"$in": filters["industry"]}
     if filters.get("company"):
         query["company"] = {"$in": filters["company"]}
+    if filters.get("mailSource"):
+        query["mailSource"] = {"$in": filters["mailSource"]}
     if filters.get("type"):
         query["$or"] = [
             {"industry": {"$in": filters["type"]}},

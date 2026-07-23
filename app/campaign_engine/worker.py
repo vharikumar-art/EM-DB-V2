@@ -9,7 +9,7 @@ Flow per campaign:
   3. Fetch one batch of PENDING profile_emails
   4. For each lead:
        a. Mark as SENDING
-       b. Personalize subject + body via LangChain personalizer
+       b. Personalize subject + body (pure python replacement)
        c. Send over SMTP
        d. Mark SENT or FAILED
        e. Increment campaign counters (atomic)
@@ -34,7 +34,7 @@ from app.campaigns import service as campaign_service
 from app.campaigns.model import CampaignStatus
 from app.database.mongodb import get_collection
 from app.email_accounts.service import get_credentials_for_send, record_send
-from app.langchain_service.personalizer import build_email_payload
+from app.utils.personalizer import build_email_payload
 from app.notifications.schema import NotificationType
 from app.notifications.service import create_notification
 from app.notifications.websocket import manager
@@ -269,7 +269,7 @@ async def _run(campaign_id: str) -> None:
                 return
             
             # ----------------------------------------------------------
-            # Personalize with LangChain (placeholder replacement only)
+            # Personalize with placeholders
             # ----------------------------------------------------------
             try:
                 payload = build_email_payload(

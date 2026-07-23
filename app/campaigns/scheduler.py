@@ -103,9 +103,9 @@ class SchedulerResult:
         """Convert result to dictionary"""
         return {
             "total_checked": self.total_checked,
-            "total_executed": self.total_executed,
-            "successful": self.successful,
-            "failed": self.failed,
+            "total_dispatched": self.total_executed,
+            "successful_sync": self.successful,
+            "failed_sync": self.failed,
             "errors": self.errors,
             "execution_duration_ms": self.get_duration_ms(),
             "execution_start": self.execution_start.isoformat(),
@@ -234,7 +234,7 @@ async def finalize_campaign_execution(
                 next_run = calculate_next_run(
                     recurrence_type=recurrence_type,
                     scheduled_time_local=time_str,
-                    timezone_offset_minutes=0, # Simplification: assume server UTC if offset not available, or extract it if stored
+                    timezone_offset_minutes=campaign.get("timezoneOffsetMinutes", 0),
                     recurrence_days=campaign.get("recurrenceDays", []),
                 )
                 
@@ -337,6 +337,24 @@ async def finalize_campaign_execution(
             )
 
 
+async def _execute_and_finalize(campaign_id: str, campaign_name: str) -> None:
+    """Wrapper to run a campaign in the background and finalize it upon completion."""
+    try:
+        success, error_msg = await execute_campaign(campaign_id)
+        await finalize_campaign_execution(campaign_id, success, error_msg)
+        if success:
+            logger.info(f"Scheduled campaign {campaign_id} completed successfully")
+        else:
+            logger.error(f"Scheduled campaign {campaign_id} failed: {error_msg}")
+    except Exception as e:
+        logger.error(f"Fatal error in background execution for {campaign_id}: {e}", exc_info=True)
+        # Fallback finalize
+        try:
+            await finalize_campaign_execution(campaign_id, False, str(e))
+        except Exception:
+            pass
+
+
 async def process_scheduled_campaigns() -> dict:
     """
     Main scheduler function called by cron every minute.
@@ -344,9 +362,8 @@ async def process_scheduled_campaigns() -> dict:
     1. Finds all campaigns due for execution
     2. For each campaign:
         a. Atomically transitions to 'processing' status
-        b. Executes the campaign
-        c. Updates status to 'completed' or 'scheduled' (for retry)
-    3. Returns execution summary
+        b. Dispatches the campaign to run in the background (asyncio.create_task)
+    3. Returns execution summary (dispatched count)
     
     Returns:
         dict: Execution result containing counts and details
@@ -380,33 +397,18 @@ async def process_scheduled_campaigns() -> dict:
                     logger.warning(f"Campaign {campaign_id} already being processed by another scheduler instance")
                     continue
                 
-                logger.info(f"Processing campaign: {campaign_name} ({campaign_id})")
+                logger.info(f"Dispatching campaign: {campaign_name} ({campaign_id})")
                 result.total_executed += 1
                 
-                # Execute the campaign
-                success, error_msg = await execute_campaign(campaign_id)
-                
-                # Finalize based on result
-                await finalize_campaign_execution(campaign_id, success, error_msg)
-                
-                if success:
-                    result.successful += 1
-                    logger.info(f"Campaign {campaign_id} completed successfully")
-                else:
-                    result.failed += 1
-                    logger.error(f"Campaign {campaign_id} failed: {error_msg}")
-                    result.errors.append({
-                        "campaign_id": campaign_id,
-                        "campaign_name": campaign_name,
-                        "error": error_msg,
-                    })
+                # Execute the campaign in the background so we don't block the scheduler
+                asyncio.create_task(_execute_and_finalize(campaign_id, campaign_name))
             
             except Exception as e:
                 result.failed += 1
                 error_msg = str(e)
-                logger.error(f"Unexpected error processing campaign {campaign_id}: {error_msg}", exc_info=True)
+                logger.error(f"Unexpected error dispatching campaign {campaign_id}: {error_msg}", exc_info=True)
                 
-                # Still finalize the campaign to avoid stuck state
+                # Finalize the campaign to avoid stuck state
                 await finalize_campaign_execution(campaign_id, False, error_msg)
                 
                 result.errors.append({
@@ -416,8 +418,7 @@ async def process_scheduled_campaigns() -> dict:
                 })
         
         logger.info(
-            f"Scheduler completed: {result.successful} successful, "
-            f"{result.failed} failed out of {result.total_executed} executed"
+            f"Scheduler completed: {result.total_executed} campaigns dispatched to background."
         )
     
     except Exception as e:

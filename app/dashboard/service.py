@@ -107,62 +107,6 @@ async def get_employee_dashboard(employee_id: str, query: DashboardQuery) -> dic
     sent_result = await logs.aggregate(sent_pipeline).to_list(length=1)
     sent_total  = sent_result[0]["total"] if sent_result else 0
 
-    # ── Success rate ─────────────────────────────────────────────────────────
-    delivered = await pe_col.count_documents(
-        {"employeeId": employee_id, "sendStatus": "sent"}
-    )
-    attempted = delivered + failed_total
-    success_rate = round((delivered / attempted * 100), 1) if attempted > 0 else 0.0
-
-    # ── Daily limit (from first active profile found) ─────────────────────────
-    first_profile = await profiles.find_one(
-        {"employeeId": employee_id, "isActive": True}
-    )
-    daily_limit = (
-        first_profile.get("sendingOptions", {}).get("dailyLimit", 100)
-        if first_profile
-        else 100
-    )
-
-    # ── Profile statistics ───────────────────────────────────────────────────
-    profile_stats = []
-    async for profile in profiles.find({"employeeId": employee_id}):
-        pid = str(profile["_id"])
-        p_pending = await pe_col.count_documents(
-            {"profileId": pid, "sendStatus": "pending"}
-        )
-        p_sent = await pe_col.count_documents(
-            {"profileId": pid, "sendStatus": "sent"}
-        )
-        p_failed = await pe_col.count_documents(
-            {"profileId": pid, "sendStatus": "failed"}
-        )
-        profile_stats.append(
-            {
-                "profileId": pid,
-                "profileName": profile["profileName"],
-                "pendingCount": p_pending,
-                "sentCount": p_sent,
-                "failedCount": p_failed,
-            }
-        )
-
-    # ── Recent campaigns ─────────────────────────────────────────────────────
-    recent_campaigns_cursor = (
-        campaigns.find({"employeeId": employee_id})
-        .sort("createdAt", -1)
-        .limit(10)
-    )
-    recent_campaigns = serialize_list([d async for d in recent_campaigns_cursor])
-
-    # ── Recent upload logs ───────────────────────────────────────────────────
-    recent_uploads_cursor = (
-        logs.find({"employeeId": employee_id, "action": "UPLOAD"})
-        .sort("createdAt", -1)
-        .limit(10)
-    )
-    recent_uploads = serialize_list([d async for d in recent_uploads_cursor])
-
     return {
         "todayUploadCount":    today_uploads,
         "last7DaysUploadCount": last_7_uploads,
@@ -175,11 +119,6 @@ async def get_employee_dashboard(employee_id: str, query: DashboardQuery) -> dic
         "sentEmailCount":      sent_total,
         "pendingCount":        pending_total,
         "failedCount":         failed_total,
-        "successRate":         success_rate,
-        "dailyLimit":          daily_limit,
-        "profileStatistics":   profile_stats,
-        "recentCampaigns":     recent_campaigns,
-        "recentUploadHistory": recent_uploads,
     }
 
 
@@ -323,21 +262,6 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
             }
         )
 
-    # ── Profile usage stats ───────────────────────────────────────────────────
-    profile_usage_pipeline = [
-        {"$group": {"_id": "$employeeId", "profileCount": {"$sum": 1}}},
-        {"$sort": {"profileCount": -1}},
-        {"$limit": 20},
-    ]
-    profile_usage = [
-        {"employeeId": row["_id"], "profileCount": row["profileCount"]}
-        async for row in profiles.aggregate(profile_usage_pipeline)
-    ]
-
-    # ── Recent activities (last 20 logs) ─────────────────────────────────────
-    recent_activities_cursor = logs.find({}).sort("createdAt", -1).limit(20)
-    recent_activities = serialize_list([d async for d in recent_activities_cursor])
-
     # ── Detailed employee performance ──────────────────────────────────────────
     employee_performance = []
     async for emp in employees.find():
@@ -457,20 +381,11 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
         "overallEmailMaster":  await master.count_documents({}),
         "overallProfileEmails": await pe_col.count_documents({}),
         "overallSent":         await pe_col.count_documents({"sendStatus": "sent"}),
-        "overallPending":      await pe_col.count_documents({"sendStatus": "pending"}),
         # Sent today
         "sentToday":           await pe_col.count_documents(
             {"sendStatus": "sent", "sentDate": {"$gte": now.replace(hour=0, minute=0, second=0, microsecond=0)}}
         ),
-        # Total campaigns (overall, not date-filtered)
-        "totalAllCampaigns":   total_campaigns,
-        "totalAllRunningCampaigns": running_campaigns,
-        "employeeRanking":     employee_ranking,
-        "top7DaysUploadRanking": top7_ranking,
-        "campaignPerformance": campaign_performance,
-        "profileUsage":        profile_usage,
         "employeePerformance": employee_performance,
-        "recentActivities":    recent_activities,
     }
 
 
