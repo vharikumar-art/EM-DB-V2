@@ -218,6 +218,9 @@ async def finalize_campaign_execution(
     execution_duration = None
     
     if processing_started:
+        # MongoDB returns naive datetimes (UTC); make aware before subtracting
+        if processing_started.tzinfo is None:
+            processing_started = processing_started.replace(tzinfo=timezone.utc)
         duration = now - processing_started
         execution_duration = duration.total_seconds()
     
