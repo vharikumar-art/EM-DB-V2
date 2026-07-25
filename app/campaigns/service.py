@@ -406,6 +406,7 @@ async def abort_campaign(campaign_id: str, reason: str = "") -> None:
         {
             "$set": {
                 "status": CampaignStatus.FAILED.value,
+                "errorMessage": reason,
                 "completedAt": now,
                 "updatedAt": now,
             }

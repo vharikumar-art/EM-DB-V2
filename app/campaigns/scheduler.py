@@ -224,6 +224,23 @@ async def finalize_campaign_execution(
         duration = now - processing_started
         execution_duration = duration.total_seconds()
     
+    current_status = campaign.get("status")
+
+    if success:
+        # Check actual status set by worker
+        if current_status == CampaignStatus.FAILED.value:
+            # Worker aborted it (auth failed, templates missing, etc.)
+            success = False
+            error_message = campaign.get("errorMessage") or "Aborted by worker"
+        elif current_status == CampaignStatus.PAUSED.value:
+            # Worker paused it (e.g. daily limit reached)
+            # Just record execution duration and exit
+            await campaigns.update_one(
+                {"_id": to_object_id(campaign_id)},
+                {"$set": {"executionDuration": execution_duration}}
+            )
+            return
+
     if success:
         # Check if it should reschedule
         recurrence_type = campaign.get("recurrenceType", "once")
