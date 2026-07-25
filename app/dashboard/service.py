@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
+from app.campaigns.model import CampaignStatus
 from app.dashboard.schema import DashboardQuery
 from app.dashboard.utils import resolve_date_range
 from app.database.mongodb import get_collection
@@ -35,6 +36,12 @@ async def get_employee_dashboard(employee_id: str, query: DashboardQuery) -> dic
     campaigns  = get_collection("campaigns")
     profiles   = get_collection("profiles")
     logs       = get_collection("logs")
+    employees  = get_collection("employees")
+
+    # email_master is global: uploads are owned by users._id in uploadedBy,
+    # while the other employee resources use employees._id in employeeId.
+    employee = await employees.find_one({"_id": _safe_oid(employee_id)}, {"userId": 1})
+    uploader_id = str(employee["userId"]) if employee and employee.get("userId") else employee_id
 
     now         = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -43,17 +50,17 @@ async def get_employee_dashboard(employee_id: str, query: DashboardQuery) -> dic
 
     # ── Upload counts ────────────────────────────────────────────────────────
     today_uploads  = await master.count_documents(
-        {"employeeId": employee_id, "createdAt": {"$gte": today_start}}
+        {"uploadedBy": uploader_id, "createdAt": {"$gte": today_start}}
     )
     last_7_uploads = await master.count_documents(
-        {"employeeId": employee_id, "createdAt": {"$gte": last_7_start}}
+        {"uploadedBy": uploader_id, "createdAt": {"$gte": last_7_start}}
     )
     total_uploads  = await master.count_documents(
-        {"employeeId": employee_id, "createdAt": {"$gte": start_dt, "$lte": end_dt}}
+        {"uploadedBy": uploader_id, "createdAt": {"$gte": start_dt, "$lte": end_dt}}
     )
     unique_emails  = await master.count_documents(
         {
-            "employeeId": employee_id,
+            "uploadedBy": uploader_id,
             "isDuplicate": False,
             "createdAt": {"$gte": start_dt, "$lte": end_dt},
         }
@@ -73,7 +80,10 @@ async def get_employee_dashboard(employee_id: str, query: DashboardQuery) -> dic
     total_campaigns = unique_campaigns_result[0]["total"] if unique_campaigns_result else 0
     
     running_campaigns = await campaigns.count_documents(
-        {"employeeId": employee_id, "status": "running"}
+        {
+            "employeeId": employee_id,
+            "status": {"$in": [CampaignStatus.RUNNING.value, CampaignStatus.PROCESSING.value]},
+        }
     )
 
     # ── Sent today (profile_emails) ──────────────────────────────────────────
