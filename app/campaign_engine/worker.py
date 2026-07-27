@@ -181,6 +181,53 @@ async def _run(campaign_id: str) -> None:
             logger.error(f"Failed to claim new pending emails for campaign {campaign_id}: {e}")
 
     # ------------------------------------------------------------------
+    # 3.6. Resolve templates ONCE before the send loop
+    # ------------------------------------------------------------------
+    templates = profile.get("templates", [])
+
+    # Filter out templates that have no content (empty subject or body)
+    templates = [t for t in templates if t.get("subject", "").strip() or t.get("body", "").strip()]
+
+    if not templates:
+        # Fallback 1: legacy top-level subject/body fields
+        legacy_subject = profile.get("subject", "").strip()
+        legacy_body = profile.get("body", "").strip()
+        if not legacy_body:
+            legacy_body = (profile.get("promptSettings") or {}).get("customInstruction", "").strip()
+
+        if legacy_subject or legacy_body:
+            templates = [{"name": "Legacy Template", "subject": legacy_subject, "body": legacy_body, "weight": 1}]
+            logger.info(f"Campaign {campaign_id}: Using legacy subject/body fields from profile.")
+        else:
+            # Fallback 2: use the profile snapshot stored on the campaign document
+            snapshot = campaign.get("profileSnapshot") or {}
+            snap_subject = snapshot.get("subject", "").strip()
+            snap_body = snapshot.get("body", "").strip()
+            if not snap_body:
+                snap_body = (snapshot.get("promptSettings") or {}).get("customInstruction", "").strip()
+            snap_templates = snapshot.get("templates", [])
+            snap_templates = [t for t in snap_templates if t.get("subject", "").strip() or t.get("body", "").strip()]
+
+            if snap_templates:
+                templates = snap_templates
+                logger.info(f"Campaign {campaign_id}: Using templates from campaign profileSnapshot.")
+            elif snap_subject or snap_body:
+                templates = [{"name": "Snapshot Template", "subject": snap_subject, "body": snap_body, "weight": 1}]
+                logger.info(f"Campaign {campaign_id}: Using subject/body from campaign profileSnapshot.")
+            else:
+                logger.error(
+                    f"Campaign {campaign_id}: Profile '{profile_id}' has no templates and no fallback content. "
+                    f"Profile templates raw: {profile.get('templates')!r} | "
+                    f"Profile subject: {profile.get('subject')!r} | "
+                    f"Profile body: {profile.get('body')!r} | "
+                    f"Snapshot templates: {snapshot.get('templates')!r}"
+                )
+                await campaign_service.abort_campaign(campaign_id, "Profile has no templates. Please edit the profile and add at least one template with subject and body.")
+                return
+
+    logger.info(f"Campaign {campaign_id}: Resolved {len(templates)} template(s) for sending.")
+
+    # ------------------------------------------------------------------
     # 4. Send loop
     # ------------------------------------------------------------------
     auth_failure_count = 0
@@ -245,28 +292,22 @@ async def _run(campaign_id: str) -> None:
 
             # ----------------------------------------------------------
             # Select random template (A/B testing) - using weighted selection
+            # (templates already resolved before the loop)
             # ----------------------------------------------------------
-            templates = profile.get("templates", [])
-            
-            if not templates:
-                # Templates are now required - this should never happen
-                logger.error(f"Campaign {campaign_id}: Profile has no templates! This should not happen.")
-                await campaign_service.abort_campaign(campaign_id, "Profile has no templates")
-                return
-            
-            # Use weighted random selection from templates
             selected_template = select_template_weighted(templates)
-            logger.debug(f"Selected template '{selected_template.get('name', 'unnamed')}' (ID: {selected_template.get('id', 'unknown')}) for campaign {campaign_id}")
+            logger.debug(f"Selected template '{selected_template.get('name', 'unnamed')}' for campaign {campaign_id}")
             
             # Extract subject and body from template (required fields)
-            subject_text = selected_template.get("subject", "")
-            body_text = selected_template.get("body", "")
+            subject_text = selected_template.get("subject", "").strip()
+            body_text = selected_template.get("body", "").strip()
             
-            # Validate template has content
-            if not subject_text or not body_text:
-                logger.error(f"Campaign {campaign_id}: Template missing subject or body. Subject: '{subject_text}' Body: '{body_text[:50] if body_text else 'empty'}...'")
-                await campaign_service.abort_campaign(campaign_id, "Template missing subject or body")
-                return
+            # Validate template has content (should never fail since we filtered above)
+            if not subject_text and not body_text:
+                logger.warning(f"Campaign {campaign_id}: Selected template has no subject or body — skipping this lead.")
+                await pe_service.mark_failed(pe_id, "Template has no subject or body")
+                await campaign_service.increment_counters(campaign_id, failed=1)
+                total_failed += 1
+                continue
             
             # ----------------------------------------------------------
             # Personalize with placeholders

@@ -475,3 +475,82 @@ async def get_dropdown_options() -> dict:
         "profiles": profiles,
         "campaigns": campaigns
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Upload History
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def get_upload_history(query: DashboardQuery) -> dict:
+    """Fetch upload history from logs, filtering out deleted users."""
+    logs = get_collection("logs")
+    users_col = get_collection("users")
+    
+    start_dt, end_dt = resolve_date_range(query)
+    
+    # Fetch currently active users to filter out deleted ones
+    active_users = {}
+    async for u in users_col.find():
+        active_users[str(u["_id"])] = {
+            "name": u.get("name", "Unknown"),
+            "email": u.get("email", "N/A")
+        }
+        
+    pipeline = [
+        {
+            "$match": {
+                "action": "UPLOAD",
+                "runDate": {"$gte": start_dt, "$lte": end_dt}
+            }
+        },
+        {"$sort": {"runDate": -1}}
+    ]
+    
+    history_records = []
+    
+    total_uploads = 0
+    total_unique = 0
+    total_duplicate = 0
+    total_invalid = 0
+    
+    async for log in logs.aggregate(pipeline):
+        emp_id = log.get("employeeId")
+        
+        # Only include logs for users that still exist in the database
+        if emp_id not in active_users:
+            continue
+            
+        user_info = active_users[emp_id]
+        name = user_info["name"]
+        email = user_info["email"]
+        up = log.get("uploadedCount", 0)
+        uq = log.get("uniqueCount", 0)
+        dp = log.get("duplicateCount", 0)
+        inv = max(0, up - uq - dp)
+        
+        total_uploads += up
+        total_unique += uq
+        total_duplicate += dp
+        total_invalid += inv
+        
+        history_records.append({
+            "id": str(log["_id"]),
+            "employeeId": emp_id,
+            "employeeName": name,
+            "employeeEmail": email,
+            "uploadCount": up,
+            "uniqueCount": uq,
+            "duplicateCount": dp,
+            "invalidCount": inv,
+            "date": log.get("runDate")
+        })
+        
+    return {
+        "records": history_records,
+        "totals": {
+            "totalUploads": total_uploads,
+            "totalUnique": total_unique,
+            "totalDuplicate": total_duplicate,
+            "totalInvalid": total_invalid
+        }
+    }

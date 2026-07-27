@@ -89,6 +89,7 @@ async def create_campaign(
         "profileName": profile.get("profileName"),
         "gmailAccount": profile.get("gmailAccount"),
         "subject": profile.get("subject"),
+        "templates": profile.get("templates", []),
         "sendingOptions": profile.get("sendingOptions"),
         "promptSettings": profile.get("promptSettings"),
     }
@@ -213,6 +214,7 @@ async def create_scheduled_campaign(
         "profileName": profile.get("profileName"),
         "gmailAccount": profile.get("gmailAccount"),
         "subject": profile.get("subject"),
+        "templates": profile.get("templates", []),
         "sendingOptions": profile.get("sendingOptions"),
         "promptSettings": profile.get("promptSettings"),
     }

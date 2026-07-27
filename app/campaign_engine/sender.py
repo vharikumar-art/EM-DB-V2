@@ -71,19 +71,34 @@ def _build_mime_message(
 
 
 def _attach_file(msg: MIMEMultipart, filepath: str, filename: str) -> None:
-    """Attach a file to the email message"""
-    # Construct full path
+    """Attach a file to the email message. Skips gracefully if file is missing."""
+    # Try path relative to backend root (sender.py is 3 levels deep)
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
     full_path = os.path.join(base_dir, filepath)
-    
-    logger.info(f"Attempting to attach file: {filename} from path: {full_path}")
-    
+
+    # Also try relative to current working directory as fallback
     if not os.path.exists(full_path):
-        logger.error(f"Attachment file not found: {full_path}")
-        raise FileNotFoundError(f"Attachment missing: {filename}")
-    
-    logger.info(f"File found, size: {os.path.getsize(full_path)} bytes")
-    
+        cwd_path = os.path.join(os.getcwd(), filepath)
+        if os.path.exists(cwd_path):
+            full_path = cwd_path
+            logger.info(f"Found attachment via CWD fallback: {cwd_path}")
+
+    logger.info(f"Attempting to attach file: {filename} from path: {full_path}")
+
+    if not os.path.exists(full_path):
+        logger.error(
+            f"Attachment file not found: {full_path} — skipping attachment '{filename}' and sending email without it."
+        )
+        # Skip gracefully rather than crashing the entire campaign
+        return
+
+    file_size = os.path.getsize(full_path)
+    if file_size == 0:
+        logger.warning(f"Attachment '{filename}' is empty (0 bytes) — skipping.")
+        return
+
+    logger.info(f"File found, size: {file_size} bytes")
+
     with open(full_path, "rb") as attachment:
         part = MIMEBase("application", "octet-stream")
         part.set_payload(attachment.read())

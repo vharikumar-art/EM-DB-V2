@@ -82,3 +82,13 @@ async def get_dropdown_options(current_user: CurrentUser = Depends(get_current_u
     """Get dropdown options for admins: employees, profiles, campaigns, and admin users."""
     data = await service.get_dropdown_options()
     return ApiResponse(message="Dropdown options fetched", data=data)
+
+
+@router.get("/upload-history", response_model=ApiResponse, dependencies=[Depends(require_admin)])
+async def upload_history(
+    query: DashboardQuery = Depends(_dashboard_query),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Get history of uploads for all active users."""
+    data = await service.get_upload_history(query)
+    return ApiResponse(message="Upload history fetched", data=data)

@@ -71,7 +71,10 @@ def build_email_payload(
         raw_body = template.get("body", "")
     else:
         raw_subject = profile.get("subject", "")
-        raw_body = profile.get("promptSettings", {}).get("customInstruction", "")
+        raw_body = profile.get("body", "")
+        # fallback for old data structure
+        if not raw_body:
+            raw_body = profile.get("promptSettings", {}).get("customInstruction", "")
 
     sig = profile.get("signature", "")
 
