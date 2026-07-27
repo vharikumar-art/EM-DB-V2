@@ -586,6 +586,93 @@ async def get_upload_history(
     # ── Build employee dropdown list sorted by name
     employees_dropdown = sorted(employee_set.values(), key=lambda e: e["name"])
 
+    # ── Today's work status (per-employee, always fixed to today regardless of date filter)
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    pe_col = get_collection("profile_emails")
+    campaigns_col = get_collection("campaigns")
+
+    # All unique userIds seen in logs (these are stored as employeeId in logs)
+    all_user_ids = list(employee_set.keys())
+
+    # Today's upload stats from logs (grouped by employeeId = userId)
+    today_upload_agg = await logs.aggregate([
+        {
+            "$match": {
+                "action": "UPLOAD",
+                "runDate": {"$gte": today_start},
+                "employeeId": {"$in": all_user_ids},
+            }
+        },
+        {
+            "$group": {
+                "_id": "$employeeId",
+                "uploadCount":    {"$sum": "$uploadedCount"},
+                "uniqueCount":    {"$sum": "$uniqueCount"},
+                "duplicateCount": {"$sum": "$duplicateCount"},
+                "uploadEvents":   {"$sum": 1},
+            }
+        }
+    ]).to_list(None)
+    today_upload_map = {r["_id"]: r for r in today_upload_agg}
+
+    # Build reverse map: userId -> employees._id  (needed for pe_col / campaigns queries)
+    user_to_emp: dict[str, str] = {v: k for k, v in emp_to_user.items()}
+
+    emp_ids_for_today = [user_to_emp[uid] for uid in all_user_ids if uid in user_to_emp]
+
+    # Today's sent emails from profile_emails (grouped by employeeId = employees._id)
+    today_sent_agg = await pe_col.aggregate([
+        {
+            "$match": {
+                "sendStatus": "sent",
+                "sentDate": {"$gte": today_start},
+                "employeeId": {"$in": emp_ids_for_today},
+            }
+        },
+        {"$group": {"_id": "$employeeId", "sentCount": {"$sum": 1}}},
+    ]).to_list(None)
+    today_sent_map = {r["_id"]: r["sentCount"] for r in today_sent_agg}
+
+    # Running campaigns (not date-filtered — current live status)
+    running_agg = await campaigns_col.aggregate([
+        {
+            "$match": {
+                "employeeId": {"$in": emp_ids_for_today},
+                "status": {"$in": ["running", "processing"]},
+            }
+        },
+        {"$group": {"_id": "$employeeId", "count": {"$sum": 1}}},
+    ]).to_list(None)
+    running_map = {r["_id"]: r["count"] for r in running_agg}
+
+    # Assemble todayStatus list (all active employees, even those with 0 activity)
+    today_status = []
+    for uid, emp_info in employee_set.items():
+        up_stats = today_upload_map.get(uid, {})
+        up       = up_stats.get("uploadCount", 0)
+        uq       = up_stats.get("uniqueCount", 0)
+        dp       = up_stats.get("duplicateCount", 0)
+        inv      = max(0, up - uq - dp)
+        eid      = user_to_emp.get(uid, uid)   # employees._id (fallback to userId)
+
+        today_status.append({
+            "employeeId":      uid,
+            "employeeName":    emp_info["name"],
+            "employeeEmail":   emp_info["email"],
+            "uploadCount":     up,
+            "uniqueCount":     uq,
+            "duplicateCount":  dp,
+            "invalidCount":    inv,
+            "uploadEvents":    up_stats.get("uploadEvents", 0),
+            "sentToday":       today_sent_map.get(eid, 0),
+            "runningCampaigns": running_map.get(eid, 0),
+        })
+
+    # Sort by upload count desc
+    today_status.sort(key=lambda x: x["uploadCount"], reverse=True)
+
     return {
         "records": paginated,
         "employees": employees_dropdown,
@@ -601,4 +688,6 @@ async def get_upload_history(
             "total": total_records,
             "total_pages": total_pages,
         },
+        "todayStatus": today_status,
     }
+
