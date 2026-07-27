@@ -35,6 +35,13 @@ async def list_all_users():
     return ApiResponse(message="Users fetched", data=users)
 
 
+@router.get("/{user_id}/details", response_model=ApiResponse, dependencies=[Depends(require_admin)])
+async def get_user_details(user_id: str):
+    """Get full user profile with performance stats (uploads, profiles, campaigns)."""
+    data = await service.get_user_details(user_id)
+    return ApiResponse(message="User details fetched", data=data)
+
+
 @router.get("/{user_id}", response_model=ApiResponse, dependencies=[Depends(require_admin)])
 async def get_user(user_id: str):
     user = await service.get_user_by_id(user_id)

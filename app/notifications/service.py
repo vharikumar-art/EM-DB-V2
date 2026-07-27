@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from app.core.exceptions import NotFoundException
 from app.database.mongodb import get_collection
 from app.notifications.model import build_notification_document
@@ -55,9 +57,10 @@ async def list_notifications(employee_id: str, unread_only: bool = False, limit:
 
 async def mark_as_read(notification_id: str, employee_id: str) -> dict:
     notifications = get_collection(COLLECTION)
+    now = datetime.now(timezone.utc)
     result = await notifications.find_one_and_update(
         {"_id": to_object_id(notification_id), "employeeId": employee_id},
-        {"$set": {"isRead": True}},
+        {"$set": {"isRead": True, "readAt": now}},
         return_document=True,
     )
     if not result:
@@ -67,8 +70,9 @@ async def mark_as_read(notification_id: str, employee_id: str) -> dict:
 
 async def mark_all_as_read(employee_id: str) -> dict:
     notifications = get_collection(COLLECTION)
+    now = datetime.now(timezone.utc)
     result = await notifications.update_many(
         {"employeeId": employee_id, "isRead": False},
-        {"$set": {"isRead": True}}
+        {"$set": {"isRead": True, "readAt": now}}
     )
     return {"modifiedCount": result.modified_count}

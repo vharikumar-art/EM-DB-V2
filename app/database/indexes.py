@@ -94,6 +94,14 @@ async def create_indexes() -> None:
     await db["notifications"].create_index(
         [("employeeId", 1), ("isRead", 1), ("createdAt", -1)]
     )
+    # TTL index: auto-delete read notifications 2 hours (7200s) after readAt is set.
+    # sparse=True means unread docs (readAt=None) are NOT touched by this index.
+    await db["notifications"].create_index(
+        "readAt",
+        expireAfterSeconds=7200,
+        sparse=True,
+        name="notifications_readAt_ttl"
+    )
 
     # ── auth (revoked tokens) ────────────────────────────────────────────────
     await db["revoked_tokens"].create_index("token", unique=True)
