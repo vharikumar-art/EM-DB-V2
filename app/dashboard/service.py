@@ -481,76 +481,124 @@ async def get_dropdown_options() -> dict:
 # Upload History
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def get_upload_history(query: DashboardQuery) -> dict:
-    """Fetch upload history from logs, filtering out deleted users."""
+async def get_upload_history(
+    query: DashboardQuery,
+    employee_id: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> dict:
+    """Fetch paginated upload history from logs, filtering out deleted users."""
     logs = get_collection("logs")
     users_col = get_collection("users")
-    
+    employees_col = get_collection("employees")
+
     start_dt, end_dt = resolve_date_range(query)
-    
-    # Fetch currently active users to filter out deleted ones
-    active_users = {}
+
+    # Build map: userId -> {name, email} for active users
+    active_users: dict[str, dict] = {}
     async for u in users_col.find():
         active_users[str(u["_id"])] = {
             "name": u.get("name", "Unknown"),
-            "email": u.get("email", "N/A")
+            "email": u.get("email", "N/A"),
         }
-        
-    pipeline = [
-        {
-            "$match": {
-                "action": "UPLOAD",
-                "runDate": {"$gte": start_dt, "$lte": end_dt}
-            }
-        },
-        {"$sort": {"runDate": -1}}
-    ]
-    
-    history_records = []
-    
-    total_uploads = 0
-    total_unique = 0
-    total_duplicate = 0
-    total_invalid = 0
-    
+
+    # Build map: employeeId -> userId  (employees collection links them)
+    # Also build dropdown list of employees that appear in upload logs within date range
+    emp_to_user: dict[str, str] = {}
+    async for emp in employees_col.find({}, {"_id": 1, "userId": 1}):
+        emp_to_user[str(emp["_id"])] = str(emp.get("userId", ""))
+
+    # Resolve the requested employeeId filter to a userId for matching
+    filter_user_id: str | None = None
+    if employee_id:
+        filter_user_id = emp_to_user.get(employee_id)
+
+    match_stage: dict = {
+        "action": "UPLOAD",
+        "runDate": {"$gte": start_dt, "$lte": end_dt},
+    }
+    pipeline = [{"$match": match_stage}, {"$sort": {"runDate": -1}}]
+
+    # ── First pass: build full record list (needed for totals & employee dropdown)
+    all_records: list[dict] = []
+    employee_set: dict[str, dict] = {}  # employeeId -> {id, name, email}
+
     async for log in logs.aggregate(pipeline):
         emp_id = log.get("employeeId")
-        
-        # Only include logs for users that still exist in the database
+
+        # emp_id here is the userId stored in logs (not employees._id)
         if emp_id not in active_users:
             continue
-            
+
         user_info = active_users[emp_id]
-        name = user_info["name"]
-        email = user_info["email"]
+
+        # Resolve back to employees._id for the dropdown
+        # (logs store userId as employeeId; find the matching employee doc)
+        resolved_emp_id = emp_id  # fallback — use userId if no employee doc exists
+
+        # Track unique employees for the dropdown
+        if resolved_emp_id not in employee_set:
+            employee_set[resolved_emp_id] = {
+                "id": resolved_emp_id,
+                "name": user_info["name"],
+                "email": user_info["email"],
+            }
+
         up = log.get("uploadedCount", 0)
         uq = log.get("uniqueCount", 0)
         dp = log.get("duplicateCount", 0)
         inv = max(0, up - uq - dp)
-        
-        total_uploads += up
-        total_unique += uq
-        total_duplicate += dp
-        total_invalid += inv
-        
-        history_records.append({
+
+        all_records.append({
             "id": str(log["_id"]),
-            "employeeId": emp_id,
-            "employeeName": name,
-            "employeeEmail": email,
+            "employeeId": resolved_emp_id,
+            "employeeName": user_info["name"],
+            "employeeEmail": user_info["email"],
             "uploadCount": up,
             "uniqueCount": uq,
             "duplicateCount": dp,
             "invalidCount": inv,
-            "date": log.get("runDate")
+            "date": log.get("runDate"),
         })
-        
+
+    # ── Apply employee filter (server-side, after resolving)
+    if employee_id:
+        # employee_id may be either an employees._id or a userId — match both
+        filtered = [
+            r for r in all_records
+            if r["employeeId"] == employee_id or r["employeeId"] == filter_user_id
+        ]
+    else:
+        filtered = all_records
+
+    # ── Compute totals on the filtered (but un-paginated) set
+    total_uploads = sum(r["uploadCount"] for r in filtered)
+    total_unique = sum(r["uniqueCount"] for r in filtered)
+    total_duplicate = sum(r["duplicateCount"] for r in filtered)
+    total_invalid = sum(r["invalidCount"] for r in filtered)
+
+    # ── Paginate
+    total_records = len(filtered)
+    total_pages = max(1, (total_records + page_size - 1) // page_size)
+    skip = (page - 1) * page_size
+    paginated = filtered[skip: skip + page_size]
+
+    # ── Build employee dropdown list sorted by name
+    employees_dropdown = sorted(employee_set.values(), key=lambda e: e["name"])
+
     return {
-        "records": history_records,
+        "records": paginated,
+        "employees": employees_dropdown,
         "totals": {
             "totalUploads": total_uploads,
             "totalUnique": total_unique,
             "totalDuplicate": total_duplicate,
-            "totalInvalid": total_invalid
-        }
+            "totalInvalid": total_invalid,
+        },
+        "pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total": total_records,
+            "total_pages": total_pages,
+        },
     }

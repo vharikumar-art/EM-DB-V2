@@ -87,8 +87,11 @@ async def get_dropdown_options(current_user: CurrentUser = Depends(get_current_u
 @router.get("/upload-history", response_model=ApiResponse, dependencies=[Depends(require_admin)])
 async def upload_history(
     query: DashboardQuery = Depends(_dashboard_query),
+    employeeId: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    """Get history of uploads for all active users."""
-    data = await service.get_upload_history(query)
+    """Get paginated upload history for all (or a specific) active employee."""
+    data = await service.get_upload_history(query, employee_id=employeeId, page=page, page_size=page_size)
     return ApiResponse(message="Upload history fetched", data=data)
