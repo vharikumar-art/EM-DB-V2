@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -28,15 +29,37 @@ from app.templates.router import router as templates_router
 from app.users.router import router as users_router
 
 
+async def _scheduler_loop() -> None:
+    """Background task: check and fire due scheduled campaigns every 60 seconds."""
+    from app.campaigns.scheduler import process_scheduled_campaigns
+    while True:
+        try:
+            await asyncio.sleep(60)
+            await process_scheduled_campaigns()
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            import logging
+            logging.getLogger("scheduler_loop").error("Scheduler tick error: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     await connect_to_mongo()
     await create_indexes()
-    
+
+    # Start internal scheduler loop (replaces external cron)
+    scheduler_task = asyncio.create_task(_scheduler_loop())
+
     yield
-    
+
     # Shutdown
+    scheduler_task.cancel()
+    try:
+        await scheduler_task
+    except asyncio.CancelledError:
+        pass
     await close_mongo_connection()
 
 

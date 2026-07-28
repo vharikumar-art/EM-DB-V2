@@ -56,27 +56,36 @@ def calculate_next_run(
     elif recurrence_type == "weekly":
         if not recurrence_days:
             raise ValueError("recurrenceDays is required for 'weekly' campaigns")
-        
+
         # Current local weekday (0=Mon, 6=Sun)
         current_weekday = local_now.weekday()
-        
-        # Check today first
-        if current_weekday in recurrence_days:
-            candidate = local_now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
-            if candidate > local_now:
-                local_next = candidate
-            else:
-                # Need a future day. Find the next day in the list.
-                days_ahead = min((day - current_weekday) % 7 if (day - current_weekday) % 7 != 0 else 7 for day in recurrence_days)
-                local_next = local_now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0) + timedelta(days=days_ahead)
-        else:
-            # Find the next day in the list.
-            days_ahead = min((day - current_weekday) % 7 for day in recurrence_days if (day - current_weekday) % 7 > 0)
-            local_next = local_now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0) + timedelta(days=days_ahead)
+
+        # Scan up to 7 days ahead to find the next valid day+time in the future
+        local_next = None
+        for days_ahead in range(8):  # 0 = today, 7 = same day next week
+            candidate_day = (current_weekday + days_ahead) % 7
+            if candidate_day in recurrence_days:
+                candidate = (
+                    local_now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+                    + timedelta(days=days_ahead)
+                )
+                if candidate > local_now:
+                    local_next = candidate
+                    break
+
+        if local_next is None:
+            # Fallback: next occurrence in 7 days (should never happen)
+            local_next = (
+                local_now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+                + timedelta(days=7)
+            )
     else:
         raise ValueError(f"Unknown recurrence_type: {recurrence_type}")
         
-    # Convert local_next back to UTC
+    # Convert local_next back to UTC.
+    # Browser sends getTimezoneOffset() which for IST (UTC+5:30) = -330.
+    # local_now = UTC - (-330) = UTC + 330  ✓
+    # utc_next  = local_next + (-330) = local_next - 330  ✓
     utc_next = local_next.replace(tzinfo=timezone.utc) + timedelta(minutes=timezone_offset_minutes)
     return utc_next
 
