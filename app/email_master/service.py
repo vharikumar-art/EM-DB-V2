@@ -496,8 +496,18 @@ async def query_for_profile(
     fetch_limit = filter_limit if filter_limit > 0 else daily_limit * 10
     
     # Fetch all matching records (including already-assigned)
-    cursor = master.find(query).limit(fetch_limit * 2)  # Fetch extra to account for skipped
-    all_results = serialize_list([d async for d in cursor])
+    if not filters.get("mailSource"):
+        # Fetch random sample when mailSource is empty
+        pipeline = [
+            {"$match": query},
+            {"$sample": {"size": fetch_limit * 2}}
+        ]
+        cursor = master.aggregate(pipeline)
+        all_results = serialize_list([d async for d in cursor])
+    else:
+        # Fetch sequentially when mailSource is specified
+        cursor = master.find(query).limit(fetch_limit * 2)  # Fetch extra to account for skipped
+        all_results = serialize_list([d async for d in cursor])
     
     # Filter in application code: skip emails assigned to OTHER employees
     available_results = []

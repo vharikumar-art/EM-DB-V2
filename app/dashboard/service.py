@@ -283,14 +283,14 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
         
         # DEBUG: Log employee and their userId
         import sys
-        print(f"[DEBUG] Employee: {emp_name} | emp_id: {emp_id} | user_id: {user_id}", file=sys.stderr)
+       # print(f"[DEBUG] Employee: {emp_name} | emp_id: {emp_id} | user_id: {user_id}", file=sys.stderr)
         
         # Get uploads (count by userId who uploaded)
         total_emp_uploads = await master.count_documents({
             "uploadedBy": user_id
         }) if user_id else 0
         
-        print(f"[DEBUG] {emp_name} uploads: {total_emp_uploads}", file=sys.stderr)
+       # print(f"[DEBUG] {emp_name} uploads: {total_emp_uploads}", file=sys.stderr)
         
         # Get duplicate count from logs for this employee (by userId)
         emp_duplicates_pipeline = [
