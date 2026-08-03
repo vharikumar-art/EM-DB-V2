@@ -259,6 +259,17 @@ async def _run(campaign_id: str) -> None:
         # Fetch next batch of PENDING emails
         batch = await pe_service.get_pending_batch(profile_id, BATCH_SIZE)
         if not batch:
+            recurrence = campaign.get("recurrenceType", "once")
+            if recurrence in ["daily", "weekly"]:
+                # For recurring campaigns, no pending emails this cycle is
+                # normal — exit cleanly so the scheduler reschedules the
+                # next occurrence without marking the campaign COMPLETED.
+                logger.info(
+                    "Campaign %s (%s) — no pending emails this cycle. "
+                    "Exiting cleanly for scheduler to reschedule.",
+                    campaign_id, recurrence,
+                )
+                return
             logger.info(
                 "Campaign %s — no more pending emails. Finalizing.", campaign_id
             )

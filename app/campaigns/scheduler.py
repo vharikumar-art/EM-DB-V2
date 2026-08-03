@@ -243,31 +243,36 @@ async def finalize_campaign_execution(
             error_message = campaign.get("errorMessage") or "Aborted by worker"
         elif current_status == CampaignStatus.PAUSED.value:
             # Worker paused it (e.g. daily limit reached)
-            # Just record execution duration and exit
+            # Just record execution duration
             await campaigns.update_one(
                 {"_id": to_object_id(campaign_id)},
                 {"$set": {"executionDuration": execution_duration}}
             )
-            return
+            # If it's a recurring campaign, do not exit so it gets rescheduled
+            if campaign.get("recurrenceType") not in ["daily", "weekly"]:
+                return
 
     if success:
         # Check if it should reschedule
         recurrence_type = campaign.get("recurrenceType", "once")
         if recurrence_type in ["daily", "weekly"]:
             try:
-                # Calculate next run time
-                # We need the local time string from scheduledForDisplay (e.g. '2026-07-23T09:00' or just '09:00')
+                # Always reschedule recurring campaigns to the next occurrence.
+                # "daily" = run every day at the same time.
+                # "weekly" = run on the selected days every week.
+                # The worker already exits cleanly if there are no pending
+                # emails, so the next run will simply find nothing to send
+                # (or the user may have added new leads by then).
                 display_str = campaign.get("scheduledForDisplay", "00:00")
                 time_str = display_str.split("T")[-1] if "T" in display_str else display_str[-5:]
-                
+
                 next_run = calculate_next_run(
                     recurrence_type=recurrence_type,
                     scheduled_time_local=time_str,
                     timezone_offset_minutes=campaign.get("timezoneOffsetMinutes", 0),
                     recurrence_days=campaign.get("recurrenceDays", []),
                 )
-                
-                # Reschedule the campaign
+
                 await campaigns.update_one(
                     {"_id": to_object_id(campaign_id)},
                     {
@@ -280,10 +285,10 @@ async def finalize_campaign_execution(
                         }
                     }
                 )
-                
+
                 await create_notification(
                     employee_id=campaign.get("employeeId"),
-                    message=f"Campaign '{campaign['campaignName']}' finished current batch and is scheduled for next run at {next_run.strftime('%Y-%m-%d %H:%M')} UTC.",
+                    message=f"Campaign '{campaign['campaignName']}' completed this run and is scheduled for next occurrence at {next_run.strftime('%Y-%m-%d %H:%M')} UTC.",
                     type=NotificationType.INFO,
                 )
                 return
