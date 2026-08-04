@@ -487,7 +487,7 @@ async def get_upload_history(
     page: int = 1,
     page_size: int = 20,
 ) -> dict:
-    """Fetch paginated upload history from logs, filtering out deleted users."""
+    """Fetch paginated upload history from logs, grouped by employee per day."""
     logs = get_collection("logs")
     users_col = get_collection("users")
     employees_col = get_collection("employees")
@@ -503,7 +503,6 @@ async def get_upload_history(
         }
 
     # Build map: employeeId -> userId  (employees collection links them)
-    # Also build dropdown list of employees that appear in upload logs within date range
     emp_to_user: dict[str, str] = {}
     async for emp in employees_col.find({}, {"_id": 1, "userId": 1}):
         emp_to_user[str(emp["_id"])] = str(emp.get("userId", ""))
@@ -519,8 +518,8 @@ async def get_upload_history(
     }
     pipeline = [{"$match": match_stage}, {"$sort": {"runDate": -1}}]
 
-    # ── First pass: build full record list (needed for totals & employee dropdown)
-    all_records: list[dict] = []
+    # ── First pass: collect all raw log records
+    raw_records: list[dict] = []
     employee_set: dict[str, dict] = {}  # employeeId -> {id, name, email}
 
     async for log in logs.aggregate(pipeline):
@@ -531,9 +530,6 @@ async def get_upload_history(
             continue
 
         user_info = active_users[emp_id]
-
-        # Resolve back to employees._id for the dropdown
-        # (logs store userId as employeeId; find the matching employee doc)
         resolved_emp_id = emp_id  # fallback — use userId if no employee doc exists
 
         # Track unique employees for the dropdown
@@ -544,44 +540,81 @@ async def get_upload_history(
                 "email": user_info["email"],
             }
 
-        up = log.get("uploadedCount", 0)
-        uq = log.get("uniqueCount", 0)
-        dp = log.get("duplicateCount", 0)
+        up  = log.get("uploadedCount", 0)
+        uq  = log.get("uniqueCount", 0)
+        dp  = log.get("duplicateCount", 0)
         inv = max(0, up - uq - dp)
 
-        all_records.append({
-            "id": str(log["_id"]),
-            "employeeId": resolved_emp_id,
-            "employeeName": user_info["name"],
+        # Extract the calendar date (YYYY-MM-DD) for grouping — multiple uploads
+        # on the same day will be collapsed into a single row per employee.
+        run_date: datetime = log.get("runDate")
+        date_key = run_date.strftime("%Y-%m-%d") if run_date else "unknown"
+
+        raw_records.append({
+            "employeeId":    resolved_emp_id,
+            "employeeName":  user_info["name"],
             "employeeEmail": user_info["email"],
-            "uploadCount": up,
-            "uniqueCount": uq,
+            "uploadCount":   up,
+            "uniqueCount":   uq,
             "duplicateCount": dp,
-            "invalidCount": inv,
-            "date": log.get("runDate"),
+            "invalidCount":  inv,
+            "date_key":      date_key,   # for grouping (not sent to client)
+            "date":          date_key,   # date-only string (YYYY-MM-DD), no time
         })
 
-    # ── Apply employee filter (server-side, after resolving)
+    # ── Apply employee filter
     if employee_id:
-        # employee_id may be either an employees._id or a userId — match both
-        filtered = [
-            r for r in all_records
+        raw_records = [
+            r for r in raw_records
             if r["employeeId"] == employee_id or r["employeeId"] == filter_user_id
         ]
-    else:
-        filtered = all_records
 
-    # ── Compute totals on the filtered (but un-paginated) set
-    total_uploads = sum(r["uploadCount"] for r in filtered)
-    total_unique = sum(r["uniqueCount"] for r in filtered)
+    # ── Group by (employeeId, date_key) → one row per employee per calendar day
+    grouped: dict[tuple, dict] = {}
+
+    for r in raw_records:
+        key = (r["employeeId"], r["date_key"])
+        if key not in grouped:
+            grouped[key] = {
+                "employeeId":    r["employeeId"],
+                "employeeName":  r["employeeName"],
+                "employeeEmail": r["employeeEmail"],
+                "uploadCount":   0,
+                "uniqueCount":   0,
+                "duplicateCount": 0,
+                "invalidCount":  0,
+                "date":          r["date"],
+                "date_key":      r["date_key"],
+            }
+        g = grouped[key]
+        g["uploadCount"]    += r["uploadCount"]
+        g["uniqueCount"]    += r["uniqueCount"]
+        g["duplicateCount"] += r["duplicateCount"]
+        g["invalidCount"]   += r["invalidCount"]
+        # date is already a date-only string (YYYY-MM-DD); no timestamp comparison needed
+
+    # Sort: latest date first, then employee name
+    filtered = sorted(
+        grouped.values(),
+        key=lambda x: (x["date_key"], x["employeeName"]),
+        reverse=True,
+    )
+
+    # ── Compute totals on the full filtered set
+    total_uploads   = sum(r["uploadCount"]    for r in filtered)
+    total_unique    = sum(r["uniqueCount"]    for r in filtered)
     total_duplicate = sum(r["duplicateCount"] for r in filtered)
-    total_invalid = sum(r["invalidCount"] for r in filtered)
+    total_invalid   = sum(r["invalidCount"]   for r in filtered)
 
     # ── Paginate
     total_records = len(filtered)
-    total_pages = max(1, (total_records + page_size - 1) // page_size)
-    skip = (page - 1) * page_size
-    paginated = filtered[skip: skip + page_size]
+    total_pages   = max(1, (total_records + page_size - 1) // page_size)
+    skip          = (page - 1) * page_size
+    paginated     = filtered[skip: skip + page_size]
+
+    # Remove internal helper field before sending to client
+    for rec in paginated:
+        rec.pop("date_key", None)
 
     # ── Build employee dropdown list sorted by name
     employees_dropdown = sorted(employee_set.values(), key=lambda e: e["name"])
@@ -593,7 +626,6 @@ async def get_upload_history(
     pe_col = get_collection("profile_emails")
     campaigns_col = get_collection("campaigns")
 
-    # All unique userIds seen in logs (these are stored as employeeId in logs)
     all_user_ids = list(employee_set.keys())
 
     # Today's upload stats from logs (grouped by employeeId = userId)
@@ -617,12 +649,11 @@ async def get_upload_history(
     ]).to_list(None)
     today_upload_map = {r["_id"]: r for r in today_upload_agg}
 
-    # Build reverse map: userId -> employees._id  (needed for pe_col / campaigns queries)
+    # Build reverse map: userId -> employees._id
     user_to_emp: dict[str, str] = {v: k for k, v in emp_to_user.items()}
-
     emp_ids_for_today = [user_to_emp[uid] for uid in all_user_ids if uid in user_to_emp]
 
-    # Today's sent emails from profile_emails (grouped by employeeId = employees._id)
+    # Today's sent emails from profile_emails
     today_sent_agg = await pe_col.aggregate([
         {
             "$match": {
