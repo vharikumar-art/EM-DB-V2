@@ -16,7 +16,7 @@ async def create_profile(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Create a new profile. Admins must specify employeeId."""
-    if current_user.role == "admin" and not employeeId:
+    if current_user.role in ('admin', 'super_admin') and not employeeId:
         raise BadRequestException("Admins must specify employeeId")
     
     employee_id, is_admin = await resolve_employee_context(current_user, employeeId)

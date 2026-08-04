@@ -139,6 +139,7 @@ async def upload_file(
 async def list_emails(
     params: PaginationParams,
     country: str | None = None,
+    state: str | None = None,
     domain: str | None = None,
     industry: str | None = None,
     company: str | None = None,
@@ -154,6 +155,8 @@ async def list_emails(
 
     if country:
         query["country"] = country
+    if state:
+        query["state"] = state
     if domain:
         query["domain"] = domain
     if industry:
@@ -429,6 +432,8 @@ async def count_filtered_emails(filters: dict) -> dict:
 
     if filters.get("country"):
         query["country"] = {"$in": filters["country"]}
+    if filters.get("state"):
+        query["state"] = {"$in": filters["state"]}
     if filters.get("domain"):
         query["domain"] = {"$in": filters["domain"]}
     if filters.get("industry"):
@@ -469,6 +474,7 @@ async def query_for_profile(
     # Track if user provided explicit filters
     has_explicit_filters = any([
         filters.get("country"),
+        filters.get("state"),
         filters.get("domain"),
         filters.get("industry"),
         filters.get("company"),
@@ -478,6 +484,8 @@ async def query_for_profile(
 
     if filters.get("country"):
         query["country"] = {"$in": filters["country"]}
+    if filters.get("state"):
+        query["state"] = {"$in": filters["state"]}
     if filters.get("domain"):
         query["domain"] = {"$in": filters["domain"]}
     if filters.get("industry"):

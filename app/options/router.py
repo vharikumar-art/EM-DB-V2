@@ -25,35 +25,21 @@ async def get_employees_options(
     current_user: CurrentUser = Depends(require_admin),
 ):
     """
-    Get list of employees (users with role=employee) for dropdown (admin only).
-    
+    Get list of employees for dropdown (admin only).
+    Admin sees only their assigned employees, Super Admin sees all.
     Returns: List of {id, name, email, branch} where id is the EMPLOYEE ID
     """
-    users_col = get_collection("users")
-    employees_col = get_collection("employees")
-    from bson import ObjectId
-
-    # Get all users with role 'employee'
-    users_docs = await users_col.find({"role": "employee"}).to_list(None)
-
+    from app.employees.service import list_employees
+    employees = await list_employees(current_user)
+    
     options = []
-    for user_doc in users_docs:
-        user_id = str(user_doc["_id"])
-        # Find their employee record (this is the ID stored in profiles/campaigns)
-        emp_doc = await employees_col.find_one({"userId": user_id})
-        if not emp_doc:
-            # Auto-create employee record so the ID system stays consistent
-            from app.employees.model import build_employee_document
-            new_emp = build_employee_document(user_id=user_id, branch=user_doc.get("branch"))
-            result = await employees_col.insert_one(new_emp)
-            emp_doc = await employees_col.find_one({"_id": result.inserted_id})
-
+    for emp in employees:
         options.append({
-            "id": str(emp_doc["_id"]),   # employee._id — matches profileId, campaignId, etc.
-            "userId": user_id,
-            "name": user_doc.get("name", "Unknown"),
-            "email": user_doc.get("email", ""),
-            "branch": user_doc.get("branch", emp_doc.get("branch", "")),
+            "id": emp["id"],
+            "userId": emp["userId"],
+            "name": emp.get("name") or "Unknown",
+            "email": emp.get("email") or "",
+            "branch": emp.get("branch") or "",
         })
 
     return ApiResponse(message="Employees fetched", data=options)
@@ -74,7 +60,7 @@ async def get_profiles_options(
     Returns: List of {id, profileName, gmailAccount}
     """
     # Resolve employee context
-    if current_user.role == "admin":
+    if current_user.role in ("super_admin", "admin"):
         if not employeeId:
             return ApiResponse(message="Admins must specify employeeId", data=[])
         target_employee_id = employeeId
@@ -109,7 +95,7 @@ async def get_campaigns_options(
     Returns: List of {id, profileName, status}
     """
     # Resolve employee context
-    if current_user.role == "admin":
+    if current_user.role in ("super_admin", "admin"):
         if not employeeId:
             return ApiResponse(message="Admins must specify employeeId", data=[])
         target_employee_id = employeeId

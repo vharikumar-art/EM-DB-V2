@@ -3,6 +3,7 @@ from app.core.security import encrypt_password, hash_password, verify_password
 from app.database.mongodb import get_collection
 from app.users.model import UserRole, build_user_document
 from app.users.schema import UserCreate, UserUpdate, PasswordUpdate
+from app.core.dependencies import CurrentUser
 from app.utils.response import serialize_doc, serialize_user_with_password, serialize_list_users_with_password, to_object_id
 
 COLLECTION = "users"
@@ -25,7 +26,36 @@ async def create_user(payload: UserCreate) -> dict:
     )
     result = await users.insert_one(doc)
     created = await users.find_one({"_id": result.inserted_id})
+    
+    # Auto-create employee document for admins and employees
+    if created["role"] in (UserRole.ADMIN.value, UserRole.EMPLOYEE.value):
+        from app.employees.model import build_employee_document
+        emp_doc = build_employee_document(
+            user_id=str(created["_id"]),
+            branch=payload.branch,
+            assigned_to_admin=payload.assignedToAdmin
+        )
+        employees = get_collection("employees")
+        await employees.insert_one(emp_doc)
+        
     return serialize_user_with_password(created)
+
+
+async def create_initial_super_admin(payload: UserCreate) -> dict:
+    users = get_collection(COLLECTION)
+    existing_super_admin = await users.find_one({"role": UserRole.SUPER_ADMIN.value})
+    if existing_super_admin:
+        raise ConflictException("A super admin user already exists")
+
+    super_admin_payload = UserCreate(
+        name=payload.name,
+        email=payload.email,
+        password=payload.password,
+        role=UserRole.SUPER_ADMIN,
+        branch=payload.branch,
+        status=payload.status,
+    )
+    return await create_user(super_admin_payload)
 
 
 async def create_initial_admin(payload: UserCreate) -> dict:
@@ -39,6 +69,8 @@ async def create_initial_admin(payload: UserCreate) -> dict:
         email=payload.email,
         password=payload.password,
         role=UserRole.ADMIN,
+        branch=payload.branch,
+        status=payload.status,
     )
     return await create_user(admin_payload)
 
@@ -57,25 +89,46 @@ async def get_user_by_id(user_id: str) -> dict:
     return serialize_user_with_password(doc)
 
 
-async def list_users() -> list[dict]:
+async def list_users(current_user: CurrentUser) -> list[dict]:
     users_col = get_collection(COLLECTION)
     employees_col = get_collection("employees")
     email_master_col = get_collection("email_master")
     profiles_col = get_collection("profiles")
     campaigns_col = get_collection("campaigns")
 
-    # ── 1. Fetch all users ────────────────────────────────────────────────────
-    docs = [d async for d in users_col.find({})]
+    query = {}
+    if current_user.role == "admin":
+        from app.employees.service import get_employee_by_user_id
+        try:
+            admin_emp = await get_employee_by_user_id(current_user.user_id)
+            admin_emp_id = str(admin_emp.get("id"))
+            
+            # Find employees assigned to this admin
+            assigned_emps = [e async for e in employees_col.find({"assignedToAdmin": admin_emp_id})]
+            allowed_user_ids = [e["userId"] for e in assigned_emps]
+            # Also allow admin to see themselves
+            allowed_user_ids.append(current_user.user_id)
+            
+            query = {"_id": {"$in": [to_object_id(uid) for uid in set(allowed_user_ids)]}}
+        except Exception:
+            # If admin has no employee document or error, they only see themselves
+            query = {"_id": to_object_id(current_user.user_id)}
+    elif current_user.role == "employee":
+        query = {"_id": to_object_id(current_user.user_id)}
+
+    # ── 1. Fetch scoped users ────────────────────────────────────────────────────
+    docs = [d async for d in users_col.find(query)]
     users = serialize_list_users_with_password(docs)
     user_ids = [u["id"] for u in users]
 
     if not user_ids:
         return users
 
-    # ── 2. Build user_id → employee_id map ────────────────────────────────────
+    # ── 2. Build user_id → employee map ───────────────────────────────────────
     # profiles and campaigns store employees._id (not users._id)
-    emp_docs = [d async for d in employees_col.find({"userId": {"$in": user_ids}}, {"_id": 1, "userId": 1})]
+    emp_docs = [d async for d in employees_col.find({"userId": {"$in": user_ids}}, {"_id": 1, "userId": 1, "assignedToAdmin": 1})]
     user_to_emp = {str(e["userId"]): str(e["_id"]) for e in emp_docs}
+    user_to_admin = {str(e["userId"]): str(e.get("assignedToAdmin", "")) for e in emp_docs}
     emp_ids = list(user_to_emp.values())
 
     # ── 3. Count unique emails in email_master per user ───────────────────────
@@ -109,7 +162,10 @@ async def list_users() -> list[dict]:
     for u in users:
         uid = u["id"]
         eid = user_to_emp.get(uid)          # employee doc id for this user
+        admin_id = user_to_admin.get(uid, "")
         cm = campaign_map.get(eid, {}) if eid else {}
+        u["employeeId"] = eid
+        u["assignedToAdmin"] = admin_id
         u["stats"] = {
             "uniqueUploads": email_map.get(uid, 0),
             "totalProfiles": profile_map.get(eid, 0) if eid else 0,
@@ -126,17 +182,41 @@ async def list_users() -> list[dict]:
 async def update_user(user_id: str, payload: UserUpdate) -> dict:
     users = get_collection(COLLECTION)
     update_data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
-    if not update_data:
+    
+    # Extract employee-specific fields
+    assigned_to_admin = update_data.pop("assignedToAdmin", None)
+    branch = update_data.get("branch", None)
+
+    if not update_data and assigned_to_admin is None:
         return await get_user_by_id(user_id)
 
     from datetime import datetime, timezone
 
-    update_data["updatedAt"] = datetime.now(timezone.utc)
-    result = await users.find_one_and_update(
-        {"_id": to_object_id(user_id)}, {"$set": update_data}, return_document=True
-    )
-    if not result:
-        raise NotFoundException("User not found")
+    if update_data:
+        update_data["updatedAt"] = datetime.now(timezone.utc)
+        result = await users.find_one_and_update(
+            {"_id": to_object_id(user_id)}, {"$set": update_data}, return_document=True
+        )
+        if not result:
+            raise NotFoundException("User not found")
+    else:
+        result = await users.find_one({"_id": to_object_id(user_id)})
+        if not result:
+            raise NotFoundException("User not found")
+
+    # Update employee document if assignedToAdmin or branch is provided
+    if assigned_to_admin is not None or branch is not None:
+        employees = get_collection("employees")
+        emp_update = {"updatedAt": datetime.now(timezone.utc)}
+        if assigned_to_admin is not None:
+            # If empty string, treat as unassign (None)
+            emp_update["assignedToAdmin"] = assigned_to_admin if assigned_to_admin else None
+        
+        await employees.update_one(
+            {"userId": str(result["_id"])},
+            {"$set": emp_update}
+        )
+
     return serialize_user_with_password(result)
 
 

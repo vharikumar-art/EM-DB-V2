@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, File, Query, UploadFile
 
-from app.core.dependencies import CurrentUser, get_current_user, require_admin
+from app.core.dependencies import CurrentUser, get_current_user, require_admin, require_super_admin
 from app.core.exceptions import BadRequestException
 from app.email_master import service
 from app.schemas.common import ApiResponse, PaginationParams
@@ -57,9 +57,9 @@ async def get_dropdown_options(
 
 @router.get("/stats/uploaders", response_model=ApiResponse)
 async def get_uploader_stats(
-    current_user: CurrentUser = Depends(require_admin),
+    current_user: CurrentUser = Depends(require_super_admin),
 ):
-    """ADMIN ONLY: Get upload contribution statistics."""
+    """SUPER ADMIN ONLY: Get upload contribution statistics."""
     stats = await service.get_uploader_stats()
     return ApiResponse(message="Uploader statistics", data=stats)
 
@@ -87,18 +87,18 @@ async def get_email(
 @router.delete("/{email_id}", response_model=ApiResponse)
 async def delete_email(
     email_id: str,
-    current_user: CurrentUser = Depends(require_admin),
+    current_user: CurrentUser = Depends(require_super_admin),
 ):
-    """ADMIN ONLY: Delete email from GLOBAL pool."""
+    """SUPER ADMIN ONLY: Delete email from GLOBAL pool."""
     await service.delete_email(email_id)
     return ApiResponse(message="Email deleted")
 
 
 @router.post("/admin/clear-all", response_model=ApiResponse)
 async def clear_all_emails(
-    current_user: CurrentUser = Depends(require_admin),
+    current_user: CurrentUser = Depends(require_super_admin),
 ):
-    """ADMIN ONLY: Delete ALL emails from email_master table. WARNING: Irreversible!"""
+    """SUPER ADMIN ONLY: Delete ALL emails from email_master table. WARNING: Irreversible!"""
     result = await service.clear_all_emails()
     return ApiResponse(message="Email master cleared", data=result)
 
@@ -106,6 +106,7 @@ async def clear_all_emails(
 @router.get("", response_model=ApiResponse)
 async def list_emails(
     country: str | None = Query(default=None),
+    state: str | None = Query(default=None),
     domain: str | None = Query(default=None),
     industry: str | None = Query(default=None),
     company: str | None = Query(default=None),
@@ -121,6 +122,7 @@ async def list_emails(
     result = await service.list_emails(
         params,
         country=country,
+        state=state,
         domain=domain,
         industry=industry,
         company=company,

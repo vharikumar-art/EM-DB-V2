@@ -13,12 +13,14 @@ def build_employee_document(
     branch: str | None = None,
     employee_code: str | None = None,
     department: str | None = None,
+    assigned_to_admin: str | None = None,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     doc: dict[str, Any] = {
         "userId": user_id,
         "branch": branch,
         "department": department,
+        "assignedToAdmin": assigned_to_admin,
         "status": EmployeeStatus.ACTIVE.value,
         "createdAt": now,
         "updatedAt": now,

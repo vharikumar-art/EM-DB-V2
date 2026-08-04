@@ -9,6 +9,7 @@ class UserCreate(BaseModel):
     password: str = Field(min_length=8, max_length=128)
     role: UserRole = UserRole.EMPLOYEE
     branch: str | None = Field(default=None, max_length=100, description="Branch name (department, location, etc.)")
+    assignedToAdmin: str | None = Field(default=None, description="Employee ID of the admin this user is assigned to")
     status: UserStatus = UserStatus.ACTIVE
 
 
@@ -16,6 +17,7 @@ class UserUpdate(BaseModel):
     name: str | None = None
     status: UserStatus | None = None
     branch: str | None = None
+    assignedToAdmin: str | None = None
 
 
 class UserOut(BaseModel):

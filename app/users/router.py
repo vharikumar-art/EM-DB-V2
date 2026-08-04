@@ -8,6 +8,12 @@ from app.users.schema import UserCreate, UserUpdate, PasswordUpdate
 router = APIRouter(prefix="/users", tags=["Users"])
 
 
+@router.post("/initial-super-admin", response_model=ApiResponse, status_code=status.HTTP_201_CREATED)
+async def create_initial_super_admin(payload: UserCreate):
+    user = await service.create_initial_super_admin(payload)
+    return ApiResponse(message="Initial super admin created", data=user)
+
+
 @router.post("/initial-admin", response_model=ApiResponse, status_code=status.HTTP_201_CREATED)
 async def create_initial_admin(payload: UserCreate):
     user = await service.create_initial_admin(payload)
@@ -29,9 +35,11 @@ async def migrate_branch():
     return ApiResponse(message="Migration completed", data=result)
 
 
+from app.core.dependencies import CurrentUser, get_current_user
+
 @router.get("", response_model=ApiResponse, dependencies=[Depends(require_admin)])
-async def list_all_users():
-    users = await service.list_users()
+async def list_all_users(current_user: CurrentUser = Depends(get_current_user)):
+    users = await service.list_users(current_user)
     return ApiResponse(message="Users fetched", data=users)
 
 
@@ -60,7 +68,9 @@ async def update_user_password(user_id: str, payload: PasswordUpdate):
     return ApiResponse(message="Password updated", data=user)
 
 
-@router.delete("/{user_id}", response_model=ApiResponse, dependencies=[Depends(require_admin)])
+from app.core.dependencies import require_admin, require_super_admin
+
+@router.delete("/{user_id}", response_model=ApiResponse, dependencies=[Depends(require_super_admin)])
 async def delete_user(user_id: str):
     await service.delete_user(user_id)
     return ApiResponse(message="User deleted")

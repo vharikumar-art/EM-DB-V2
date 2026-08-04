@@ -4,6 +4,7 @@ from typing import Any
 
 
 class UserRole(str, Enum):
+    SUPER_ADMIN = "super_admin"
     ADMIN = "admin"
     EMPLOYEE = "employee"
 
@@ -30,7 +31,7 @@ def build_user_document(
         "passwordEncrypted": encrypted_password,
         "role": role.value,
         "status": status.value,
-        "branch": branch or "Default",  # All users get a branch (admin or employee)
+        "branch": branch or None,
         "createdAt": now,
         "updatedAt": now,
     }

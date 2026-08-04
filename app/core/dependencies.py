@@ -47,8 +47,9 @@ def require_roles(*allowed_roles: str):
     return _checker
 
 
-require_admin = require_roles("admin")
-require_any_role = require_roles("admin", "employee")
+require_super_admin = require_roles("super_admin")
+require_admin = require_roles("super_admin", "admin")
+require_any_role = require_roles("super_admin", "admin", "employee")
 
 
 
@@ -61,16 +62,27 @@ async def resolve_employee_context(
     """
     from app.employees.service import get_employee_by_user_id
     
-    if current_user.role == "admin":
+    if current_user.role == "super_admin":
         return employee_id_param or "", True
     
-    # Non-admin: must be employee, get their actual employee_id from employees collection
+    # Non-super-admin: get their actual employee_id from employees collection
     try:
         employee = await get_employee_by_user_id(current_user.user_id)
         # The employee document's id (converted from _id by serialize_doc) IS the employeeId
         employee_id = str(employee.get("id", current_user.user_id))
     except Exception:
         employee_id = current_user.user_id
+        
+    if current_user.role == "admin" and employee_id_param and employee_id_param != employee_id:
+        from app.database.mongodb import get_collection
+        from app.utils.response import to_object_id
+        employees_col = get_collection("employees")
+        try:
+            target_emp = await employees_col.find_one({"_id": to_object_id(employee_id_param)})
+            if target_emp and str(target_emp.get("assignedToAdmin")) == employee_id:
+                return employee_id_param, False
+        except Exception:
+            pass
     
     return employee_id, False
 
@@ -100,7 +112,23 @@ async def validate_data_ownership(
         raise NotFoundException(f"{resource_type.capitalize()} not found")
     
     resource_owner = resource.get("employeeId")
-    if not is_admin and resource_owner != employee_id:
-        raise ForbiddenException(
-            f"You do not have access to this {resource_type}"
-        )
+    if is_admin:
+        return
+        
+    if resource_owner == employee_id:
+        return
+        
+    # If not owner, check if the current user (employee_id) is an admin managing this resource_owner
+    from app.database.mongodb import get_collection
+    from app.utils.response import to_object_id
+    employees_col = get_collection("employees")
+    try:
+        owner_emp = await employees_col.find_one({"_id": to_object_id(resource_owner)})
+        if owner_emp and str(owner_emp.get("assignedToAdmin")) == employee_id:
+            return
+    except Exception:
+        pass
+        
+    raise ForbiddenException(
+        f"You do not have access to this {resource_type}"
+    )

@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
-from app.core.exceptions import ConflictException, NotFoundException
+from app.core.dependencies import CurrentUser
+from app.core.exceptions import ConflictException, NotFoundException, ForbiddenException
 from app.core.security import decrypt_password
 from app.database.mongodb import get_collection
 from app.employees.model import build_employee_document
@@ -30,6 +31,7 @@ async def create_employee(payload: EmployeeCreate) -> dict:
         doc = build_employee_document(
             user_id=user["id"],
             branch=payload.branch,
+            assigned_to_admin=payload.assignedToAdmin,
         )
 
         result = await employees.insert_one(doc)
@@ -56,20 +58,47 @@ async def _attach_user_info(employee_doc: dict, include_password: bool = False) 
     return employee_doc
 
 
-async def list_employees() -> list[dict]:
+async def list_employees(current_user: CurrentUser | None = None) -> list[dict]:
     employees = get_collection(COLLECTION)
-    cursor = employees.find({})
+    query = {}
+    
+    if current_user and current_user.role == "admin":
+        # Get admin's employee ID
+        from app.employees.service import get_employee_by_user_id
+        try:
+            admin_emp = await get_employee_by_user_id(current_user.user_id)
+            admin_emp_id = str(admin_emp.get("id"))
+            query = {
+                "$or": [
+                    {"assignedToAdmin": admin_emp_id},
+                    {"_id": to_object_id(admin_emp_id)}
+                ]
+            }
+        except Exception:
+            pass
+
+    cursor = employees.find(query)
     docs = [serialize_doc(d) async for d in cursor]
     # include_password=True so the frontend Accounts table can display it
     return [await _attach_user_info(d, include_password=True) for d in docs]
 
 
 
-async def get_employee(employee_id: str) -> dict:
+async def get_employee(employee_id: str, current_user: CurrentUser | None = None) -> dict:
     employees = get_collection(COLLECTION)
     doc = await employees.find_one({"_id": to_object_id(employee_id)})
     if not doc:
         raise NotFoundException("Employee not found")
+        
+    if current_user and current_user.role == "admin":
+        try:
+            admin_emp = await get_employee_by_user_id(current_user.user_id)
+            admin_emp_id = str(admin_emp.get("id"))
+            if str(doc["_id"]) != admin_emp_id and str(doc.get("assignedToAdmin")) != admin_emp_id:
+                raise ForbiddenException("You don't have access to this employee")
+        except NotFoundException:
+            pass
+            
     return await _attach_user_info(serialize_doc(doc), include_password=True)
 
 
@@ -93,8 +122,11 @@ async def get_employee_by_user_id(user_id: str) -> dict:
     return await _attach_user_info(serialize_doc(doc))
 
 
-async def update_employee(employee_id: str, payload: EmployeeUpdate) -> dict:
+async def update_employee(employee_id: str, payload: EmployeeUpdate, current_user: CurrentUser | None = None) -> dict:
     employees = get_collection(COLLECTION)
+    # Check access
+    await get_employee(employee_id, current_user)
+    
     update_data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
     if not update_data:
         return await get_employee(employee_id)
@@ -108,8 +140,11 @@ async def update_employee(employee_id: str, payload: EmployeeUpdate) -> dict:
     return await _attach_user_info(serialize_doc(result))
 
 
-async def delete_employee(employee_id: str) -> None:
+async def delete_employee(employee_id: str, current_user: CurrentUser | None = None) -> None:
     employees = get_collection(COLLECTION)
+    # Check access
+    await get_employee(employee_id, current_user)
+    
     result = await employees.delete_one({"_id": to_object_id(employee_id)})
     if result.deleted_count == 0:
         raise NotFoundException("Employee not found")

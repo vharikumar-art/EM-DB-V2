@@ -25,8 +25,8 @@ async def create_employee(payload: EmployeeCreate, current_user: CurrentUser = D
 
 
 @router.get("", response_model=ApiResponse, dependencies=[Depends(require_admin)])
-async def list_employees():
-    employees = await service.list_employees()
+async def list_employees(current_user: CurrentUser = Depends(get_current_user)):
+    employees = await service.list_employees(current_user)
     return ApiResponse(message="Employees fetched", data=employees)
 
 
@@ -37,18 +37,18 @@ async def get_my_employee_record(current_user: CurrentUser = Depends(get_current
 
 
 @router.get("/{employee_id}", response_model=ApiResponse, dependencies=[Depends(require_admin)])
-async def get_employee(employee_id: str):
-    employee = await service.get_employee(employee_id)
+async def get_employee(employee_id: str, current_user: CurrentUser = Depends(get_current_user)):
+    employee = await service.get_employee(employee_id, current_user)
     return ApiResponse(message="Employee fetched", data=employee)
 
 
 @router.patch("/{employee_id}", response_model=ApiResponse, dependencies=[Depends(require_admin)])
-async def update_employee(employee_id: str, payload: EmployeeUpdate):
-    employee = await service.update_employee(employee_id, payload)
+async def update_employee(employee_id: str, payload: EmployeeUpdate, current_user: CurrentUser = Depends(get_current_user)):
+    employee = await service.update_employee(employee_id, payload, current_user)
     return ApiResponse(message="Employee updated", data=employee)
 
 
 @router.delete("/{employee_id}", response_model=ApiResponse, dependencies=[Depends(require_admin)])
-async def delete_employee(employee_id: str):
-    await service.delete_employee(employee_id)
+async def delete_employee(employee_id: str, current_user: CurrentUser = Depends(get_current_user)):
+    await service.delete_employee(employee_id, current_user)
     return ApiResponse(message="Employee deleted")
