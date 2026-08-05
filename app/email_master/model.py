@@ -46,10 +46,11 @@ def build_email_master_document(
         "usedInProfiles": [],
         
         # Employee assignment tracking (NEW FIELDS)
-        "inProfileEmails": False,        # YES/NO - Has it been added to any profile?
-        "usedByEmployeeId": None,        # Employee ID who claimed this email
-        "usedByEmployeeName": None,      # Employee name who claimed this email
-        "assignedDate": None,            # When assigned to employee
+        "inProfileEmails": False,        # YES/NO - Is it currently locked in a profile?
+        "usedByEmployeeIds": [],         # List of employee IDs who claimed this email
+        "usedByEmployeeNames": [],       # List of employee names who claimed this email
+        "usageCount": 0,                 # How many times this email has been used
+        "assignedDate": None,            # When assigned to current employee
         
         "createdAt": now,
         "updatedAt": now,

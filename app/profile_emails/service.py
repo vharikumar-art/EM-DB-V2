@@ -3,7 +3,7 @@ from typing import Any
 
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
 from app.database.mongodb import get_collection
-from app.email_master.service import mark_used_in_profile, mark_emails_assigned_to_employee, query_for_profile
+from app.email_master.service import mark_used_in_profile, mark_emails_assigned_to_employee, query_for_profile, release_email_locks
 from app.notifications.schema import NotificationType
 from app.notifications.service import create_notification
 from app.profile_emails.model import SendStatus, build_profile_email_document
@@ -25,6 +25,7 @@ async def generate_list(
     is_admin: bool,
     override_filters: dict | None = None,
     limit_override: int | None = None,
+    allow_used: bool = False,
 ) -> dict:
     """
     Read email_master applying profile filters, snapshot matching records
@@ -34,6 +35,8 @@ async def generate_list(
     profile = await get_profile(profile_id, employee_id, is_admin)
 
     filters: dict = override_filters or profile.get("filters", {})
+    # Inject the allow_used flag: request value takes priority, else fall back to profile's stored setting
+    filters["allowUsed"] = allow_used or filters.get("allowUsed", False)
     sending_opts: dict = profile.get("sendingOptions", {})
     daily_limit: int = limit_override or sending_opts.get("dailyLimit", 100)
     filter_limit: int = profile.get("filterLimit", 0)
@@ -83,6 +86,15 @@ async def generate_list(
             )
 
     # Remove only PENDING rows — preserve already-sent/failed/sending rows
+    pending_cursor = profile_emails_col.find(
+        {"profileId": profile_id, "sendStatus": SendStatus.PENDING.value},
+        {"masterEmailId": 1}
+    )
+    pending_master_ids = [doc["masterEmailId"] async for doc in pending_cursor]
+    
+    if pending_master_ids:
+        await release_email_locks(pending_master_ids)
+
     await profile_emails_col.delete_many(
         {"profileId": profile_id, "sendStatus": SendStatus.PENDING.value}
     )
@@ -287,6 +299,10 @@ async def delete_profile_email(
         raise NotFoundException("Profile email record not found")
     if not is_admin and doc.get("employeeId") != employee_id:
         raise ForbiddenException("Access denied")
+    master_email_id = doc.get("masterEmailId")
+    if master_email_id:
+        await release_email_locks([master_email_id])
+        
     await col.delete_one({"_id": to_object_id(profile_email_id)})
 
 
@@ -320,6 +336,13 @@ async def clear_profile_list(profile_id: str, employee_id: str, is_admin: bool) 
     """
     await get_profile(profile_id, employee_id, is_admin)
     col = get_collection(COLLECTION)
+    
+    # Get all masterEmailIds before deleting
+    cursor = col.find({"profileId": profile_id}, {"masterEmailId": 1})
+    master_ids = [doc["masterEmailId"] async for doc in cursor if doc.get("masterEmailId")]
+    if master_ids:
+        await release_email_locks(master_ids)
+        
     result = await col.delete_many({"profileId": profile_id})
     return {"deletedCount": result.deleted_count}
 
@@ -335,13 +358,18 @@ async def bulk_delete(
     object_ids = [
         ObjectId(i) for i in profile_email_ids if ObjectId.is_valid(i)
     ]
+    
+    query = {"_id": {"$in": object_ids}}
     if not is_admin:
-        # Only delete rows that belong to this employee
-        result = await col.delete_many(
-            {"_id": {"$in": object_ids}, "employeeId": employee_id}
-        )
-    else:
-        result = await col.delete_many({"_id": {"$in": object_ids}})
+        query["employeeId"] = employee_id
+        
+    # Get all masterEmailIds before deleting
+    cursor = col.find(query, {"masterEmailId": 1})
+    master_ids = [doc["masterEmailId"] async for doc in cursor if doc.get("masterEmailId")]
+    if master_ids:
+        await release_email_locks(master_ids)
+
+    result = await col.delete_many(query)
 
     return {"deletedCount": result.deleted_count}
 

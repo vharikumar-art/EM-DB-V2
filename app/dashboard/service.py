@@ -274,23 +274,20 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
 
     # ── Detailed employee performance ──────────────────────────────────────────
     employee_performance = []
+    
+    # Pre-fetch users for name mapping to avoid N+1 query overhead
+    users_col = get_collection("users")
+    user_map = {str(u["_id"]): u.get("name", "Unknown") async for u in users_col.find()}
+    
     async for emp in employees.find():
         emp_id = str(emp["_id"])
-        emp_name = await _employee_name(emp_id)
-        
-        # Get employee's userId to track uploads
         user_id = str(emp.get("userId", "")) if emp.get("userId") else None
-        
-        # DEBUG: Log employee and their userId
-        import sys
-       # print(f"[DEBUG] Employee: {emp_name} | emp_id: {emp_id} | user_id: {user_id}", file=sys.stderr)
+        emp_name = user_map.get(user_id, "Unknown") if user_id else "Unknown"
         
         # Get uploads (count by userId who uploaded)
         total_emp_uploads = await master.count_documents({
             "uploadedBy": user_id
         }) if user_id else 0
-        
-       # print(f"[DEBUG] {emp_name} uploads: {total_emp_uploads}", file=sys.stderr)
         
         # Get duplicate count from logs for this employee (by userId)
         emp_duplicates_pipeline = [
@@ -323,17 +320,6 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
             "employeeId": emp_id
         })
         
-        profiles_with_emp_id = await profiles.find({"employeeId": emp_id}).to_list(None)
-        print(f"[DEBUG] {emp_name} - Query employeeId: {emp_id} | Found profiles: {len(profiles_with_emp_id) if profiles_with_emp_id else 0}", file=sys.stderr)
-        if profiles_with_emp_id:
-            print(f"[DEBUG] Profile employeeIds: {[p.get('employeeId') for p in profiles_with_emp_id]}", file=sys.stderr)
-        
-        # DEBUG: Find ALL profiles for this employee (regardless of employeeId)
-        all_user_profiles = await profiles.find({"employeeId": {"$exists": True}}).to_list(None)
-        matching_profiles = [p for p in all_user_profiles if emp_name.lower() in str(p.get("profileName", "")).lower() or emp_id in str(p.get("employeeId", ""))]
-        if matching_profiles:
-            print(f"[DEBUG] Found matching profiles for {emp_name}: {[(p.get('profileName'), p.get('employeeId')) for p in matching_profiles]}", file=sys.stderr)
-        
         # Get employee's total campaigns (unique campaigns by campaignName, using employeeId)
         emp_total_campaigns_pipeline = [
             {"$match": {"employeeId": emp_id}},
@@ -343,23 +329,11 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
         emp_total_campaigns_result = await campaigns.aggregate(emp_total_campaigns_pipeline).to_list(length=1)
         emp_total_campaigns = emp_total_campaigns_result[0]["total"] if emp_total_campaigns_result else 0
         
-        campaigns_with_emp_id = await campaigns.find({"employeeId": emp_id}).to_list(None)
-        print(f"[DEBUG] {emp_name} - Query employeeId: {emp_id} | Found campaigns: {len(campaigns_with_emp_id) if campaigns_with_emp_id else 0}", file=sys.stderr)
-        if campaigns_with_emp_id:
-            print(f"[DEBUG] Campaign employeeIds: {[c.get('employeeId') for c in campaigns_with_emp_id]}", file=sys.stderr)
-        
-        # DEBUG: Find campaigns with user_id instead (legacy data)
-        campaigns_with_user_id = await campaigns.find({"employeeId": user_id}).to_list(None)
-        if campaigns_with_user_id:
-            print(f"[DEBUG] {emp_name} HAS CAMPAIGNS under user_id {user_id}: {[(c.get('campaignName'), c.get('employeeId')) for c in campaigns_with_user_id]}", file=sys.stderr)
-        
         # Get employee's running campaigns (status: "running", using employeeId)
         emp_running_campaigns = await campaigns.count_documents({
             "employeeId": emp_id,
             "status": "running"
         })
-        
-        print(f"[DEBUG] {emp_name} running campaigns: {emp_running_campaigns}", file=sys.stderr)
         
         employee_performance.append({
             "employeeId": emp_id,

@@ -166,7 +166,10 @@ async def list_emails(
     if uploaded_by:
         query["uploadedBy"] = uploaded_by
     if used_by_employee:
-        query["usedByEmployeeId"] = used_by_employee
+        query["$or"] = [
+            {"usedByEmployeeId": used_by_employee},
+            {"usedByEmployeeIds": used_by_employee}
+        ]
     if mail_source:
         query["mailSource"] = mail_source
     if not include_duplicates:
@@ -247,18 +250,32 @@ async def _enrich_emails_with_employee_names(docs: list[dict]) -> list[dict]:
         return result
     
     for doc in docs:
-        id_str = doc.get("usedByEmployeeId")
-        if not id_str:
-            used_profiles = doc.get("usedInProfiles", [])
-            if used_profiles:
-                id_str = used_profiles[0].get("employeeId")
+        if "usedByEmployeeIds" not in doc:
+            doc["usedByEmployeeIds"] = []
+        if "usedByEmployeeNames" not in doc:
+            doc["usedByEmployeeNames"] = []
+            
+        old_id = doc.get("usedByEmployeeId")
+        old_name = doc.get("usedByEmployeeName")
         
-        if id_str:
-            id_str = str(id_str)
-            resolved = await resolve_name(id_str)
-            doc["usedByEmployeeName"] = resolved
-            doc["usedByEmployeeId"] = id_str
-            doc["inProfileEmails"] = True
+        # Populate from old single fields if lists are empty
+        if not doc["usedByEmployeeIds"] and old_id:
+            id_str = str(old_id)
+            doc["usedByEmployeeIds"].append(id_str)
+            if old_name:
+                doc["usedByEmployeeNames"].append(old_name)
+            else:
+                doc["usedByEmployeeNames"].append(await resolve_name(id_str))
+                
+        # Fallback from usedInProfiles if still empty
+        if not doc["usedByEmployeeIds"]:
+            used_profiles = doc.get("usedInProfiles", [])
+            for up in used_profiles:
+                uid = up.get("employeeId")
+                if uid and str(uid) not in doc["usedByEmployeeIds"]:
+                    id_str = str(uid)
+                    doc["usedByEmployeeIds"].append(id_str)
+                    doc["usedByEmployeeNames"].append(await resolve_name(id_str))
     
     return docs
 
@@ -298,6 +315,7 @@ async def get_dropdown_options() -> dict:
     states = await master.distinct("state", {"isDuplicate": False})
     industries = await master.distinct("industry", {"isDuplicate": False})
     companies = await master.distinct("company", {"isDuplicate": False})
+    designations = await master.distinct("designation", {"isDuplicate": False})
     mail_sources = await master.distinct("mailSource", {"isDuplicate": False})
     
     # Get all uploaders with their names
@@ -338,7 +356,7 @@ async def get_dropdown_options() -> dict:
                 # Fallback to ID
                 used_by_employees_data[emp_id] = emp_id
     
-    # From usedByEmployeeId field
+    # From usedByEmployeeId field (Legacy)
     cursor = master.find(
         {"usedByEmployeeId": {"$exists": True, "$ne": None}},
         {"usedByEmployeeId": 1, "usedByEmployeeName": 1}
@@ -346,39 +364,35 @@ async def get_dropdown_options() -> dict:
     async for doc in cursor:
         emp_id = doc.get("usedByEmployeeId")
         emp_name = doc.get("usedByEmployeeName")
-        
-        if emp_id:
-            if emp_name and emp_id not in used_by_employees_data:
+        if emp_id and emp_id not in used_by_employees_data:
+            used_by_employees_data[emp_id] = emp_name or emp_id
+            
+    # From usedByEmployeeIds field (New)
+    cursor = master.find(
+        {"usedByEmployeeIds": {"$exists": True, "$not": {"$size": 0}}},
+        {"usedByEmployeeIds": 1, "usedByEmployeeNames": 1}
+    )
+    async for doc in cursor:
+        emp_ids = doc.get("usedByEmployeeIds", [])
+        emp_names = doc.get("usedByEmployeeNames", [])
+        for i, emp_id in enumerate(emp_ids):
+            if emp_id and emp_id not in used_by_employees_data:
+                emp_name = emp_names[i] if i < len(emp_names) else emp_id
                 used_by_employees_data[emp_id] = emp_name
-            elif emp_id not in used_by_employees_data:
-                # Try to fetch
-                try:
-                    employee = await employees_col.find_one({"_id": emp_id})
-                    if employee:
-                        user_id = employee.get("userId")
-                        if user_id:
-                            user = await users_col.find_one({"_id": user_id})
-                            if user:
-                                emp_name = user.get("name", emp_id)
-                                used_by_employees_data[emp_id] = emp_name
-                                continue
-                except Exception:
-                    pass
-                used_by_employees_data[emp_id] = emp_id
 
     def clean(lst: list) -> list:
         return sorted([x for x in lst if x])
-
     uploaders = [{"id": uid, "name": uname} for uid, uname in uploaders_data.items()] if uploaders_data else []
     used_by_employees = [{"id": eid, "name": ename} for eid, ename in used_by_employees_data.items()] if used_by_employees_data else []
 
     return {
-        "domains": clean(domains),
-        "countries": clean(countries),
-        "states": clean(states),
-        "industries": clean(industries),
-        "companies": clean(companies),
-        "mailSources": clean(mail_sources),
+        "domains": [d for d in domains if d],
+        "countries": [c for c in countries if c],
+        "states": [s for s in states if s],
+        "industries": [i for i in industries if i],
+        "companies": [c for c in companies if c],
+        "designations": [d for d in designations if d],
+        "mailSources": [m for m in mail_sources if m],
         "uploaders": uploaders,
         "usedByEmployees": used_by_employees,
     }
@@ -470,6 +484,17 @@ async def query_for_profile(
     """
     master = get_collection(COLLECTION)
     query: dict = {"isDuplicate": False}
+    
+    # Always skip emails that are currently locked in a profile
+    query["inProfileEmails"] = False
+    
+    # Check if we should allow previously used emails
+    allow_used = filters.get("allowUsed", False)
+    if not allow_used:
+        # usageCount == 0 OR field doesn't exist yet (backward compat with pre-feature docs)
+        query["$and"] = [
+            {"$or": [{"usageCount": 0}, {"usageCount": {"$exists": False}}]}
+        ]
 
     # Track if user provided explicit filters
     has_explicit_filters = any([
@@ -495,10 +520,15 @@ async def query_for_profile(
     if filters.get("mailSource"):
         query["mailSource"] = {"$in": filters["mailSource"]}
     if filters.get("type"):
-        query["$or"] = [
+        # Append to $and if it exists, otherwise use $or directly
+        type_or = {"$or": [
             {"industry": {"$in": filters["type"]}},
             {"designation": {"$in": filters["type"]}},
-        ]
+        ]}
+        if "$and" in query:
+            query["$and"].append(type_or)
+        else:
+            query["$or"] = type_or["$or"]
 
     # Determine fetch limit: use filter_limit if set, otherwise use daily_limit * 10
     fetch_limit = filter_limit if filter_limit > 0 else daily_limit * 10
@@ -517,17 +547,13 @@ async def query_for_profile(
         cursor = master.find(query).limit(fetch_limit * 2)  # Fetch extra to account for skipped
         all_results = serialize_list([d async for d in cursor])
     
-    # Filter in application code: skip emails assigned to OTHER employees
+    # Filter in application code: we no longer skip based on used_by_id since we check inProfileEmails
+    # and we want to allow sharing. But just to be safe if there's legacy data, we just append all.
     available_results = []
     for email_record in all_results:
-        used_by_id = email_record.get("usedByEmployeeId")
-        
-        # Include if:
-        # 1. Not assigned to anyone (used_by_id is None)
-        # 2. Assigned to current employee (can use own assignments)
-        if used_by_id is None or used_by_id == employee_id:
-            available_results.append(email_record)
-        # SKIP if assigned to different employee (don't count against limit)
+        # All fetched records are valid because we filtered out inProfileEmails = True
+        # and usageCount > 0 (if allowUsed was false) at the DB level.
+        available_results.append(email_record)
     
     # Return only the requested limit
     return available_results[:fetch_limit]
@@ -575,12 +601,39 @@ async def mark_emails_assigned_to_employee(
         {
             "$set": {
                 "inProfileEmails": True,
-                "usedByEmployeeId": employee_id,
-                "usedByEmployeeName": employee_name,
                 "assignedDate": now,
                 "updatedAt": now,
+            },
+            "$inc": {
+                "usageCount": 1
+            },
+            "$addToSet": {
+                "usedByEmployeeIds": employee_id,
+                "usedByEmployeeNames": employee_name
             }
         },
+    )
+
+
+async def release_email_locks(master_ids: list[str]) -> None:
+    """Release locks for emails when they are removed from a profile."""
+    from datetime import datetime, timezone
+    master = get_collection(COLLECTION)
+    from bson import ObjectId
+
+    object_ids = [ObjectId(mid) for mid in master_ids if ObjectId.is_valid(mid)]
+    if not object_ids:
+        return
+        
+    now = datetime.now(timezone.utc)
+    await master.update_many(
+        {"_id": {"$in": object_ids}},
+        {
+            "$set": {
+                "inProfileEmails": False,
+                "updatedAt": now,
+            }
+        }
     )
 
 

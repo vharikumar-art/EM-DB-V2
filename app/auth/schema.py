@@ -10,6 +10,9 @@ class TokenPair(BaseModel):
     accessToken: str
     refreshToken: str
     tokenType: str = "bearer"
+    role: str | None = None
+    userId: str | None = None
+    employeeId: str | None = None
 
 
 class RefreshRequest(BaseModel):

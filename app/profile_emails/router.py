@@ -35,6 +35,7 @@ async def generate_list(
         is_admin=is_admin,
         override_filters=payload.overrideFilters,
         limit_override=payload.limitOverride,
+        allow_used=payload.allowUsed,
     )
     return ApiResponse(message="Profile email list generated", data=result)
 

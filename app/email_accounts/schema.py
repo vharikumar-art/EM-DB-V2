@@ -24,6 +24,7 @@ class EmailAccountUpdate(BaseModel):
     smtpPort: int | None = None
     useTls: bool | None = None
     isActive: bool | None = None
+    employeeId: str | None = Field(default=None, description="Reassign email account to a different employee (super_admin only)")
 
 
 class EmailAccountOut(BaseModel):

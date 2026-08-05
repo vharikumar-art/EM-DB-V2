@@ -36,9 +36,14 @@ async def create_account(employee_id: str, payload: EmailAccountCreate) -> dict:
     return _safe_serialize(created)
 
 
-async def list_accounts(employee_id: str | None, is_admin: bool) -> list[dict]:
+async def list_accounts(employee_id: str | list[str] | None, is_admin: bool) -> list[dict]:
     col = get_collection(COLLECTION)
-    query: dict = {} if is_admin and employee_id is None else {"employeeId": employee_id}
+    query: dict = {}
+    if not is_admin or employee_id is not None:
+        if isinstance(employee_id, list):
+            query["employeeId"] = {"$in": employee_id}
+        else:
+            query["employeeId"] = employee_id
     cursor = col.find(query).sort("createdAt", -1)
     return [_safe_serialize(d) async for d in cursor]
 

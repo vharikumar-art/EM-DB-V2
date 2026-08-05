@@ -39,10 +39,15 @@ def _default_prompt_settings() -> dict:
 
 
 async def _assert_owns_profile_or_admin(
-    profile: dict, employee_id: str, is_admin: bool
+    profile: dict, employee_id: str | list[str] | None, is_admin: bool
 ) -> None:
-    if not is_admin and profile["employeeId"] != employee_id:
-        raise ForbiddenException("You do not have access to this profile")
+    if not is_admin:
+        profile_owner = profile.get("employeeId")
+        if isinstance(employee_id, list):
+            if profile_owner not in employee_id:
+                raise ForbiddenException("You do not have access to this profile")
+        elif profile_owner != employee_id:
+            raise ForbiddenException("You do not have access to this profile")
 
 
 async def create_profile(employee_id: str, payload: ProfileCreate) -> dict:
@@ -86,9 +91,14 @@ async def create_profile(employee_id: str, payload: ProfileCreate) -> dict:
     return serialize_doc(created)
 
 
-async def list_profiles(employee_id: str | None) -> list[dict]:
+async def list_profiles(employee_id: str | list[str] | None) -> list[dict]:
     profiles = get_collection(COLLECTION)
-    query = {"employeeId": employee_id} if employee_id else {}
+    if employee_id is None:
+        query = {}
+    elif isinstance(employee_id, list):
+        query = {"employeeId": {"$in": employee_id}}
+    else:
+        query = {"employeeId": employee_id}
     cursor = profiles.find(query).sort("createdAt", -1)
     return serialize_list([d async for d in cursor])
 
@@ -141,6 +151,26 @@ async def update_profile(
         {"$set": update_data},
         return_document=True,
     )
+
+    # Cascade the employeeId change to campaigns, profile_emails, and the linked email account
+    if "employeeId" in update_data and update_data["employeeId"] != existing.get("employeeId"):
+        new_emp_id = update_data["employeeId"]
+        now = datetime.now(timezone.utc)
+        await get_collection("campaigns").update_many(
+            {"profileId": profile_id},
+            {"$set": {"employeeId": new_emp_id, "updatedAt": now}}
+        )
+        await get_collection("profile_emails").update_many(
+            {"profileId": profile_id},
+            {"$set": {"employeeId": new_emp_id, "updatedAt": now}}
+        )
+        # Also move the associated email account to the new employee
+        if existing.get("gmailAccount"):
+            await get_collection("email_accounts").update_many(
+                {"email": existing["gmailAccount"]},
+                {"$set": {"employeeId": new_emp_id, "updatedAt": now}}
+            )
+
     return serialize_doc(result)
 
 

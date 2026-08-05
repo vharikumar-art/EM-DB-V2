@@ -436,7 +436,7 @@ async def is_paused(campaign_id: str) -> bool:
 # ---------------------------------------------------------------------------
 
 async def list_campaigns(
-    employee_id: str | None,
+    employee_id: str | list[str] | None,
     params: PaginationParams,
     status_filter: str | None = None,
     profile_id: str | None = None,
@@ -444,8 +444,11 @@ async def list_campaigns(
     campaigns = get_collection(COLLECTION)
     query: dict = {}
 
-    if employee_id:
-        query["employeeId"] = employee_id
+    if employee_id is not None:
+        if isinstance(employee_id, list):
+            query["employeeId"] = {"$in": employee_id}
+        else:
+            query["employeeId"] = employee_id
     if status_filter:
         query["status"] = status_filter
     if profile_id:

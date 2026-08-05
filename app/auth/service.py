@@ -35,6 +35,9 @@ async def login(payload: LoginRequest) -> TokenPair:
     return TokenPair(
         accessToken=create_access_token(user_id, role, employee_id),
         refreshToken=create_refresh_token(user_id, role, employee_id),
+        role=role,
+        userId=user_id,
+        employeeId=employee_id,
     )
 
 
@@ -58,6 +61,9 @@ async def refresh_access_token(refresh_token: str) -> TokenPair:
     return TokenPair(
         accessToken=create_access_token(user_id, role, employee_id),
         refreshToken=create_refresh_token(user_id, role, employee_id),
+        role=role,
+        userId=user_id,
+        employeeId=employee_id,
     )
 
 

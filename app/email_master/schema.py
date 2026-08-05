@@ -22,9 +22,10 @@ class EmailMasterOut(BaseModel):
     mailSource: str = ""
     # Employee usage tracking
     uploadedByName: str | None = None
-    usedByEmployeeId: str | None = None
-    usedByEmployeeName: str | None = None
+    usedByEmployeeIds: list[str] = Field(default_factory=list)
+    usedByEmployeeNames: list[str] = Field(default_factory=list)
     inProfileEmails: bool = False
+    usageCount: int = 0
     assignedDate: str | None = None
     assignedProfiles: list[dict] = Field(default_factory=list)
     createdAt: str | None = None

@@ -75,7 +75,8 @@ async def list_employees(current_user: CurrentUser | None = None) -> list[dict]:
                 ]
             }
         except Exception:
-            pass
+            # If admin has no employee profile, they should see NO employees, not ALL employees
+            query = {"_id": "none"}
 
     cursor = employees.find(query)
     docs = [serialize_doc(d) async for d in cursor]
