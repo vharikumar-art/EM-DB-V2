@@ -225,6 +225,10 @@ async def delete_user(user_id: str) -> None:
     result = await users.delete_one({"_id": to_object_id(user_id)})
     if result.deleted_count == 0:
         raise NotFoundException("User not found")
+        
+    # Cascade delete the employee record to prevent orphans
+    employees = get_collection("employees")
+    await employees.delete_many({"userId": user_id})
 
 
 async def update_password(user_id: str, payload: PasswordUpdate) -> dict:

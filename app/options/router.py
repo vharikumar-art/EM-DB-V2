@@ -33,11 +33,25 @@ async def get_employees_options(
     employees = await list_employees(current_user)
     
     options = []
+    seen_user_ids = set()
     for emp in employees:
+        user_id = emp.get("userId")
+        name = emp.get("name")
+        
+        # Skip orphaned/deleted users
+        if not name or name == "Unknown" or not user_id:
+            continue
+            
+        # Skip duplicate entries
+        if user_id in seen_user_ids:
+            continue
+            
+        seen_user_ids.add(user_id)
+        
         options.append({
             "id": emp["id"],
-            "userId": emp["userId"],
-            "name": emp.get("name") or "Unknown",
+            "userId": user_id,
+            "name": name,
             "email": emp.get("email") or "",
             "branch": emp.get("branch") or "",
         })
