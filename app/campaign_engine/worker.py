@@ -34,6 +34,7 @@ from app.campaigns import service as campaign_service
 from app.campaigns.model import CampaignStatus
 from app.database.mongodb import get_collection
 from app.email_accounts.service import get_credentials_for_send, record_send
+from app.send_stats.model import record_sent
 from app.utils.personalizer import build_email_payload
 from app.notifications.schema import NotificationType
 from app.notifications.service import create_notification
@@ -363,6 +364,8 @@ async def _run(campaign_id: str) -> None:
                 await pe_service.mark_sent(pe_id, result.thread_id, result.message_id, template_id=selected_template.get("id"))
                 await campaign_service.increment_counters(campaign_id, sent=1)
                 await record_send(account_id)
+                # ── Record in immutable daily stats (survives campaign deletion) ──
+                await record_sent(employee_id, count=1)
                 total_sent += 1
                 auth_failure_count = 0  # reset on success
 

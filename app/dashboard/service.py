@@ -60,6 +60,7 @@ async def get_employee_dashboard(employee_id: str, query: DashboardQuery) -> dic
     profiles   = get_collection("profiles")
     logs       = get_collection("logs")
     employees  = get_collection("employees")
+    send_stats = get_collection("daily_send_stats")
 
     # email_master is global: uploads are owned by users._id in uploadedBy,
     # while the other employee resources use employees._id in employeeId.
@@ -116,19 +117,29 @@ async def get_employee_dashboard(employee_id: str, query: DashboardQuery) -> dic
         {"employeeId": employee_id, "sendStatus": "pending"}
     )
 
-    # ── Total sent (range) from logs ─────────────────────────────────────────
-    sent_pipeline = [
+    # ── Overall Sent (All Time) — immutable daily_send_stats ────────────────────────
+    overall_sent_pipeline = [
+        {"$match": {"employeeId": employee_id}},
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    overall_sent_res = await send_stats.aggregate(overall_sent_pipeline).to_list(length=1)
+    overall_sent = overall_sent_res[0]["total"] if overall_sent_res else 0
+
+    # ── Current Week Sent (Monday–Saturday) — immutable daily_send_stats ───────────
+    days_since_monday = now.weekday()
+    monday_date_str = (now - timedelta(days=days_since_monday)).strftime("%Y-%m-%d")
+
+    weekly_sent_pipeline = [
         {
             "$match": {
                 "employeeId": employee_id,
-                "action": "CAMPAIGN_COMPLETED",
-                "runDate": {"$gte": start_dt, "$lte": end_dt},
+                "date": {"$gte": monday_date_str},
             }
         },
         {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
     ]
-    sent_result = await logs.aggregate(sent_pipeline).to_list(length=1)
-    sent_total  = sent_result[0]["total"] if sent_result else 0
+    weekly_sent_res = await send_stats.aggregate(weekly_sent_pipeline).to_list(length=1)
+    current_week_sent = weekly_sent_res[0]["total"] if weekly_sent_res else 0
 
     return {
         "todayUploadCount":    today_uploads,
@@ -140,7 +151,8 @@ async def get_employee_dashboard(employee_id: str, query: DashboardQuery) -> dic
         "activeProfiles":      active_profiles,
         "totalCampaigns":      total_campaigns,
         "runningCampaigns":    running_campaigns,
-        "sentEmailCount":      sent_total,
+        "overallSent":         overall_sent,
+        "currentWeekSent":     current_week_sent,
         "pendingCount":        pending_total,
     }
 
@@ -167,6 +179,7 @@ async def get_admin_scoped_dashboard(admin_user_id: str, query: DashboardQuery) 
     profiles   = get_collection("profiles")
     logs       = get_collection("logs")
     accounts   = get_collection("email_accounts")
+    send_stats = get_collection("daily_send_stats")
 
     start_dt, end_dt = resolve_date_range(query)
     range_match = {"createdAt": {"$gte": start_dt, "$lte": end_dt}}
@@ -266,17 +279,35 @@ async def get_admin_scoped_dashboard(admin_user_id: str, query: DashboardQuery) 
         "status": {"$in": [CampaignStatus.RUNNING.value, CampaignStatus.PROCESSING.value]}
     })
     
-    # ── Sent to profiles and actually sent (scoped) ────────────────────────────
+    # ── Sent to profiles (scoped) ────────────────────────────
     total_sent_profiles = await pe_col.count_documents({
         "employeeId": {"$in": scope_emp_ids},
         "sentDate": {"$gte": start_dt, "$lte": end_dt}
     })
     
-    total_sent = await pe_col.count_documents({
-        "employeeId": {"$in": scope_emp_ids},
-        "sendStatus": "sent",
-        "sentDate": {"$gte": start_dt, "$lte": end_dt},
-    })
+    # ── Overall Sent (All Time) — immutable daily_send_stats ────────────────────────
+    overall_sent_pipeline = [
+        {"$match": {"employeeId": {"$in": scope_emp_ids}}},
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    overall_sent_res = await send_stats.aggregate(overall_sent_pipeline).to_list(length=1)
+    overall_sent = overall_sent_res[0]["total"] if overall_sent_res else 0
+
+    # ── Current Week Sent (Monday–Saturday) — immutable daily_send_stats ───────────
+    now_admin = datetime.now(timezone.utc)
+    monday_date_str = (now_admin - timedelta(days=now_admin.weekday())).strftime("%Y-%m-%d")
+
+    weekly_sent_pipeline = [
+        {
+            "$match": {
+                "employeeId": {"$in": scope_emp_ids},
+                "date": {"$gte": monday_date_str},
+            }
+        },
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    weekly_sent_res = await send_stats.aggregate(weekly_sent_pipeline).to_list(length=1)
+    current_week_sent = weekly_sent_res[0]["total"] if weekly_sent_res else 0
     
     return {
         "adminOwnUploads": admin_own_uploads,
@@ -285,7 +316,8 @@ async def get_admin_scoped_dashboard(admin_user_id: str, query: DashboardQuery) 
         "totalDuplicates": total_duplicates,
         "totalUniqueEmails": total_unique_all_uploads,
         "totalSentToProfiles": total_sent_profiles,
-        "totalSent": total_sent,
+        "overallSent": overall_sent,
+        "currentWeekSent": current_week_sent,
         "totalCampaigns": total_campaigns,
         "runningCampaigns": running_campaigns,
         "totalProfiles": total_profiles,
@@ -305,6 +337,7 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
     profiles   = get_collection("profiles")
     logs       = get_collection("logs")
     accounts   = get_collection("email_accounts")
+    send_stats = get_collection("daily_send_stats")
 
     start_dt, end_dt = resolve_date_range(query)
     range_match = {"createdAt": {"$gte": start_dt, "$lte": end_dt}}
@@ -339,8 +372,28 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
     # Total sent to profiles (count of profile_emails records)
     total_sent_profiles = await pe_col.count_documents({})
     
-    # Total actually sent (profile_emails with sent status)
-    total_sent = await pe_col.count_documents({"sendStatus": "sent"})
+    # ── Overall Sent (All Time) — immutable daily_send_stats ────────────────────────
+    overall_sent_pipeline = [
+        {"$match": {}},
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    overall_sent_res = await send_stats.aggregate(overall_sent_pipeline).to_list(length=1)
+    overall_sent = overall_sent_res[0]["total"] if overall_sent_res else 0
+
+    # ── Current Week Sent (Monday–Saturday) — immutable daily_send_stats ───────────
+    now = datetime.now(timezone.utc)
+    monday_date_str = (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
+
+    weekly_sent_pipeline = [
+        {
+            "$match": {
+                "date": {"$gte": monday_date_str},
+            }
+        },
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    weekly_sent_res = await send_stats.aggregate(weekly_sent_pipeline).to_list(length=1)
+    current_week_sent = weekly_sent_res[0]["total"] if weekly_sent_res else 0
 
     # Active profiles
     active_profiles = await profiles.count_documents({"isActive": True})
@@ -506,7 +559,8 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
         "totalDuplicates":     total_duplicates,
         "totalUniqueEmails":   total_unique,
         "totalSentToProfiles": total_sent_profiles,
-        "totalSent":           total_sent,
+        "overallSent":         overall_sent,
+        "currentWeekSent":     current_week_sent,
         "totalCampaigns":      total_campaigns,
         "runningCampaigns":    running_campaigns,
         "activeEmailAccounts": total_accounts,
