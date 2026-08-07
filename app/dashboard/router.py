@@ -3,7 +3,8 @@ from datetime import date, datetime, timezone
 from fastapi import APIRouter, Depends, Query
 
 from app.core.dependencies import CurrentUser, get_current_user, require_admin
-from app.dashboard import service
+from . import service
+from app.dashboard.roles import is_admin_dashboard_role, is_super_admin_role
 from app.dashboard.schema import DashboardQuery, DateRangePreset
 from app.employees.service import get_employee_by_user_id
 from app.schemas.common import ApiResponse
@@ -25,7 +26,7 @@ async def employee_dashboard(
     query: DashboardQuery = Depends(_dashboard_query),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    if current_user.role == "admin":
+    if is_admin_dashboard_role(current_user.role):
         if not employeeId:
             from app.core.exceptions import BadRequestException
             raise BadRequestException("Admins must provide employeeId to view an employee dashboard, or use /dashboard/admin")
@@ -72,7 +73,18 @@ async def admin_dashboard(
         "loginTime": datetime.now(timezone.utc).isoformat(),
     }
     
-    data = await service.get_admin_dashboard(query)
+    # Route based on role
+    if is_super_admin_role(current_user.role):
+        # Global admin dashboard for super_admin
+        data = await service.get_admin_dashboard(query)
+    elif is_admin_dashboard_role(current_user.role):
+        # Scoped admin dashboard for admin (own uploads + assigned employees)
+        data = await service.get_admin_scoped_dashboard(current_user.user_id, query)
+    else:
+        # Fallback (should not happen due to require_admin dependency)
+        from app.core.exceptions import ForbiddenException
+        raise ForbiddenException("User role not authorized for admin dashboard")
+    
     data["currentUser"] = user_info
     return ApiResponse(message="Admin dashboard fetched", data=data)
 

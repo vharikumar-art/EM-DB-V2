@@ -16,29 +16,6 @@ def _safe_oid(id_str: str):
     return ObjectId(id_str) if ObjectId.is_valid(id_str) else None
 
 
-def _build_admin_scope(
-    admin_user_id: str,
-    admin_emp_id: str | None,
-    assigned_emp_ids: list[str],
-    assigned_user_ids: list[str] | None = None,
-) -> tuple[list[str], list[str]]:
-    scope_emp_ids: list[str] = []
-    if admin_emp_id:
-        scope_emp_ids.append(admin_emp_id)
-
-    for emp_id in assigned_emp_ids:
-        if emp_id and emp_id not in scope_emp_ids:
-            scope_emp_ids.append(emp_id)
-
-    scope_user_ids = [admin_user_id]
-    if assigned_user_ids:
-        for user_id in assigned_user_ids:
-            if user_id and user_id not in scope_user_ids:
-                scope_user_ids.append(user_id)
-
-    return scope_emp_ids, scope_user_ids
-
-
 async def _employee_name(employee_id: str) -> str:
     employees = get_collection("employees")
     emp = await employees.find_one({"_id": _safe_oid(employee_id)})
@@ -88,8 +65,6 @@ async def get_employee_dashboard(employee_id: str, query: DashboardQuery) -> dic
             "createdAt": {"$gte": start_dt, "$lte": end_dt},
         }
     )
-    all_time_uploads = await master.count_documents({"uploadedBy": uploader_id})
-    all_time_unique_emails = await master.count_documents({"uploadedBy": uploader_id, "isDuplicate": False})
 
     # ── Campaign counts ──────────────────────────────────────────────────────
     active_profiles  = await profiles.count_documents(
@@ -111,9 +86,21 @@ async def get_employee_dashboard(employee_id: str, query: DashboardQuery) -> dic
         }
     )
 
-    # ── Aggregate pending across all profiles ──────────────────────────────
+    # ── Sent today (profile_emails) ──────────────────────────────────────────
+    sent_today = await pe_col.count_documents(
+        {
+            "employeeId": employee_id,
+            "sendStatus": "sent",
+            "sentDate": {"$gte": today_start},
+        }
+    )
+
+    # ── Aggregate pending / failed across all profiles ───────────────────────
     pending_total = await pe_col.count_documents(
         {"employeeId": employee_id, "sendStatus": "pending"}
+    )
+    failed_total  = await pe_col.count_documents(
+        {"employeeId": employee_id, "sendStatus": "failed"}
     )
 
     # ── Total sent (range) from logs ─────────────────────────────────────────
@@ -135,166 +122,18 @@ async def get_employee_dashboard(employee_id: str, query: DashboardQuery) -> dic
         "last7DaysUploadCount": last_7_uploads,
         "totalUploadCount":    total_uploads,
         "uniqueEmailCount":    unique_emails,
-        "allTimeUploadCount":  all_time_uploads,
-        "allTimeUniqueEmailCount": all_time_unique_emails,
         "activeProfiles":      active_profiles,
         "totalCampaigns":      total_campaigns,
         "runningCampaigns":    running_campaigns,
+        "sentToday":           sent_today,
         "sentEmailCount":      sent_total,
         "pendingCount":        pending_total,
+        "failedCount":         failed_total,
     }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Admin scoped dashboard (for 'admin' role)
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def get_admin_scoped_dashboard(admin_user_id: str, query: DashboardQuery) -> dict:
-    """
-    Get dashboard data scoped to admin's own uploads + assigned employees only.
-    
-    Args:
-        admin_user_id: The user._id of the admin user
-        query: Dashboard query with date range
-        
-    Returns:
-        dict with scoped stats, including adminOwnUploads, assignedEmployeeUploads, etc.
-    """
-    employees  = get_collection("employees")
-    master     = get_collection("email_master")
-    pe_col     = get_collection("profile_emails")
-    campaigns  = get_collection("campaigns")
-    profiles   = get_collection("profiles")
-    logs       = get_collection("logs")
-    accounts   = get_collection("email_accounts")
-
-    start_dt, end_dt = resolve_date_range(query)
-    range_match = {"createdAt": {"$gte": start_dt, "$lte": end_dt}}
-
-    # ── Find admin's employee record ──────────────────────────────────────────
-    admin_emp = await employees.find_one({"userId": admin_user_id})
-    admin_emp_id = str(admin_emp["_id"]) if admin_emp else None
-    
-    if not admin_emp_id:
-        # Admin has no employee record, return empty scoped dashboard
-        return {
-            "adminOwnUploads": 0,
-            "assignedEmployeeUploads": 0,
-            "totalUploads": 0,
-            "totalDuplicates": 0,
-            "totalUniqueEmails": 0,
-            "totalSentToProfiles": 0,
-            "totalSent": 0,
-            "totalCampaigns": 0,
-            "runningCampaigns": 0,
-            "totalProfiles": 0,
-            "activeProfiles": 0,
-            
-        }
-
-    # ── Find all employees assigned to this admin ─────────────────────────────
-    # Note: assignedToAdmin stores the employee._id (ObjectId as string), not user_id
-    assigned_employees = await employees.find(
-        {"assignedToAdmin": admin_emp_id}
-    ).to_list(None)
-    assigned_emp_ids = [str(e["_id"]) for e in assigned_employees]
-    assigned_user_ids = [str(e["userId"]) for e in assigned_employees if e.get("userId")]
-
-    # Build the scope once so uploads, profiles, campaigns, and sent records all use the same employee/user context.
-    scope_emp_ids, scope_user_ids = _build_admin_scope(
-        admin_user_id=admin_user_id,
-        admin_emp_id=admin_emp_id,
-        assigned_emp_ids=assigned_emp_ids,
-        assigned_user_ids=assigned_user_ids,
-    )
-    
-    # ── Admin's own upload count (all time) ─────────────────────────────────
-    admin_own_uploads = await master.count_documents({"uploadedBy": admin_user_id})
-    
-    # ── Assigned employees' total upload count (all time) ────────────────────
-    assigned_uploads_count = 0
-    if assigned_user_ids:
-        assigned_uploads_count = await master.count_documents({
-            "uploadedBy": {"$in": assigned_user_ids}
-        })
-
-    total_uploads = admin_own_uploads + assigned_uploads_count
-    
-    # ── Duplicates (scoped to these employees) ────────────────────────────────
-    duplicates_pipeline = [
-        {
-            "$match": {
-                "action": "UPLOAD",
-                "runDate": {"$gte": start_dt, "$lte": end_dt},
-                "employeeId": {"$in": scope_emp_ids}
-            }
-        },
-        {"$group": {"_id": None, "total": {"$sum": "$duplicateCount"}}}
-    ]
-    duplicates_result = await logs.aggregate(duplicates_pipeline).to_list(length=1)
-    total_duplicates = duplicates_result[0]["total"] if duplicates_result else 0
-    
-    # ── Unique emails (scoped) ───────────────────────────────────────────────
-    # Query email_master by userId (not employeeId)
-    total_unique_all_uploads = await master.count_documents({
-        "isDuplicate": False,
-        "uploadedBy": {"$in": scope_user_ids},
-        **range_match
-    })
-    
-    # ── Profiles (scoped to these employees) ──────────────────────────────────
-    total_profiles = await profiles.count_documents({
-        "employeeId": {"$in": scope_emp_ids}
-    })
-    
-    active_profiles = await profiles.count_documents({
-        "employeeId": {"$in": scope_emp_ids},
-        "isActive": True
-    })
-    
-    # ── Campaigns (scoped) ───────────────────────────────────────────────────
-    unique_campaigns_pipeline = [
-        {"$match": {"employeeId": {"$in": scope_emp_ids}}},
-        {"$group": {"_id": "$campaignName"}},
-        {"$count": "total"}
-    ]
-    unique_campaigns_result = await campaigns.aggregate(unique_campaigns_pipeline).to_list(length=1)
-    total_campaigns = unique_campaigns_result[0]["total"] if unique_campaigns_result else 0
-    
-    running_campaigns = await campaigns.count_documents({
-        "employeeId": {"$in": scope_emp_ids},
-        "status": {"$in": [CampaignStatus.RUNNING.value, CampaignStatus.PROCESSING.value]}
-    })
-    
-    # ── Sent to profiles and actually sent (scoped) ────────────────────────────
-    total_sent_profiles = await pe_col.count_documents({
-        "employeeId": {"$in": scope_emp_ids},
-        "sentDate": {"$gte": start_dt, "$lte": end_dt}
-    })
-    
-    total_sent = await pe_col.count_documents({
-        "employeeId": {"$in": scope_emp_ids},
-        "sendStatus": "sent",
-        "sentDate": {"$gte": start_dt, "$lte": end_dt},
-    })
-    
-    return {
-        "adminOwnUploads": admin_own_uploads,
-        "assignedEmployeeUploads": assigned_uploads_count,
-        "totalUploads": total_uploads,
-        "totalDuplicates": total_duplicates,
-        "totalUniqueEmails": total_unique_all_uploads,
-        "totalSentToProfiles": total_sent_profiles,
-        "totalSent": total_sent,
-        "totalCampaigns": total_campaigns,
-        "runningCampaigns": running_campaigns,
-        "totalProfiles": total_profiles,
-        "activeProfiles": active_profiles,
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Admin dashboard (for 'super_admin' role - global view)
+# Admin dashboard
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def get_admin_dashboard(query: DashboardQuery) -> dict:
@@ -309,14 +148,14 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
     start_dt, end_dt = resolve_date_range(query)
     range_match = {"createdAt": {"$gte": start_dt, "$lte": end_dt}}
 
-    # ── Global totals for super_admin ───────────────────────────────────────────
+    # ── Totals ───────────────────────────────────────────────────────────────
     total_employees   = await employees.count_documents({})
-    total_uploads     = await master.count_documents({})
-    total_unique      = await master.count_documents({"isDuplicate": False})
+    total_uploads     = await master.count_documents(range_match)
+    total_unique      = await master.count_documents({**range_match, "isDuplicate": False})
     
     # Get total duplicates from logs (this is where duplicate count is stored)
     duplicates_pipeline = [
-        {"$match": {"action": "UPLOAD"}},
+        {"$match": {"action": "UPLOAD", "runDate": {"$gte": start_dt, "$lte": end_dt}}},
         {"$group": {"_id": None, "total": {"$sum": "$duplicateCount"}}}
     ]
     duplicates_result = await logs.aggregate(duplicates_pipeline).to_list(length=1)
@@ -330,23 +169,27 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
     unique_campaigns_result = await campaigns.aggregate(unique_campaigns_pipeline).to_list(length=1)
     total_campaigns = unique_campaigns_result[0]["total"] if unique_campaigns_result else 0
     
-    running_campaigns = await campaigns.count_documents({
-        "status": {"$in": [CampaignStatus.RUNNING.value, CampaignStatus.PROCESSING.value]}
-    })
+    running_campaigns = await campaigns.count_documents({"status": "running"})
     total_accounts    = await accounts.count_documents({"isActive": True})
     total_profiles    = await profiles.count_documents({})  # Count all profiles
 
     # Total sent to profiles (count of profile_emails records)
-    total_sent_profiles = await pe_col.count_documents({})
+    total_sent_profiles = await pe_col.count_documents(
+        {"sentDate": {"$gte": start_dt, "$lte": end_dt}}
+    )
     
-    # Total actually sent (profile_emails with sent status)
-    total_sent = await pe_col.count_documents({"sendStatus": "sent"})
+    # Total actually sent (profile_emails with sent status) - count ALL sent emails, not date-filtered
+    total_sent = await pe_col.count_documents(
+        {"sendStatus": "sent"}
+    )
 
-    # Active profiles
-    active_profiles = await profiles.count_documents({"isActive": True})
+    # Global pending / failed
+    total_pending = await pe_col.count_documents({"sendStatus": "pending"})
+    total_failed  = await pe_col.count_documents({"sendStatus": "failed"})
 
     # ── Employee upload ranking ───────────────────────────────────────────────
     ranking_pipeline = [
+        {"$match": range_match},
         {"$group": {"_id": "$employeeId", "uploadedCount": {"$sum": 1}}},
         {"$sort": {"uploadedCount": -1}},
         {"$limit": 20},
@@ -357,6 +200,7 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
         {
             "$match": {
                 "action": "CAMPAIGN_COMPLETED",
+                "runDate": {"$gte": start_dt, "$lte": end_dt},
             }
         },
         {"$group": {"_id": "$employeeId", "sentCount": {"$sum": "$sentCount"}}},
@@ -408,6 +252,7 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
                 "_id":           "$employeeId",
                 "totalCampaigns": {"$sum": 1},
                 "totalSent":     {"$sum": "$sent"},
+                "totalFailed":   {"$sum": "$failed"},
             }
         },
         {"$sort": {"totalSent": -1}},
@@ -423,6 +268,7 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
                 "employeeName":   emp_name,
                 "totalCampaigns": row["totalCampaigns"],
                 "totalSent":      row["totalSent"],
+                "totalFailed":    row["totalFailed"],
             }
         )
 
@@ -449,6 +295,7 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
                 "$match": {
                     "employeeId": emp_id,
                     "action": "UPLOAD",
+                    "runDate": {"$gte": start_dt, "$lte": end_dt}
                 }
             },
             {"$group": {"_id": None, "total": {"$sum": "$duplicateCount"}}}
@@ -459,12 +306,13 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
         # Get sent to profiles (total records added to profile_emails from email_master)
         emp_sent_profiles = await pe_col.count_documents({
             "employeeId": emp_id,
+            "sentDate": {"$gte": start_dt, "$lte": end_dt}
         })
         
-        # Get actually sent (sendStatus: sent)
+        # Get actually sent (sendStatus: sent) - count ALL, not date-filtered
         emp_sent = await pe_col.count_documents({
             "employeeId": emp_id,
-            "sendStatus": "sent",
+            "sendStatus": "sent"
         })
         
         # Get employee's profiles count (using employeeId)
@@ -484,7 +332,7 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
         # Get employee's running campaigns (status: "running", using employeeId)
         emp_running_campaigns = await campaigns.count_documents({
             "employeeId": emp_id,
-            "status": {"$in": [CampaignStatus.RUNNING.value, CampaignStatus.PROCESSING.value]}
+            "status": "running"
         })
         
         employee_performance.append({
@@ -511,11 +359,17 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
         "runningCampaigns":    running_campaigns,
         "activeEmailAccounts": total_accounts,
         "totalProfiles":       total_profiles,
-        "activeProfiles":      active_profiles,
+        "totalPending":        total_pending,
+        "totalFailed":         total_failed,
         # Overall metrics (not date-filtered)
         "overallEmailMaster":  await master.count_documents({}),
         "overallProfileEmails": await pe_col.count_documents({}),
         "overallSent":         await pe_col.count_documents({"sendStatus": "sent"}),
+        # Sent today
+        "sentToday":           await pe_col.count_documents(
+            {"sendStatus": "sent", "sentDate": {"$gte": now.replace(hour=0, minute=0, second=0, microsecond=0)}}
+        ),
+        "employeePerformance": employee_performance,
     }
 
 
@@ -817,6 +671,7 @@ async def get_upload_history(
             "duplicateCount":  dp,
             "invalidCount":    inv,
             "uploadEvents":    up_stats.get("uploadEvents", 0),
+            "sentToday":       today_sent_map.get(eid, 0),
             "runningCampaigns": running_map.get(eid, 0),
         })
 
