@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from app.campaigns.model import CampaignStatus
+from app.dashboard.roles import is_admin_dashboard_role, is_super_admin_role
 from app.dashboard.schema import DashboardQuery
 from app.dashboard.utils import resolve_date_range
 from app.database.mongodb import get_collection
@@ -47,6 +48,46 @@ async def _employee_name(employee_id: str) -> str:
     users = get_collection("users")
     user = await users.find_one({"_id": _safe_oid(str(emp["userId"]))})
     return user["name"] if user else "Unknown"
+
+
+async def _resolve_dashboard_scope(role: str | None, user_id: str | None) -> dict:
+    if is_super_admin_role(role):
+        return {"is_global": True, "scope_emp_ids": [], "scope_user_ids": []}
+
+    if is_admin_dashboard_role(role):
+        employees = get_collection("employees")
+        admin_emp = await employees.find_one({"userId": user_id}) if user_id else None
+        admin_emp_id = str(admin_emp["_id"]) if admin_emp else None
+
+        if not admin_emp_id:
+            return {
+                "is_global": False,
+                "scope_emp_ids": [],
+                "scope_user_ids": [user_id] if user_id else [],
+            }
+
+        assigned_employees = await employees.find({"assignedToAdmin": admin_emp_id}).to_list(None)
+        assigned_emp_ids = [str(e["_id"]) for e in assigned_employees]
+        assigned_user_ids = [str(e["userId"]) for e in assigned_employees if e.get("userId")]
+
+        scope_emp_ids, scope_user_ids = _build_admin_scope(
+            admin_user_id=user_id or "",
+            admin_emp_id=admin_emp_id,
+            assigned_emp_ids=assigned_emp_ids,
+            assigned_user_ids=assigned_user_ids,
+        )
+
+        return {
+            "is_global": False,
+            "scope_emp_ids": scope_emp_ids,
+            "scope_user_ids": scope_user_ids,
+        }
+
+    return {
+        "is_global": False,
+        "scope_emp_ids": [],
+        "scope_user_ids": [user_id] if user_id else [],
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -576,17 +617,27 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
 # Dropdown Options
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def get_dropdown_options() -> dict:
-    """Get all dropdown options: employees, admins, profiles, campaigns."""
+async def get_dropdown_options(current_user=None) -> dict:
+    """Get dropdown options scoped to the current admin or the full system for super admins."""
     employees_col = get_collection("employees")
     users_col = get_collection("users")
     profiles_col = get_collection("profiles")
     campaigns_col = get_collection("campaigns")
 
+    role = getattr(current_user, "role", None)
+    user_id = getattr(current_user, "user_id", None)
+    scope = await _resolve_dashboard_scope(role, user_id)
+    is_global = scope["is_global"]
+    scope_emp_ids = set(scope["scope_emp_ids"])
+    scope_user_ids = set(scope["scope_user_ids"])
+
     # Get employees with names
     employees = []
     async for emp in employees_col.find():
         emp_id = str(emp["_id"])
+        if not is_global and emp_id not in scope_emp_ids:
+            continue
+
         user = await users_col.find_one({"_id": _safe_oid(emp["userId"])})
         emp_name = user.get("name", "Unknown") if user else "Unknown"
         employees.append({
@@ -597,23 +648,36 @@ async def get_dropdown_options() -> dict:
 
     # Get admins (users with role=admin)
     admins = []
-    async for user in users_col.find({"role": "admin"}):
-        user_id = str(user["_id"])
-        admins.append({
-            "id": user_id,
-            "name": user.get("name", "Unknown"),
-            "email": user.get("email", "")
-        })
+    if is_global:
+        async for user in users_col.find({"role": "admin"}):
+            user_id_value = str(user["_id"])
+            admins.append({
+                "id": user_id_value,
+                "name": user.get("name", "Unknown"),
+                "email": user.get("email", "")
+            })
+    elif user_id:
+        user_doc = await users_col.find_one({"_id": _safe_oid(user_id)})
+        if user_doc:
+            admins.append({
+                "id": str(user_doc["_id"]),
+                "name": user_doc.get("name", "Unknown"),
+                "email": user_doc.get("email", "")
+            })
 
     # Get profiles with employee names
     profiles = []
     async for profile in profiles_col.find():
         profile_id = str(profile["_id"])
         emp_id = profile.get("employeeId")
+        emp_id_str = str(emp_id) if emp_id is not None else None
+        if not is_global and emp_id_str not in scope_emp_ids:
+            continue
+
         emp = await employees_col.find_one({"_id": _safe_oid(emp_id)})
         emp_user = await users_col.find_one({"_id": _safe_oid(emp.get("userId"))}) if emp else None
         emp_name = emp_user.get("name", "Unknown") if emp_user else "Unknown"
-        
+
         profiles.append({
             "id": profile_id,
             "name": profile.get("profileName", "Unnamed"),
@@ -627,10 +691,14 @@ async def get_dropdown_options() -> dict:
     async for campaign in campaigns_col.find():
         campaign_id = str(campaign["_id"])
         emp_id = campaign.get("employeeId")
+        emp_id_str = str(emp_id) if emp_id is not None else None
+        if not is_global and emp_id_str not in scope_emp_ids:
+            continue
+
         emp = await employees_col.find_one({"_id": _safe_oid(emp_id)})
         emp_user = await users_col.find_one({"_id": _safe_oid(emp.get("userId"))}) if emp else None
         emp_name = emp_user.get("name", "Unknown") if emp_user else "Unknown"
-        
+
         campaigns.append({
             "id": campaign_id,
             "name": campaign.get("campaignName", "Unnamed"),
@@ -659,11 +727,19 @@ async def get_upload_history(
     employee_id: str | None = None,
     page: int = 1,
     page_size: int = 20,
+    current_user=None,
 ) -> dict:
     """Fetch paginated upload history from logs, grouped by employee per day."""
     logs = get_collection("logs")
     users_col = get_collection("users")
     employees_col = get_collection("employees")
+
+    role = getattr(current_user, "role", None)
+    user_id = getattr(current_user, "user_id", None)
+    scope = await _resolve_dashboard_scope(role, user_id)
+    is_global = scope["is_global"]
+    scope_user_ids = set(scope["scope_user_ids"])
+    scope_emp_ids = set(scope["scope_emp_ids"])
 
     start_dt, end_dt = resolve_date_range(query)
 
@@ -702,6 +778,9 @@ async def get_upload_history(
         if emp_id not in active_users:
             continue
 
+        if not is_global and emp_id not in scope_user_ids:
+            continue
+
         user_info = active_users[emp_id]
         resolved_emp_id = emp_id  # fallback — use userId if no employee doc exists
 
@@ -737,10 +816,13 @@ async def get_upload_history(
 
     # ── Apply employee filter
     if employee_id:
-        raw_records = [
-            r for r in raw_records
-            if r["employeeId"] == employee_id or r["employeeId"] == filter_user_id
-        ]
+        if not is_global and employee_id not in scope_emp_ids and employee_id not in scope_user_ids and filter_user_id not in scope_user_ids:
+            raw_records = []
+        else:
+            raw_records = [
+                r for r in raw_records
+                if r["employeeId"] == employee_id or r["employeeId"] == filter_user_id
+            ]
 
     # ── Group by (employeeId, date_key) → one row per employee per calendar day
     grouped: dict[tuple, dict] = {}
