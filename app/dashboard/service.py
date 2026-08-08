@@ -569,7 +569,6 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
         # Overall metrics (not date-filtered)
         "overallEmailMaster":  await master.count_documents({}),
         "overallProfileEmails": await pe_col.count_documents({}),
-        "overallSent":         await pe_col.count_documents({"sendStatus": "sent"}),
     }
 
 
