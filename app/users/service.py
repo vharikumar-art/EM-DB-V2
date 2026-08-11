@@ -95,6 +95,7 @@ async def list_users(current_user: CurrentUser) -> list[dict]:
     email_master_col = get_collection("email_master")
     profiles_col = get_collection("profiles")
     campaigns_col = get_collection("campaigns")
+    profile_emails_col = get_collection("profile_emails")
 
     query = {}
     if current_user.role == "admin":
@@ -146,19 +147,31 @@ async def list_users(current_user: CurrentUser) -> list[dict]:
     profile_map = {r["_id"]: r["count"] for r in profile_agg}
 
     # ── 5. Batch: campaign stats per employee_id ──────────────────────────────
+    running_statuses = _get_running_campaign_statuses()
+    pending_statuses = _get_pending_campaign_statuses()
     campaign_agg = await campaigns_col.aggregate([
         {"$match": {"employeeId": {"$in": emp_ids}}},
         {"$group": {
             "_id": "$employeeId",
             "totalCampaigns": {"$sum": 1},
             "runningCampaigns": {"$sum": {
-                "$cond": [{"$in": ["$status", ["running", "scheduled"]]}, 1, 0]
+                "$cond": [{"$in": ["$status", running_statuses]}, 1, 0]
+            }},
+            "pendingCampaigns": {"$sum": {
+                "$cond": [{"$in": ["$status", pending_statuses]}, 1, 0]
             }}
         }}
     ]).to_list(None)
     campaign_map = {r["_id"]: r for r in campaign_agg}
 
-    # ── 6. Merge stats into each user (translate user_id → emp_id for lookup) ─
+    # ── 6. Batch: pending profile-email count per employee_id ─────────────────
+    pending_emails_agg = await profile_emails_col.aggregate([
+        {"$match": {"employeeId": {"$in": emp_ids}, "sendStatus": {"$in": ["pending", "failed", "paused", "sending"]}}},
+        {"$group": {"_id": "$employeeId", "count": {"$sum": 1}}}
+    ]).to_list(None)
+    pending_emails_map = {r["_id"]: r["count"] for r in pending_emails_agg}
+
+    # ── 7. Merge stats into each user (translate user_id → emp_id for lookup) ─
     for u in users:
         uid = u["id"]
         eid = user_to_emp.get(uid)          # employee doc id for this user
@@ -171,6 +184,8 @@ async def list_users(current_user: CurrentUser) -> list[dict]:
             "totalProfiles": profile_map.get(eid, 0) if eid else 0,
             "totalCampaigns": cm.get("totalCampaigns", 0),
             "runningCampaigns": cm.get("runningCampaigns", 0),
+            "pendingEmails": pending_emails_map.get(eid, 0) if eid else 0,
+            "pendingCampaigns": cm.get("pendingCampaigns", 0),
         }
 
     return users
@@ -286,10 +301,37 @@ async def migrate_add_branch() -> dict:
     }
 
 
+async def _resolve_employee_id_for_user(user_id: str) -> str | None:
+    """Resolve the employee document for a user so stats use employeeId consistently."""
+    employees = get_collection("employees")
+    employee_doc = await employees.find_one({"userId": user_id})
+    if not employee_doc:
+        return None
+    return str(employee_doc.get("_id"))
+
+
+def _get_running_campaign_statuses() -> list[str]:
+    """Return the active campaign statuses that should count as running."""
+    from app.campaigns.model import CampaignStatus
+
+    return [CampaignStatus.RUNNING.value, CampaignStatus.PROCESSING.value]
+
+
+def _get_pending_campaign_statuses() -> list[str]:
+    """Return campaign statuses that should count as pending."""
+    from app.campaigns.model import CampaignStatus
+
+    return [
+        CampaignStatus.PENDING.value,
+        CampaignStatus.SCHEDULED.value,
+        CampaignStatus.WAITING_FOR_MAILS.value,
+        CampaignStatus.FAILED.value,
+        CampaignStatus.PAUSED.value,
+    ]
+
+
 async def get_user_details(user_id: str) -> dict:
     """Get full user profile including performance stats: uploads, profiles, campaigns, running campaigns."""
-    from datetime import datetime, timezone
-
     users = get_collection(COLLECTION)
     logs_col = get_collection("logs")
     profiles_col = get_collection("profiles")
@@ -300,10 +342,17 @@ async def get_user_details(user_id: str) -> dict:
         raise NotFoundException("User not found")
 
     user = serialize_user_with_password(doc)
+    employee_id = await _resolve_employee_id_for_user(user_id)
 
     # ── Upload stats from logs ─────────────────────────────────────────────
+    upload_match = {"action": "UPLOAD"}
+    if employee_id:
+        upload_match["employeeId"] = employee_id
+    else:
+        upload_match["employeeId"] = user_id
+
     upload_pipeline = [
-        {"$match": {"employeeId": user_id, "action": "UPLOAD"}},
+        {"$match": upload_match},
         {
             "$group": {
                 "_id": None,
@@ -323,17 +372,34 @@ async def get_user_details(user_id: str) -> dict:
     upload_events = upload_stats.get("uploadCount", 0)
 
     # ── Profile count ─────────────────────────────────────────────────────
-    total_profiles = await profiles_col.count_documents({"employeeId": user_id})
+    if employee_id:
+        total_profiles = await profiles_col.count_documents({"employeeId": employee_id})
+    else:
+        total_profiles = await profiles_col.count_documents({"employeeId": user_id})
 
     # ── Campaign stats ────────────────────────────────────────────────────
-    total_campaigns = await campaigns_col.count_documents({"employeeId": user_id})
-    running_campaigns = await campaigns_col.count_documents(
-        {"employeeId": user_id, "status": {"$in": ["running", "scheduled"]}}
-    )
+    running_statuses = _get_running_campaign_statuses()
+
+    if employee_id:
+        total_campaigns = await campaigns_col.count_documents({"employeeId": employee_id})
+        running_campaigns = await campaigns_col.count_documents(
+            {"employeeId": employee_id, "status": {"$in": running_statuses}}
+        )
+    else:
+        total_campaigns = await campaigns_col.count_documents({"employeeId": user_id})
+        running_campaigns = await campaigns_col.count_documents(
+            {"employeeId": user_id, "status": {"$in": running_statuses}}
+        )
 
     # ── Recent upload history (last 10 batches) ────────────────────────────
+    recent_query = {"action": "UPLOAD"}
+    if employee_id:
+        recent_query["employeeId"] = employee_id
+    else:
+        recent_query["employeeId"] = user_id
+
     recent_cursor = logs_col.find(
-        {"employeeId": user_id, "action": "UPLOAD"},
+        recent_query,
         {"_id": 0, "runDate": 1, "uploadedCount": 1, "uniqueCount": 1, "duplicateCount": 1}
     ).sort("runDate", -1).limit(10)
     recent_uploads = [d async for d in recent_cursor]

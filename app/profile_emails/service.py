@@ -13,6 +13,20 @@ from app.utils.pagination import build_paginated_response
 from app.utils.response import serialize_doc, serialize_list, to_object_id
 
 COLLECTION = "profile_emails"
+MAX_GENERATION_LIMIT = 600
+
+
+def _get_effective_generation_limit(daily_limit: int, filter_limit: int, is_admin: bool) -> int:
+    """Return the effective batch limit for profile-email generation."""
+    if is_admin:
+        return daily_limit
+
+    requested_limit = filter_limit or daily_limit or 0
+    if requested_limit <= 0:
+        return MAX_GENERATION_LIMIT
+    if requested_limit > MAX_GENERATION_LIMIT:
+        return MAX_GENERATION_LIMIT
+    return requested_limit
 
 
 # ---------------------------------------------------------------------------
@@ -40,11 +54,17 @@ async def generate_list(
     sending_opts: dict = profile.get("sendingOptions", {})
     daily_limit: int = limit_override or sending_opts.get("dailyLimit", 100)
     filter_limit: int = profile.get("filterLimit", 0)
+
+    profile_emails_col = get_collection(COLLECTION)
+    effective_daily_limit = _get_effective_generation_limit(
+        daily_limit=daily_limit,
+        filter_limit=filter_limit,
+        is_admin=is_admin,
+    )
     
     # CHECK: Profile email generation LOCK
     # If profile already has emails generated, cannot generate again
     # unless they delete them first or send and clear
-    profile_emails_col = get_collection(COLLECTION)
     existing_emails_count = await profile_emails_col.count_documents(
         {"profileId": profile_id, "sendStatus": SendStatus.PENDING.value}
     )
@@ -62,7 +82,7 @@ async def generate_list(
     # Pass employee_id so query skips emails assigned to OTHER employees
     master_records = await query_for_profile(
         filters=filters,
-        daily_limit=daily_limit,
+        daily_limit=effective_daily_limit,
         filter_limit=filter_limit,
         employee_id=profile["employeeId"],  # Pass employee ID
     )

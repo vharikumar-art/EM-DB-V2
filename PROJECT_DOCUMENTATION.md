@@ -1,289 +1,766 @@
-# Cold Email Marketing Management System — Complete Project Documentation
+# Cold Email Marketing Management System — Detailed Project Documentation
 
 ---
 
-## 1. Project Overview
+## 1. Project Purpose
 
-This is a **multi-tenant internal cold email marketing platform** built for an organization where multiple employees independently manage their own email outreach campaigns. An admin oversees all employees and their activity.
+This project is a backend system for an internal cold email marketing platform. It allows multiple employees to manage their own outreach campaigns, while admins can oversee employee activity, manage accounts, review results, and control campaign execution.
 
-The system handles the **entire campaign lifecycle**:
-1. Uploading a master database of leads (CSV/Excel)
-2. Creating "Profiles" that define who to email and how
-3. Generating a filtered working list from the master database
-4. Sending emails automatically (with personalization, attachments, and rate limiting)
-5. Scheduling campaigns to run in the future (daily, weekly, or once)
-6. Reporting on performance through dashboards and CSV exports
-
----
-
-## 2. Technology Stack
-
-| Layer | Technology | Purpose |
-|---|---|---|
-| **Runtime** | Python 3.11 | Core language |
-| **Web Framework** | FastAPI 0.115 | HTTP + WebSocket server |
-| **ASGI Server** | Uvicorn (with `standard` extras) | Runs the FastAPI app with async support |
-| **Database** | MongoDB (standalone) | Primary data store for all collections |
-| **DB Driver** | Motor 3.5 (async) | Asynchronous MongoDB driver (never blocks event loop) |
-| **Schema Validation** | Pydantic v2 | Request/response validation and serialization |
-| **Auth** | python-jose (JWT, HS256) | Stateless access tokens |
-| **Password Hashing** | Passlib (pbkdf2_sha256) | Hashes user login passwords |
-| **Email Encryption** | Cryptography (Fernet) | AES-256 symmetric encryption of SMTP app passwords |
-| **Email Sending** | smtplib (stdlib) | Direct SMTP connection to Gmail or any SMTP server |
-| **Rate Limiting** | slowapi 0.1.9 | Per-IP request rate limiting |
-| **Data Processing** | pandas 2.2, openpyxl 3.1 | CSV/Excel parsing on upload |
-| **HTTP Client** | httpx 0.27 | Async HTTP requests |
-| **Environment** | pydantic-settings | Loads `.env` file into `Settings` class |
+The system covers the full workflow:
+1. User and employee account creation
+2. SMTP email account setup
+3. Uploading a master lead database
+4. Creating reusable outreach profiles
+5. Generating a filtered list of leads for each profile
+6. Running and scheduling campaigns
+7. Viewing analytics, logs, notifications, and exports
 
 ---
 
-## 3. Project Directory Layout
+## 2. Architecture Overview
 
-```
-backend/
-├── main.py                     # App entrypoint: middleware, routers, lifespan
-├── requirements.txt            # Python dependencies
-├── .env                        # Environment variables (secrets)
-└── app/
-    ├── auth/                   # Login, refresh token, logout
-    ├── users/                  # User account CRUD (admin managed)
-    ├── employees/              # Employee profiles (linked to users)
-    ├── email_accounts/         # SMTP credentials store per employee
-    ├── email_master/           # Global permanent lead database
-    ├── profiles/               # Sending profiles (templates + filters)
-    ├── profile_emails/         # Working email list per profile (campaign fuel)
-    ├── campaigns/              # Campaign lifecycle + scheduler
-    ├── campaign_engine/        # Email sending loop (worker + SMTP sender)
-    ├── templates/              # Reusable email templates
-    ├── dashboard/              # Analytics & aggregations
-    ├── logs/                   # Activity logs viewer
-    ├── notifications/          # In-app notifications + WebSocket live push
-    ├── reports/                # CSV export endpoints
-    ├── options/                # Dropdown data for frontend (employees/profiles/campaigns)
-    ├── core/                   # Config, security, dependencies, exceptions, rate limit
-    ├── database/               # MongoDB connection + index creation on startup
-    ├── middleware/             # Request logging, audit logging, error handlers
-    ├── schemas/                # Shared response envelopes (ApiResponse)
-    └── utils/                  # CSV parser, personalizer, pagination, serializer
-```
+The backend is built with:
+- Python 3.11
+- FastAPI for API endpoints and WebSocket support
+- Uvicorn as the ASGI server
+- Motor with MongoDB for async data access
+- Pydantic for request/response validation
+- JWT for authentication
+- Fernet encryption for SMTP credentials
+- smtplib for email sending
+
+The codebase is modular. Each business area lives in its own package under the app directory.
 
 ---
 
-## 4. Authentication & Authorization
+## 3. Simple Summary in One Line
 
-### How It Works
-The system uses **stateless JWT authentication** with two tokens:
-- **Access Token** (short-lived, 30 minutes by default): Used on every API request as `Authorization: Bearer <token>`
-- **Refresh Token** (long-lived, 7 days by default): Used only to get a new access token pair from `POST /auth/refresh`
+This system is an internal email marketing backend where users log in, upload leads, create profiles, run or schedule campaigns, and monitor results through dashboards, notifications, and logs.
 
-When a user logs out, the refresh token is stored in a `revoked_tokens` MongoDB collection so it cannot be reused.
+In simple terms, the app works like this:
+- Users authenticate and gain access based on their role
+- Employees manage their own email accounts, profiles, and campaigns
+- Leads are uploaded into a master database and filtered into profile-specific lists
+- Campaigns send emails using SMTP accounts and track progress in real time
+- Admins and super-admins can view higher-level analytics and control scope across the system
 
-### Token Payload (JWT Claims)
-```json
-{
-  "sub": "<userId>",
-  "role": "admin | employee",
-  "employee_id": "<employeeId>",
-  "type": "access | refresh",
-  "iat": 1234567890,
-  "exp": 1234567890
-}
+---
+
+## 4. High-Level Architecture
+
+The system follows a layered architecture:
+
+```text
+Client / Frontend
+    │
+    ▼
+FastAPI Routers
+    │
+    ▼
+Service Layer
+    │
+    ├── Authentication & Authorization
+    ├── Business Rules
+    ├── Campaign Execution Logic
+    └── Notification / Dashboard Logic
+    │
+    ▼
+MongoDB Database
+    │
+    ├── users
+    ├── employees
+    ├── email_master
+    ├── profiles
+    ├── profile_emails
+    ├── campaigns
+    ├── email_accounts
+    └── notifications / logs / templates
 ```
 
-### Roles and Access
-| Role | Access |
+### Main Architectural Flow
+1. The frontend sends HTTP requests to the FastAPI routers
+2. Each router calls a service function
+3. The service performs validation and MongoDB operations
+4. Long-running operations such as campaign sending are handled by the worker/scheduler layer
+5. Notifications and dashboard data are pushed or queried as needed
+
+---
+
+## 5. Entity Relationship Diagram (ER Diagram)
+
+```text
+Users
+  ├── one-to-one with Employees
+  └── one-to-many with Roles / Access
+
+Employees
+  ├── one-to-many with EmailAccounts
+  ├── one-to-many with Profiles
+  ├── one-to-many with Campaigns
+  └── one-to-many with Notifications
+
+EmailMaster
+  ├── one-to-many with ProfileEmails
+  └── many-to-many through profile filtering logic
+
+Profiles
+  ├── one-to-many with ProfileEmails
+  ├── one-to-many with Templates
+  └── one-to-many with Campaigns
+
+ProfileEmails
+  ├── many-to-one with Profiles
+  └── many-to-one with EmailMaster
+
+Campaigns
+  ├── many-to-one with Profiles
+  └── one-to-many with Notifications / Logs
+
+Templates
+  └── many-to-one with Profiles
+```
+
+### ER Relationship Summary
+- A user can become an employee
+- An employee owns email accounts, profiles, campaigns, and notifications
+- A profile pulls leads from the email master database and generates profile email rows
+- A campaign sends from those generated profile email rows
+- Templates are attached to profiles and used during sending
+
+---
+
+## 6. Application Entry Point
+
+Main entry point: [main.py](main.py)
+
+Main responsibilities:
+- Create the FastAPI application
+- Register middleware such as logging, audit logging, CORS, and error handling
+- Include all router modules
+- Start the MongoDB connection lifecycle
+- Register startup and shutdown behavior
+- Expose health/ready endpoints if applicable
+
+Important runtime sections:
+- app startup initializes database access
+- routers are mounted so all endpoints become available
+- background scheduler/campaign execution is wired from the app lifecycle
+
+---
+
+## 4. Request Flow in the System
+
+A typical campaign request flows like this:
+1. Client sends an authenticated request to a router endpoint
+2. Router receives the request and calls a service function
+3. Service uses MongoDB collection access through the database layer
+4. Business rules are enforced (permissions, validation, role checks)
+5. Data is serialized into the response shape
+6. If the action triggers campaign sending, the worker or scheduler handles the long-running process
+
+This structure keeps route handlers thin and business logic centralized in service modules.
+
+---
+
+## 5. Core Infrastructure Modules
+
+### 5.1 app/core/config.py
+Purpose:
+- Centralizes configuration values
+- Loads environment values for secrets, app URL, database settings, and token settings
+
+Main methods / behavior:
+- Defines configuration fields for environment-based setup
+- Exposes helpers for CORS origins and app-level settings
+
+Why it matters:
+- This is the first place the app reads runtime values from the environment
+- It controls many security and deployment settings
+
+### 5.2 app/core/dependencies.py
+Purpose:
+- Provides authentication and authorization dependencies
+
+Main methods / behavior:
+- get_current_user(): validates a JWT access token and loads the current user context
+- require_roles(*allowed_roles): wraps access control for role-based endpoints
+
+Why it matters:
+- Almost every protected endpoint depends on this layer
+- It ensures only authenticated users can access private data
+
+### 5.3 app/core/security.py
+Purpose:
+- Handles password hashing, token generation, token validation, and encryption/decryption
+
+Main methods / behavior:
+- hash_password(): hashes a plain password
+- verify_password(): compares a supplied password with a stored hash
+- encrypt_password(): encrypts sensitive SMTP credentials
+- decrypt_password(): decrypts stored SMTP credentials
+- _create_token(): creates JWT access or refresh tokens
+
+Why it matters:
+- This is the security backbone of the application
+
+### 5.4 app/core/exceptions.py
+Purpose:
+- Defines custom exception classes for clean API error handling
+
+Main methods / behavior:
+- BadRequestException
+- NotFoundException
+- UnauthorizedException
+- ForbiddenException
+- ConflictException
+
+Why it matters:
+- Route handlers and services use these to return predictable API errors
+
+### 5.5 app/core/rate_limit.py
+Purpose:
+- Limits repeated request behavior to avoid abuse or overload
+
+Main methods / behavior:
+- Configures and applies request rate limits to selected endpoints
+
+Why it matters:
+- Helps protect authentication and public endpoints from excessive traffic
+
+---
+
+## 6. Authentication and User Management
+
+### 6.1 app/auth/
+Purpose:
+- Handles authentication and token management
+
+Router entry points:
+- POST /auth/login
+- POST /auth/refresh
+- POST /auth/logout
+
+Service methods:
+- login(payload): validates user login, verifies password, creates access and refresh tokens
+- refresh_access_token(refresh_token): validates refresh token, rotates or refreshes the token pair
+- logout(refresh_token): marks the token as invalid in the revoked_tokens collection
+
+Key behavior:
+- Access tokens are short-lived
+- Refresh tokens are used to obtain fresh access tokens
+- Revoked tokens are persisted so a logged-out session cannot be reused
+
+### 6.2 app/users/
+Purpose:
+- Manages users and user-role creation
+
+Router entry points:
+- POST /users/initial-super-admin
+- POST /users/initial-admin
+- POST /users
+- GET /users
+- GET /users/{id}
+- PUT /users/{id}
+- DELETE /users/{id}
+
+Service methods:
+- create_user(payload): creates a normal user account
+- create_initial_super_admin(payload): creates the first super-admin user
+- create_initial_admin(payload): creates the first admin user
+- get_user_by_email(email): fetches a user by email
+- get_user_by_id(user_id): fetches a user by ID
+- list_users(current_user): lists users according to role and permissions
+- update_user(user_id, payload): updates metadata or access-related fields
+
+Key behavior:
+- The app supports super-admin, admin, and employee-level access
+- Initial admin/super-admin creation is handled separately to bootstrap the system
+
+---
+
+## 7. Employee Module
+
+### app/employees/
+Purpose:
+- Represents an employee profile linked to a user account
+
+Router entry points:
+- POST /employees
+- GET /employees
+- GET /employees/me
+- GET /employees/{id}
+- PUT /employees/{id}
+- DELETE /employees/{id}
+
+Service methods:
+- create_employee(payload): creates both a user account and an employee profile when needed
+- list_employees(current_user): returns employee records visible to the current user
+- get_employee(employee_id, current_user): fetches one employee record
+- get_employee_by_user_id(user_id): fetches the employee linked to a user account
+- _attach_user_info(employee_doc, include_password): enriches employee data with user-linked details
+
+Key behavior:
+- Employees are separate from users in the data model
+- Admins can manage employee records on behalf of an organization
+- Each employee usually owns their own campaigns, profiles, and email accounts
+
+---
+
+## 8. Email Accounts Module
+
+### app/email_accounts/
+Purpose:
+- Stores SMTP credentials and account settings for sending emails
+
+Router entry points:
+- POST /email-accounts
+- GET /email-accounts
+- GET /email-accounts/{id}
+- PUT /email-accounts/{id}
+- DELETE /email-accounts/{id}
+- POST /email-accounts/{id}/test
+- POST /email-accounts/test-direct
+
+Service methods:
+- create_account(employee_id, payload): creates a new email account and encrypts the password
+- list_accounts(employee_id, is_admin): lists accounts according to ownership or admin scope
+- get_account(account_id, employee_id, is_admin): fetches one account with access checks
+- update_account(account_id, employee_id, is_admin, payload): updates account fields and re-encrypts password if changed
+- delete_account(account_id, employee_id, is_admin): removes an account
+- test_connection(account_id, employee_id, is_admin): verifies SMTP credentials by attempting a live login
+- test_credentials_directly(payload): verifies SMTP access before the account is saved
+- get_credentials_for_send(gmail_account): decrypts and returns credentials when the campaign engine needs to send mail
+- record_send(account_id): increments the send counter after a successful send
+
+Key behavior:
+- Passwords are never stored in plaintext
+- Each account is bound to an employee owner
+- The campaign engine fetches credentials dynamically before sending
+
+---
+
+## 9. Email Master Module
+
+### app/email_master/
+Purpose:
+- Stores the permanent global lead database
+- This is the master list from which profiles pull email data
+
+Router entry points:
+- POST /email-master/upload
+- GET /email-master
+- GET /email-master/{id}
+- DELETE /email-master/{id}
+- GET /email-master/dropdown-options
+- GET /email-master/uploader-stats
+- GET /email-master/count-filtered
+
+Service methods:
+- upload_file(employee_id, file, payload): parses CSV/Excel data, validates emails, removes duplicates, and stores leads in MongoDB
+- list_emails(filters, pagination, employee_id): returns leads with filtering and pagination support
+- get_email(email_id): returns one lead document
+- delete_email(email_id): removes one lead from the master list
+- get_dropdown_options(): returns country/domain/industry values used in the UI
+- get_uploader_stats(): returns upload activity and summary statistics
+- count_filtered_emails(filters): counts how many leads match the provided filters
+
+Key behavior:
+- Uploads are treated as grouped batch operations
+- Duplicate detection is applied during import
+- Leads are tagged with metadata such as country, company, domain, and upload batch
+
+---
+
+## 10. Profiles and Template Configuration
+
+### 10.1 app/profiles/
+Purpose:
+- Defines reusable email campaigns by profile
+- A profile contains the filters, sending rules, Gmail account, attachments, and templates used for outreach
+
+Router entry points:
+- POST /profiles
+- GET /profiles
+- GET /profiles/{id}
+- PUT /profiles/{id}
+- POST /profiles/{id}/activate
+- POST /profiles/{id}/deactivate
+- DELETE /profiles/{id}
+- POST /profiles/{id}/templates
+- PUT /profiles/{id}/templates/{template_id}
+- DELETE /profiles/{id}/templates/{template_id}
+
+Service methods:
+- create_profile(employee_id, payload): creates a new profile with default filters and sending options
+- list_profiles(employee_id): returns all profiles visible to the employee or admin
+- get_profile(profile_id, employee_id, is_admin): fetches one profile with access validation
+- update_profile(profile_id, employee_id, payload): updates profile settings
+- set_active_status(profile_id, employee_id, is_admin, active): activates or deactivates the profile
+- delete_profile(profile_id, employee_id, is_admin): removes the profile
+- add_template(profile_id, employee_id, payload): adds a new template to the profile
+- update_template(profile_id, employee_id, template_id, payload): updates template content or weighting
+- delete_template(profile_id, employee_id, template_id): removes a template
+
+Key behavior:
+- Profiles are per employee and can be activated before campaign use
+- Each profile contains its own rules and templates
+
+### 10.2 app/templates/
+Purpose:
+- Provides reusable templates that can be associated with profiles
+
+Router entry points:
+- POST /templates
+- GET /templates
+- GET /templates/{id}
+- PUT /templates/{id}
+- DELETE /templates/{id}
+
+Service methods:
+- create_template(employee_id, is_admin, payload): creates a new template
+- list_templates(employee_id, is_admin): lists templates visible to the current user
+- get_template(template_id, employee_id, is_admin): fetches one template
+- update_template(template_id, employee_id, is_admin, payload): updates template fields
+- delete_template(template_id, employee_id, is_admin): removes a template
+
+---
+
+## 11. Profile Emails Module
+
+### app/profile_emails/
+Purpose:
+- Holds the generated working list of emails for a specific profile
+- These records are what the campaign engine sends from
+
+Router entry points:
+- POST /profile-emails/{profile_id}/generate
+- GET /profile-emails/{profile_id}
+- GET /profile-emails/{profile_id}/stats
+- GET /profile-emails/{profile_id}/{email_id}
+- PUT /profile-emails/{profile_id}/{email_id}
+- DELETE /profile-emails/{profile_id}/{email_id}
+- POST /profile-emails/{profile_id}/retry-failed
+- POST /profile-emails/{profile_id}/clear
+- POST /profile-emails/bulk-delete
+
+Service methods:
+- generate_list(profile_id, employee_id, is_admin, override_filters, limit_override, allow_used): pulls matching leads from email_master and creates pending records for this profile
+- list_profile_emails(profile_id, employee_id, is_admin, params, send_status, search, country, domain): lists profile email rows with pagination and filtering
+- get_stats(profile_id, employee_id, is_admin): returns pending/sending/sent/failed/skipped counts
+- get_profile_email(profile_email_id, employee_id, is_admin): fetches one generated record
+- update_profile_email(profile_email_id, employee_id, is_admin, payload): updates one generated row
+- delete_profile_email(profile_email_id, employee_id, is_admin): removes one generated row
+- retry_failed(profile_id, employee_id, is_admin): resets failed rows back to pending
+- clear_profile_list(profile_id, employee_id, is_admin): deletes all rows for a profile
+- bulk_delete(profile_email_ids, employee_id, is_admin): removes multiple rows in bulk
+
+Key behavior:
+- This module is the bridge between static lead data and active mail sending
+- It tracks the lifecycle of each email: pending, sending, sent, failed, skipped
+
+---
+
+## 12. Campaign Management Module
+
+### app/campaigns/
+Purpose:
+- Creates, schedules, controls, and tracks marketing campaigns
+
+Router entry points:
+- POST /campaigns/start
+- POST /campaigns/pause
+- POST /campaigns/resume
+- GET /campaigns
+- GET /campaigns/{id}
+- DELETE /campaigns/{id}
+- POST /campaigns/schedule
+- POST /campaigns/process-scheduled
+
+Service methods:
+- create_campaign(profile_id, employee_id, payload): starts a new immediate campaign
+- create_scheduled_campaign(profile_id, employee_id, payload): creates a scheduled campaign document
+- _get_campaign_owned(campaign_id, employee_id): fetches a campaign with ownership validation
+- set_status(campaign_id, status): updates campaign state
+- increment_counters(campaign_id, sent_count, failed_count): updates counts after send progress
+- finalize_campaign(campaign_id): marks the campaign completed or failed based on its final state
+- abort_campaign(campaign_id, reason): aborts the running campaign early
+- is_paused(campaign_id): checks whether the campaign has been paused
+
+Key behavior:
+- Campaigns can be started immediately or scheduled in advance
+- Scheduling supports once, daily, and weekly recurrence
+- Campaign status transitions control the send workflow
+
+### app/campaigns/scheduler.py
+Purpose:
+- Finds due scheduled campaigns and dispatches them for execution
+
+Main methods:
+- calculate_next_run(...): computes the next UTC time for a recurring campaign based on local time and timezone offset
+- find_due_campaigns(): finds campaigns that are due now
+- transition_to_processing(campaign_id): atomically changes status from scheduled to processing to avoid duplicate execution
+- execute_campaign(campaign_id): runs the campaign execution path
+- finalize_campaign_execution(...): updates campaign status after execution completes
+- process_scheduled_campaigns(): loops through due campaigns and dispatches them
+- get_scheduler_status(): returns scheduler health and queue counts
+
+Key behavior:
+- Scheduler logic is designed to prevent duplicate runs
+- It is the coordination layer between scheduled campaigns and the actual send worker
+
+---
+
+## 13. Campaign Engine
+
+### app/campaign_engine/worker.py
+Purpose:
+- Performs the actual email sending loop for each campaign
+
+Main methods:
+- select_template_weighted(templates): selects a template based on weights
+- run_campaign(campaign_id): starts the main campaign execution process
+- _run(campaign_id): processes the sending loop for that campaign
+
+Key behavior:
+- The worker loads the campaign, profile, and available profile email records
+- It sends emails one by one with delays and per-account rate control
+- It updates the database with send progress and status changes
+- It emits progress events for notifications and frontends
+
+### app/campaign_engine/sender.py
+Purpose:
+- Builds MIME email messages and sends them with SMTP
+
+Main methods:
+- _build_mime_message(...): constructs the email body and headers
+- _attach_file(...): attaches files to the email message
+- _send_sync(...): sends the message via SMTP
+
+Key behavior:
+- Supports plain text, HTML, attachments, and SMTP login
+- Errors are surfaced so failed sends are properly tracked
+
+---
+
+## 14. Notifications and WebSocket Layer
+
+### app/notifications/
+Purpose:
+- Delivers in-app notifications and live campaign progress updates
+
+Router entry points:
+- GET /notifications
+- POST /notifications/mark-read
+- POST /notifications/mark-all-read
+- WS /notifications/ws
+
+Service methods:
+- create_notification(employee_id, message, type): saves a notification and notifies connected clients
+- list_notifications(employee_id, unread_only, limit): returns notification history
+
+WebSocket components:
+- ConnectionManager manages active user connections
+- The campaign engine pushes events to connected clients during sends
+
+Key behavior:
+- Admins and employees can receive real-time campaign updates without refreshing the UI
+
+---
+
+## 15. Dashboard and Analytics
+
+### app/dashboard/
+Purpose:
+- Builds summaries for the employee dashboard and admin/super-admin views
+
+Router entry points:
+- GET /dashboard/employee
+- GET /dashboard/admin
+- GET /dashboard/super-admin
+- GET /dashboard/upload-history
+- GET /dashboard/dropdown-options
+
+Service methods:
+- get_employee_dashboard(employee_id, query): returns an employee’s own dashboard summary
+- get_admin_scoped_dashboard(admin_user_id, query): returns a role-scoped dashboard for admins and super-admins
+- _resolve_dashboard_scope(role, user_id): determines which scope of records the current user should see
+- _build_admin_scope(...): filters data according to admin visibility rules
+
+Key behavior:
+- The dashboard aggregates campaign, profile, lead, and activity metrics
+- Scope resolution ensures admins only see their own allowed data unless they are a super-admin
+
+---
+
+## 16. Logs and Reporting
+
+### app/logs/
+Purpose:
+- Stores and lists activity logs for audits and inspection
+
+Service methods:
+- list_logs(...): returns system activity records for the current scope
+
+### app/reports/
+Purpose:
+- Exports data to CSV for lead lists and profile email lists
+
+Router entry points:
+- GET /reports/email-master-csv
+- GET /reports/profile-emails-csv
+
+Key behavior:
+- Useful for offline analytics and external review
+
+### app/options/
+Purpose:
+- Returns dropdown values and option data for UI forms
+
+Router entry points:
+- GET /options/employees
+- GET /options/profiles
+- GET /options/campaigns
+
+Key behavior:
+- Helps the frontend load lists without additional complex queries
+
+---
+
+## 17. Database Layer
+
+### app/database/mongodb.py
+Purpose:
+- Connects the application to MongoDB
+
+Main methods:
+- connect_to_mongo(): opens the MongoDB connection
+- close_mongo_connection(): tears down the connection on shutdown
+- get_collection(name): returns a MongoDB collection handle
+
+### app/database/indexes.py
+Purpose:
+- Creates or ensures important MongoDB indexes
+
+Key behavior:
+- Improves lookup performance for campaigns, profiles, email master data, notifications, and logs
+
+---
+
+## 18. Middleware and Cross-Cutting Concerns
+
+### app/middleware/logging_middleware.py
+Purpose:
+- Logs incoming requests and request timing
+
+### app/middleware/audit_middleware.py
+Purpose:
+- Captures audit information for admin-level visibility and change tracking
+
+### app/middleware/error_handler.py
+Purpose:
+- Registers centralized exception handling for FastAPI
+
+Key behavior:
+- The app produces consistent error responses and logs failures centrally
+
+---
+
+## 19. Utility Helpers
+
+### app/utils/csv_utils.py
+Purpose:
+- Parses uploaded CSV and Excel files
+
+### app/utils/email_validator.py
+Purpose:
+- Validates uploaded lead email addresses
+
+### app/utils/personalizer.py
+Purpose:
+- Replaces placeholders in email templates with lead-specific values
+
+### app/utils/pagination.py
+Purpose:
+- Creates shared pagination parameters and response structure
+
+### app/utils/response.py
+Purpose:
+- Serializes MongoDB documents and normalizes API response shape
+
+---
+
+## 20. Main Data Collections
+
+| Collection | Purpose |
 |---|---|
-| `admin` | Can see and manage all employees, all profiles, all campaigns, all data. Must always pass `?employeeId=` to act on behalf of an employee. |
-| `employee` | Scoped to their own data only. Cannot access other employees' data. |
-
-### The `employeeId` Query Parameter
-A unique admin feature — almost every endpoint accepts `?employeeId=<id>`. This allows an admin to view or modify data on behalf of a specific employee without needing to log in as that employee.
-
-### SMTP Password Security
-Employee Gmail app passwords are **never stored in plaintext**. When an email account is added:
-1. The password is encrypted using `Fernet` (AES-256-CBC) with a key derived from `PASSWORD_ENCRYPTION_KEY` in `.env`
-2. The encrypted blob is stored in MongoDB
-3. Only at send time is the password decrypted, used, and immediately discarded from memory
-
----
-
-## 5. Module Deep-Dive
-
-### 5.1 Auth Module (`app/auth/`)
-**Flow**:
-1. `POST /auth/login`: Takes `{email, password}`. Verifies password using `passlib.verify_password()`. If valid, creates an access token and refresh token using `python-jose`. Returns both.
-2. `POST /auth/refresh`: Verifies the refresh token is not in `revoked_tokens` and not expired. Issues a new token pair.
-3. `POST /auth/logout`: Adds the refresh token to `revoked_tokens` collection, making it permanently invalid.
+| users | Stores login accounts and identity |
+| employees | Stores employee profile records |
+| email_master | Stores global lead data |
+| profiles | Stores profile definitions and filters |
+| profile_emails | Stores generated leads for each profile |
+| campaigns | Stores campaign lifecycle state |
+| email_accounts | Stores encrypted SMTP credentials |
+| templates | Stores reusable templates |
+| notifications | Stores in-app notification records |
+| logs | Stores audit and action logs |
+| revoked_tokens | Stores invalidated refresh tokens |
 
 ---
 
-### 5.2 Employees Module (`app/employees/`)
-- Only admins can create, update, or delete employees (enforced via `require_admin` dependency).
-- When an employee is created, **two records are created**: a `users` record (for login/auth) and an `employees` record (for linking to profiles, campaigns, etc.). These are linked by `userId`.
-- There is a best-effort rollback: if the `employees` insert fails after the `users` insert succeeds, the `users` record is deleted to avoid orphaned accounts.
-- `GET /employees/me`: Any logged-in employee can get their own employee record.
+## 21. Typical End-to-End User Flow
+
+### A. User login
+1. User calls /auth/login
+2. Service verifies credentials
+3. JWT tokens are issued
+
+### B. Add email account
+1. User calls /email-accounts
+2. Password is encrypted and saved
+3. Later, campaign sending retrieves it securely
+
+### C. Upload leads
+1. User uploads a file through /email-master/upload
+2. Leads are parsed and validated
+3. Data is inserted into email_master
+
+### D. Create profile
+1. User creates a profile with filters, templates, sending limits, and Gmail account
+2. Profile is stored in the profiles collection
+
+### E. Generate profile email list
+1. User calls /profile-emails/{profile_id}/generate
+2. Leads are selected from email_master based on profile filters
+3. Generated rows are stored in profile_emails
+
+### F. Start a campaign
+1. User starts or schedules a campaign
+2. The worker sends each email using the profile rules and SMTP account
+3. Progress updates are stored and pushed to the UI
 
 ---
 
-### 5.3 Email Accounts Module (`app/email_accounts/`)
-- SMTP password is immediately encrypted with Fernet (AES-256) before being written to MongoDB.
-- `POST /email-accounts/{id}/test`: Opens a real SMTP connection, attempts login, then closes without sending. Lets employees verify their app password.
-- A rate counter (`dailySentCount`, `lastResetDate`) tracks how many emails this account has sent today. The campaign worker calls `record_send()` to increment this on every successful send.
+## 22. Notes for Production Readiness
+
+The current system is functional, but for production use it should be hardened with:
+- stronger environment secret management
+- better background worker separation from the web process
+- monitoring and alerting for send failures
+- more robust scheduler reliability
+- stricter role enforcement in every service layer
+- stronger validation and recovery logic for long-running campaigns
 
 ---
 
-### 5.4 Email Master Module (`app/email_master/`)
-**Purpose**: The **permanent global lead database**. Shared across all employees.
+## 23. Summary
 
-**Upload flow**:
-1. Accept `.csv`, `.xlsx`, or `.xls` file via multipart form
-2. Use `pandas` to parse into rows
-3. Validate emails with `email-validator`
-4. Generate a unique `upload_batch` UUID to group this upload
-5. Query MongoDB for all emails in batch that already exist
-6. Build a Python `set` of existing emails for O(1) lookup speed
-7. Skip or flag duplicates based on `insertDuplicates` parameter
-8. Tag each row with optional `mailSource` (Google Scholar / University / Other)
-9. Bulk insert with `insert_many()` in a single MongoDB operation
+This project is a full internal email marketing platform with:
+- user and employee management
+- encrypted SMTP account handling
+- lead upload and deduplication
+- reusable profile-based campaign setup
+- generated email lists for sending
+- campaign execution and scheduling
+- dashboards, logs, notifications, and exports
 
-**Deduplication**: Globally scoped — the same email can only exist once in the entire collection.
-
-**Columns stored per lead**: `email`, `fullName`, `company`, `website`, `country`, `state`, `city`, `domain`, `industry`, `designation`, `phone`, `linkedin`, `uploadBatch`, `isDuplicate`, `employeeId`, `uploadedBy`, `uploadedByName`, `mailSource`, `inProfileEmails`, `usedByEmployeeId`, `createdAt`
-
----
-
-### 5.5 Profiles Module (`app/profiles/`)
-**Purpose**: A "Profile" is a reusable sending configuration. It defines who to send to (filters), what to say (templates), from which Gmail account, and how fast to send.
-
-- Maximum **5 profiles per employee** (enforced in service)
-- Profile names must be unique per employee
-- Must be **activated** before a campaign can start
-
-**Profile fields**:
-- `gmailAccount`: Which email account to send from
-- `signature`: Appended to every email
-- `filters`: `{country, domain, industry, company, type, mailSource}` — filter leads from Email Master
-- `filterLimit`: Maximum leads to pull
-- `templates`: Array with `{subject, body, weight}` — weight enables A/B testing via `random.choices()`
-- `sendingOptions`: `{dailyLimit, delayMin, delayMax}` — rate limits and random delays in seconds
-- `attachments`: Files attached to every email in the campaign
-
----
-
-### 5.6 Profile Emails Module (`app/profile_emails/`)
-**Purpose**: The **working email list** for a specific profile. Populated by filtering Email Master. This is the campaign's fuel.
-
-**Generate List** (`POST /profile-emails/{id}/generate`):
-1. Load profile's filters
-2. Query `email_master` with `$in` operators
-3. Exclude already-sent or already-failed emails for this profile
-4. Apply `filterLimit`
-5. Bulk insert as `pending` rows
-
-**Send Status Lifecycle**: `pending` → `sending` → `sent` / `failed` / `skipped`
-
----
-
-### 5.7 Campaigns Module (`app/campaigns/`)
-
-**Campaign Statuses**: `pending`, `scheduled`, `processing`, `running`, `paused`, `completed`, `failed`, `aborted`
-
-**Immediate Campaign** (`POST /campaigns/start`):
-1. Validate profile is active and has pending emails
-2. Create campaign document with `status: running`
-3. Tag all pending profile_emails with this campaign's ID
-4. Add `run_campaign()` to FastAPI `BackgroundTasks` — runs immediately in background
-
-**Scheduled Campaign** (`POST /campaigns/schedule`):
-- Accepts `recurrenceType` (once/daily/weekly), `scheduledTimeLocal` (HH:MM), `timezoneOffsetMinutes`, `recurrenceDays`, `scheduledDateLocal`
-- `calculate_next_run()` computes exact UTC time from local time + offset
-- Saves with `status: scheduled` and `scheduledFor: <utc_datetime>`
-- `timezoneOffsetMinutes` is saved to the document so recurring campaigns always reschedule in the correct local timezone
-
-**The Scheduler** (`scheduler.py`):
-- Called by Linux cron every minute via `POST /campaigns/process-scheduled`
-- Finds campaigns where `status == "scheduled"` AND `scheduledFor <= now(UTC)`
-- Uses **atomic `find_one_and_update`** to transition `scheduled → processing` (prevents duplicate execution)
-- Dispatches each campaign with `asyncio.create_task()` — **all 20 campaigns run in parallel**, not sequentially
-- After completion: `once` → `completed`; `daily`/`weekly` → recalculates next run and resets to `scheduled`
-
----
-
-### 5.8 Campaign Engine (`app/campaign_engine/`)
-
-**Worker loop** (`run_campaign` in `worker.py`):
-1. Load campaign + profile from MongoDB
-2. Decrypt SMTP credentials via Fernet
-3. Enter `while True` loop:
-   - Check if paused → exit
-   - Fetch next batch of 50 `pending` profile_emails
-   - For each lead:
-     - Mark as `sending`
-     - Replace placeholders (`[name]`, `[company]`, etc.) with lead data
-     - Select template using A/B weighted `random.choices()`
-     - Build MIME email (plain text + HTML + attachments)
-     - Call `send_email()` → wraps `smtplib` in `asyncio.run_in_executor()` (thread pool) so the event loop is never blocked
-     - On success: mark `sent`, increment counter, push WebSocket progress event
-     - On failure: mark `failed`. If auth fails 3× → abort entire campaign
-     - `await asyncio.sleep(random.randint(delay_min, delay_max))` between sends
-4. Finalize campaign when done
-
-**SMTP Sender** (`sender.py`):
-- Builds `MIMEMultipart` with `text/plain` + `text/html` parts
-- Attachment missing from disk → raises `FileNotFoundError` (email fails, not sent silently)
-- Supports STARTTLS (port 587) and SSL (port 465)
-
----
-
-### 5.9 Notifications Module (`app/notifications/`)
-
-**WebSocket flow**:
-1. Frontend connects: `WS /notifications/ws?token=<access_token>`
-2. Server validates JWT, identifies user/role
-3. Connection registered in in-memory `ConnectionManager`
-4. Campaign worker pushes live events: `{type: "campaign_progress", campaignId, event: "sent", totalSent, totalFailed}`
-5. Admins automatically receive all employee campaign events
-
-**REST notifications**: List, mark-as-read, mark-all-as-read.
-
-**Types**: `info`, `success`, `warning`, `error`
-
----
-
-### 5.10 Personalizer (`app/utils/personalizer.py`)
-
-Pure-Python placeholder replacement. No AI. Supported placeholders (use `[placeholder]` in templates):
-
-`[name]`, `[full_name]`, `[company]`, `[industry]`, `[designation]`, `[country]`, `[domain]`, `[city]`, `[state]`, `[website]`, `[linkedin]`, `[phone]`, `[email]`
-
-`[name]` → first word of `fullName`, capitalized. Defaults to `"there"` if empty.
-
----
-
-## 6. MongoDB Collections Summary
-
-| Collection | Description | Key Indexes |
-|---|---|---|
-| `users` | Login accounts | `email` (unique) |
-| `employees` | Employee profiles | `userId` (unique) |
-| `email_master` | Global lead database | `(employeeId, email)` unique, `mailSource`, `country`, `domain` |
-| `profiles` | Sending profiles | `(employeeId, profileName)` unique |
-| `profile_emails` | Working list per profile | `(profileId, sendStatus, createdAt)` compound |
-| `campaigns` | Campaign documents | `(status, scheduledFor)` for scheduler |
-| `email_accounts` | SMTP credentials (encrypted) | `(employeeId, email)` unique |
-| `templates` | Reusable templates | `employeeId`, `isGlobal` |
-| `logs` | Activity logs | `employeeId`, `createdAt`, `action` |
-| `notifications` | In-app notifications | `(employeeId, isRead, createdAt)` compound |
-| `revoked_tokens` | Invalidated refresh tokens | `token` (unique) |
-
----
-
-## 7. Cron Job Setup
-
-To trigger the scheduler every minute on Linux:
-```bash
-* * * * * curl -X POST http://localhost:8000/campaigns/process-scheduled
-```
-
-> [!WARNING]
-> The `/campaigns/process-scheduled` endpoint currently has no auth guard. In production, firewall it so only the server itself can call it.
+The main architectural design is modular and service-oriented, with FastAPI routers delegating business logic to service modules that perform MongoDB operations and enforce business rules.
