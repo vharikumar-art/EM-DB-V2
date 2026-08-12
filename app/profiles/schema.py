@@ -104,3 +104,9 @@ class TemplateUpdate(BaseModel):
 class TemplateDelete(BaseModel):
     """Delete a template"""
     templateId: str = Field(description="ID of template to delete")
+
+
+class ProfileTestEmailRequest(BaseModel):
+    """Send a one-off test email using a profile's configured sender and template."""
+    toEmail: EmailStr = Field(description="Recipient email used only for the test send")
+    templateId: str | None = Field(default=None, description="Optional template id to use; otherwise the first template is used")

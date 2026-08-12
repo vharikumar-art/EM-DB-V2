@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, Query, UploadFile, File
 from app.core.dependencies import CurrentUser, get_current_user, resolve_employee_context
 from app.core.exceptions import BadRequestException
 from app.profiles import service
-from app.profiles.schema import ProfileCreate, ProfileUpdate
+from app.profiles.schema import ProfileCreate, ProfileTestEmailRequest, ProfileUpdate
 from app.schemas.common import ApiResponse
 
 router = APIRouter(prefix="/profiles", tags=["Profiles"])
@@ -58,6 +58,19 @@ async def update_profile(
     employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
     profile = await service.update_profile(profile_id, employee_id, is_admin, payload)
     return ApiResponse(message="Profile updated", data=profile)
+
+
+@router.post("/{profile_id}/test-email", response_model=ApiResponse)
+async def test_profile_email(
+    profile_id: str,
+    payload: ProfileTestEmailRequest,
+    employeeId: str | None = Query(default=None),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Send a real test email using the profile's configured sender, chosen template, and attachments."""
+    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    result = await service.send_test_email(profile_id, employee_id, is_admin, payload)
+    return ApiResponse(message=result["message"], data=result, success=result["success"])
 
 
 @router.post("/{profile_id}/activate", response_model=ApiResponse)

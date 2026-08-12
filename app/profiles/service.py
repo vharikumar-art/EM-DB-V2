@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
 import logging
+import random
 
 from fastapi import UploadFile
+from app.campaign_engine.sender import SMTPCredentials, send_email
 from app.core.exceptions import (
     BadRequestException,
     ConflictException,
@@ -9,10 +11,11 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.database.mongodb import get_collection
+from app.email_accounts.service import get_credentials_for_send
 from app.notifications.schema import NotificationType
 from app.notifications.service import create_notification
 from app.profiles.model import MAX_PROFILES_PER_EMPLOYEE, build_profile_document
-from app.profiles.schema import ProfileCreate, ProfileUpdate
+from app.profiles.schema import ProfileCreate, ProfileTestEmailRequest, ProfileUpdate
 
 MAX_PROFILE_EMAIL_GENERATION_LIMIT = 600
 from app.utils.response import serialize_doc, serialize_list, to_object_id
@@ -188,6 +191,108 @@ async def update_profile(
             )
 
     return serialize_doc(result)
+
+
+async def send_test_email(
+    profile_id: str,
+    employee_id: str,
+    is_admin: bool,
+    payload: ProfileTestEmailRequest,
+) -> dict:
+    """Send a real test email for a profile using that profile's configured sender and template."""
+    profiles = get_collection(COLLECTION)
+    existing = await profiles.find_one({"_id": to_object_id(profile_id)})
+    if not existing:
+        raise NotFoundException("Profile not found")
+    await _assert_owns_profile_or_admin(serialize_doc(existing), employee_id, is_admin)
+
+    templates = existing.get("templates") or []
+    if not templates:
+        raise BadRequestException("This profile has no templates configured")
+
+    template = None
+    if payload.templateId:
+        for item in templates:
+            if str(item.get("id")) == str(payload.templateId):
+                template = item
+                break
+    if template is None:
+        template = random.choice(templates)
+
+    sender_email = str(existing.get("gmailAccount") or "").strip()
+    if not sender_email:
+        raise BadRequestException("This profile does not have a sender email configured")
+
+    credentials = await get_credentials_for_send(sender_email)
+    subject = _replace_placeholders(str(template.get("subject") or ""), {"name": "Test", "fullName": "Test"})
+    body = _replace_placeholders(str(template.get("body") or ""), {"name": "Test", "fullName": "Test"})
+    signature = str(existing.get("signature") or "")
+    html_body = f"{body.replace(chr(10), '<br>')}<br><br>{signature}"
+
+    attachments = []
+    for item in (existing.get("attachments") or []):
+        attachments.append({
+            "filename": item.get("filename", "attachment"),
+            "filepath": item.get("filepath"),
+        })
+    for item in (template.get("attachments") or []):
+        attachments.append({
+            "filename": item.get("filename", "attachment"),
+            "filepath": item.get("filepath"),
+        })
+
+    seen = set()
+    unique_attachments = []
+    for item in attachments:
+        key = (item.get("filepath"), item.get("filename"))
+        if key in seen or not item.get("filepath"):
+            continue
+        seen.add(key)
+        unique_attachments.append(item)
+
+    smtp_credentials = SMTPCredentials(
+        email=credentials["email"],
+        password=credentials["password"],
+        display_name=credentials.get("displayName", credentials["email"]),
+        smtp_host=credentials["smtpHost"],
+        smtp_port=credentials["smtpPort"],
+        use_tls=bool(credentials.get("useTls", True)),
+    )
+
+    result = await send_email(
+        credentials=smtp_credentials,
+        to=str(payload.toEmail),
+        subject=subject,
+        body_plain=body,
+        body_html=html_body,
+        attachments=unique_attachments,
+    )
+
+    return {
+        "success": bool(result.success),
+        "message": "Test email sent successfully" if result.success else (result.error or "Test email failed"),
+        "fromEmail": credentials["email"],
+        "toEmail": str(payload.toEmail),
+        "subject": subject,
+        "messageId": result.message_id,
+        "attachments": unique_attachments,
+        "error": result.error,
+    }
+
+
+def _replace_placeholders(text: str, lead: dict) -> str:
+    """Simple [placeholder] substitution for preview and test sends."""
+    replacements = {
+        "[name]": lead.get("fullName") or lead.get("name") or "there",
+        "[company]": lead.get("company", "your company"),
+        "[industry]": lead.get("industry", "your industry"),
+        "[designation]": lead.get("designation", ""),
+        "[country]": lead.get("country", ""),
+        "[domain]": lead.get("domain", ""),
+    }
+    for placeholder, value in replacements.items():
+        text = text.replace(placeholder, value.strip() if isinstance(value, str) else value)
+    return text
 
 
 async def set_active_status(
