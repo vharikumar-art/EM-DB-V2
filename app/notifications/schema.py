@@ -21,3 +21,4 @@ class NotificationOut(BaseModel):
     type: NotificationType
     isRead: bool
     createdAt: str | None = None
+    readAt: str | None = None

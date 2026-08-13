@@ -94,11 +94,17 @@ async def create_indexes() -> None:
     await db["notifications"].create_index(
         [("employeeId", 1), ("isRead", 1), ("createdAt", -1)]
     )
-    # TTL index: auto-delete read notifications 2 hours (7200s) after readAt is set.
+    # TTL index: auto-delete read notifications 1 day (86400s) after readAt is set.
     # sparse=True means unread docs (readAt=None) are NOT touched by this index.
+    # Drop old index if it exists with different TTL settings
+    try:
+        await db["notifications"].drop_index("notifications_readAt_ttl")
+    except Exception:
+        pass  # Index doesn't exist, that's fine
+    
     await db["notifications"].create_index(
         "readAt",
-        expireAfterSeconds=7200,
+        expireAfterSeconds=86400,
         sparse=True,
         name="notifications_readAt_ttl"
     )

@@ -32,8 +32,9 @@ class ConnectionManager:
             for connection in self.active_connections[channel_id]:
                 try:
                     await connection.send_json(message)
-                except Exception:
-                    pass
+                except Exception as e:
+                    import logging
+                    logging.error(f"Failed to send WebSocket message to channel {channel_id}: {str(e)}")
 
     async def broadcast_to_admins(self, message: dict, exclude_channel: str | None = None):
         """Push a message to every connected admin channel (optionally skip one)."""

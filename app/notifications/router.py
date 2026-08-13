@@ -11,11 +11,30 @@ router = APIRouter(prefix="/notifications", tags=["Notifications"])
 
 
 async def _resolve_employee_id(current_user: CurrentUser, employee_id_query: str | None) -> str:
-    if current_user.role == "admin":
-        # If an admin provides an employeeId, view that employee's notifications.
-        # Otherwise, default to the admin's own user_id.
+    """Resolve which employee's notifications the user is trying to view.
+    
+    - super_admin: can view any employee
+    - admin: can view assigned employees only
+    - employee: can only view own notifications
+    """
+    if current_user.role == "super_admin":
+        # Super admin can view any employee's notifications
         return employee_id_query or current_user.user_id
     
+    if current_user.role == "admin":
+        # If an admin provides an employeeId, verify they manage that employee
+        if employee_id_query:
+            # Check if this employee is assigned to this admin
+            from app.notifications.service import _is_employee_assigned_to_admin
+            is_assigned = await _is_employee_assigned_to_admin(employee_id_query, current_user.user_id)
+            if not is_assigned:
+                from app.core.exceptions import ForbiddenException
+                raise ForbiddenException("You do not have access to this employee's notifications")
+            return employee_id_query
+        # Otherwise, default to the admin's own notifications
+        return current_user.user_id
+    
+    # Employee: only view own notifications
     employee = await get_employee_by_user_id(current_user.user_id)
     return employee["id"]
 
@@ -41,14 +60,21 @@ async def notifications_websocket(websocket: WebSocket, token: str = Query(...))
         await websocket.close(code=1008)
         return
 
-    # For employees, scope to their own record; admins stream on their userId channel
-    if role == "admin":
+    # For employees, scope to their own record; super_admins and admins stream on their userId channel
+    if role in ("super_admin", "admin"):
         channel_id = user_id
         is_admin = True
     else:
-        employee = await get_employee_by_user_id(user_id)
-        channel_id = employee["id"]
-        is_admin = False
+        try:
+            employee = await get_employee_by_user_id(user_id)
+            channel_id = employee["id"]
+            is_admin = False
+        except Exception as e:
+            # Employee record not found or deleted - gracefully close connection
+            import logging
+            logging.warning(f"Failed to resolve employee for user {user_id}: {str(e)}")
+            await websocket.close(code=1008)
+            return
 
     await manager.connect(websocket, channel_id, is_admin=is_admin)
     try:
