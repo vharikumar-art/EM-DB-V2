@@ -1,0 +1,272 @@
+EMAIL VALIDATION CONDITIONS - EMAIL UPLOAD SYSTEM
+===================================================
+
+When uploading emails (CSV/Excel files), the system validates each email and marks it as INVALID if any of these conditions are met:
+
+═══════════════════════════════════════════════════════════════════════════════
+
+1. EMPTY EMAIL
+   ─────────────
+   Condition: Email field is empty or missing
+   Examples:
+     - Row with no email value
+     - Email column has blank/null value
+   
+   Code check:
+     if not email or not isinstance(email, str):
+         return False
+
+═══════════════════════════════════════════════════════════════════════════════
+
+2. INVALID EMAIL FORMAT
+   ────────────────────
+   Condition: Email doesn't match standard email format rules
+   Uses: email_validator library (industry standard)
+   
+   Rules checked:
+   ✓ Has exactly ONE @ symbol
+   ✓ Has non-empty local part (before @)
+   ✓ Has non-empty domain part (after @)
+   ✓ Domain has at least one dot (.)
+   ✓ Valid characters in local part (alphanumeric, dots, hyphens, underscores)
+   ✓ Valid characters in domain (alphanumeric, hyphens, dots)
+   ✓ Proper domain structure
+   
+   Examples of INVALID emails:
+     ✗ "plainaddress"              → No @ symbol
+     ✗ "user@"                     → No domain
+     ✗ "@example.com"              → No local part
+     ✗ "user@@example.com"         → Multiple @ symbols
+     ✗ "user@.com"                 → Missing domain name
+     ✗ "user@example"              → No TLD (dot required)
+     ✗ "user@domain..com"          → Double dot in domain
+     ✗ "user@exam ple.com"         → Space in domain
+     ✗ "user name@example.com"     → Space in local part
+     ✗ "user@domain.c"             → TLD too short
+     ✗ "user.@example.com"         → Trailing dot before @
+     ✗ ".user@example.com"         → Leading dot
+     ✗ "user..name@example.com"    → Consecutive dots
+   
+   Examples of VALID emails (that pass validation):
+     ✓ "john@example.com"
+     ✓ "john.doe@example.com"
+     ✓ "john_doe@example.co.uk"
+     ✓ "john-doe@example.com"
+     ✓ "123@example.com"
+     ✓ "user+tag@example.com"      → Plus addressing (valid format)
+
+═══════════════════════════════════════════════════════════════════════════════
+
+3. NOT A STRING
+   ────────────
+   Condition: Email field is not a string type
+   Examples:
+     - Email value is null/None
+     - Email value is a number
+     - Email value is boolean
+     - Email value is object/array
+
+═══════════════════════════════════════════════════════════════════════════════
+
+VALIDATION FLOW DIAGRAM
+════════════════════════
+
+CSV/Excel Upload
+       │
+       ├─→ Parse file
+       │   └─→ Read CSV/Excel
+       │   └─→ Map column headers
+       │   └─→ Validate "email" column exists
+       │
+       ├─→ Process each row
+       │   │
+       │   ├─→ Get email value
+       │   │   └─→ Strip whitespace
+       │   │
+       │   ├─→ Check: Is empty?
+       │   │   ├─ YES → INVALID (add to invalid_rows)
+       │   │   └─ NO → Continue
+       │   │
+       │   ├─→ Check: Is string type?
+       │   │   ├─ NO → INVALID (add to invalid_rows)
+       │   │   └─ YES → Continue
+       │   │
+       │   ├─→ Validate email format
+       │   │   ├─ INVALID format → INVALID (add to invalid_rows)
+       │   │   └─ VALID format → Continue
+       │   │
+       │   ├─→ Check: Is duplicate?
+       │   │   ├─ DUPLICATE → Mark as isDuplicate (unless insertDuplicates=true)
+       │   │   └─ UNIQUE → Mark as unique
+       │   │
+       │   └─→ Normalize email
+       │       └─→ Strip & lowercase
+       │       └─→ Add to database
+       │
+       └─→ Return upload results
+           ├─ totalUploaded: total processed
+           ├─ unique: new emails
+           ├─ duplicate: duplicate emails
+           ├─ failed: invalid emails
+           ├─ sample: first 15 valid emails
+           ├─ duplicateEmails: first 15 duplicate emails
+           └─ failedEmails: first 15 invalid emails
+
+═══════════════════════════════════════════════════════════════════════════════
+
+UPLOAD RESPONSE EXAMPLE
+════════════════════════
+
+{
+  "data": {
+    "totalUploaded": 1500,        ← Total rows processed (valid + invalid)
+    "unique": 1200,               ← New unique emails inserted
+    "duplicate": 250,             ← Duplicate emails skipped
+    "failed": 50,                 ← INVALID emails (failed validation)
+    "uploadBatch": "batch_abc123",
+    "sample": [...],              ← First 15 valid emails
+    "duplicateEmails": [...],     ← First 15 duplicate emails
+    "failedEmails": [             ← First 15 INVALID emails
+      {
+        "email": "plaintext",     ← Missing @ symbol
+        "fullName": "John Doe",
+        "company": "...",
+        "error_reason": "No @ symbol"
+      },
+      {
+        "email": "@example.com",  ← Missing local part
+        "fullName": "Jane Smith",
+        ...
+      },
+      ...
+    ]
+  }
+}
+
+═══════════════════════════════════════════════════════════════════════════════
+
+IMPLEMENTATION DETAILS
+════════════════════════
+
+File: app/utils/email_validator.py
+─────────────────────────────────
+def is_valid_email(email: str) -> bool:
+    if not email or not isinstance(email, str):
+        return False
+    try:
+        validate_email(email.strip(), check_deliverability=False)
+        return True
+    except EmailNotValidError:
+        return False
+
+Validation Library: email-validator (Python package)
+────────────────────────────────────────────────────
+- Uses RFC 5321 and RFC 5322 email standards
+- check_deliverability=False → doesn't check if domain actually exists
+- Focuses on EMAIL FORMAT only, not actual mailbox existence
+
+File: app/utils/csv_utils.py
+────────────────────────────
+def validate_and_clean_rows(df):
+    for _, row in df.iterrows():
+        raw_email = str(row.get("email", "")).strip()
+        
+        if not is_valid_email(raw_email):
+            invalid_rows.append(record)    ← INVALID email
+            continue
+        
+        valid_rows.append(record)          ← VALID email
+    
+    return valid_rows, invalid_rows
+
+═══════════════════════════════════════════════════════════════════════════════
+
+EMAIL NORMALIZATION (after validation passes)
+═══════════════════════════════════════════════
+
+Step 1: Strip whitespace
+   "  john@example.com  " → "john@example.com"
+
+Step 2: Convert to lowercase
+   "John@EXAMPLE.com" → "john@example.com"
+
+This ensures duplicate detection works correctly:
+   - john@example.com
+   - JOHN@EXAMPLE.COM
+   - John@Example.com
+   All treated as SAME email (duplicate detection)
+
+═══════════════════════════════════════════════════════════════════════════════
+
+HOW TO FIX INVALID EMAILS
+═════════════════════════
+
+If your upload report shows failed emails, here are common fixes:
+
+1. Missing @ symbol
+   ✗ "johndoeexample.com"
+   ✓ "john@example.com"
+
+2. Missing domain
+   ✗ "john@"
+   ✓ "john@example.com"
+
+3. Missing local part
+   ✗ "@example.com"
+   ✓ "john@example.com"
+
+4. No domain extension (TLD)
+   ✗ "john@example"
+   ✓ "john@example.com"
+
+5. Spaces in email
+   ✗ "john @example.com"
+   ✓ "john@example.com"
+
+6. Special characters
+   ✗ "john<>@example.com"
+   ✓ "john@example.com"
+
+7. Double dots
+   ✗ "john..doe@example.com"
+   ✓ "john.doe@example.com" or "johndoe@example.com"
+
+8. Leading/trailing dots
+   ✗ ".john@example.com"
+   ✗ "john.@example.com"
+   ✓ "john@example.com"
+
+═══════════════════════════════════════════════════════════════════════════════
+
+UPLOAD ENDPOINTS
+═════════════════
+
+1. Employee Upload (scoped to employee)
+   POST /emails/upload
+   - Uploads to employee's personal email pool
+   - Deduplication per employee (same email can exist for different employees)
+
+2. Global Admin Upload (global pool)
+   POST /email-master/upload
+   - Uploads to global email pool (all employees can access)
+   - Global deduplication
+   - Tracks who uploaded each email
+
+═══════════════════════════════════════════════════════════════════════════════
+
+VALIDATION SUMMARY
+═══════════════════
+
+CONDITION                         RESULT          STATUS
+────────────────────────────────  ──────────────  ──────────────
+Empty email                       INVALID         ❌ Failed
+Non-string value                  INVALID         ❌ Failed
+Missing @ symbol                  INVALID         ❌ Failed
+No local part (before @)          INVALID         ❌ Failed
+No domain part (after @)          INVALID         ❌ Failed
+Domain without dot/TLD            INVALID         ❌ Failed
+Invalid characters in format      INVALID         ❌ Failed
+Duplicate email (insert_dup=true) VALID/DUPLICATE ⚠️  Warning
+Valid email format                VALID           ✅ Success
+
+═══════════════════════════════════════════════════════════════════════════════

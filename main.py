@@ -25,6 +25,7 @@ from app.options.router import router as options_router
 from app.profile_emails.router import router as profile_emails_router
 from app.profiles.router import router as profiles_router
 from app.reports.router import router as reports_router
+from app.settings.router import router as settings_router
 from app.templates.router import router as templates_router
 from app.users.router import router as users_router
 
@@ -101,6 +102,7 @@ app.include_router(campaigns_router)        # Campaign lifecycle + start/pause/r
 app.include_router(dashboard_router)
 app.include_router(logs_router)
 app.include_router(reports_router)
+app.include_router(settings_router)
 app.include_router(notifications_router)
 app.include_router(options_router)
 

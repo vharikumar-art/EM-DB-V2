@@ -107,6 +107,19 @@ async def delete_campaign(
     return ApiResponse(message="Campaign deleted")
 
 
+@router.patch("/{campaign_id}/daily-limit", response_model=ApiResponse)
+async def update_daily_limit(
+    campaign_id: str,
+    dailyLimit: int = Query(..., ge=1, le=10000, description="New daily limit"),
+    employeeId: str | None = Query(default=None),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Update the daily limit for a campaign."""
+    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    campaign = await service.update_daily_limit(campaign_id, dailyLimit, employee_id, is_admin)
+    return ApiResponse(message="Daily limit updated", data=campaign)
+
+
 # ---------------------------------------------------------------------------
 # Scheduling
 # ---------------------------------------------------------------------------

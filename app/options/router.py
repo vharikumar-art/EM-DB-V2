@@ -14,6 +14,7 @@ from app.profiles.service import list_profiles
 from app.schemas.common import ApiResponse
 from app.users.service import list_users
 from app.database.mongodb import get_collection
+from app.settings.service import list_branch_options, list_setting_values
 from app.utils.pagination import PaginationParams
 from app.utils.response import serialize_doc
 
@@ -93,6 +94,25 @@ async def get_profiles_options(
         for prof in profiles
     ]
     return ApiResponse(message="Profiles fetched", data=options)
+
+
+@router.get("/branches", response_model=ApiResponse)
+async def get_branches_options(
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Return all saved branch names for a dropdown list."""
+    branches = await list_branch_options()
+    return ApiResponse(message="Branches fetched", data=branches)
+
+
+@router.get("/lists/{key}", response_model=ApiResponse)
+async def get_named_list_options(
+    key: str,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Return any saved named list for dropdowns, e.g. branch, department, city."""
+    values = await list_setting_values(key)
+    return ApiResponse(message=f"{key} options fetched", data=values)
 
 
 @router.get("/campaigns", response_model=ApiResponse)
