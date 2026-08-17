@@ -29,7 +29,7 @@ def build_email_master_document(
         # Contact fields
         "fullName": row.get("fullName", ""),
         "email": row["email"],
-        "company": row.get("company", ""),
+        "university": row.get("university", ""),
         "website": row.get("website", ""),
         "country": row.get("country", ""),
         "state": row.get("state", ""),

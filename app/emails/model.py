@@ -8,7 +8,7 @@ def build_email_document(employee_id: str, upload_batch: str, is_duplicate: bool
         "employeeId": employee_id,
         "fullName": row.get("fullName", ""),
         "email": row["email"],
-        "company": row.get("company", ""),
+        "university": row.get("university", ""),
         "website": row.get("website", ""),
         "country": row.get("country", ""),
         "state": row.get("state", ""),

@@ -9,7 +9,7 @@ from app.utils.email_validator import is_valid_email, normalize_email
 FIELD_ALIASES: dict[str, list[str]] = {
     "fullName": ["fullname", "full name", "name"],
     "email": ["email", "email address"],
-    "company": ["company", "organization"],
+    "university": ["university", "organization"],
     "website": ["website", "url"],
     "country": ["country"],
     "state": ["state", "province"],

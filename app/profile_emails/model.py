@@ -31,7 +31,7 @@ def build_profile_email_document(
         # Denormalized contact fields (snapshot at generation time)
         "fullName": record.get("fullName", ""),
         "email": record["email"],
-        "company": record.get("company", ""),
+        "university": record.get("university", ""),
         "website": record.get("website", ""),
         "country": record.get("country", ""),
         "state": record.get("state", ""),

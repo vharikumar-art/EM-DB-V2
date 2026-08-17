@@ -222,7 +222,7 @@ async def list_profile_emails(
         query["$or"] = [
             {"email": {"$regex": search, "$options": "i"}},
             {"fullName": {"$regex": search, "$options": "i"}},
-            {"company": {"$regex": search, "$options": "i"}},
+            {"university": {"$regex": search, "$options": "i"}},
         ]
 
     total = await col.count_documents(query)

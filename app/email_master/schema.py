@@ -8,7 +8,7 @@ class EmailMasterOut(BaseModel):
     isDuplicate: bool
     fullName: str = ""
     email: str
-    company: str = ""
+    university: str = ""
     website: str = ""
     country: str = ""
     state: str = ""
@@ -44,5 +44,5 @@ class EmailMasterFilterQuery(BaseModel):
     country: list[str] | None = None
     domain: list[str] | None = None
     industry: list[str] | None = None
-    company: list[str] | None = None
+    university: list[str] | None = None
     includeDuplicates: bool = False

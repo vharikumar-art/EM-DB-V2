@@ -5,7 +5,7 @@ class ProfileFilters(BaseModel):
     country: list[str] = Field(default_factory=list)
     domain: list[str] = Field(default_factory=list)
     industry: list[str] = Field(default_factory=list)
-    company: list[str] = Field(default_factory=list)
+    university: list[str] = Field(default_factory=list)
     type: list[str] = Field(default_factory=list)  # maps to designation / industry
     mailSource: list[str] = Field(default_factory=list)  # Google Scholar, University, Other
     allowUsed: bool = Field(default=False, description="If True, allow reusing emails that have been used before (usageCount > 0) but are currently unlocked")

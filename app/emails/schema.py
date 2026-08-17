@@ -7,7 +7,7 @@ class EmailRecordOut(BaseModel):
     uploadedByName: str | None = None
     fullName: str
     email: str
-    company: str
+    university: str
     website: str
     country: str
     state: str

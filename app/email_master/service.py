@@ -142,7 +142,7 @@ async def list_emails(
     state: str | None = None,
     domain: str | None = None,
     industry: str | None = None,
-    company: str | None = None,
+    university: str | None = None,
     uploaded_by: str | None = None,
     used_by_employee: str | None = None,
     mail_source: str | None = None,
@@ -161,8 +161,8 @@ async def list_emails(
         query["domain"] = domain
     if industry:
         query["industry"] = industry
-    if company:
-        query["company"] = {"$regex": company, "$options": "i"}
+    if university:
+        query["university"] = {"$regex": university, "$options": "i"}
     if uploaded_by:
         query["uploadedBy"] = uploaded_by
     if used_by_employee:
@@ -178,7 +178,7 @@ async def list_emails(
         query["$or"] = [
             {"email": {"$regex": search, "$options": "i"}},
             {"fullName": {"$regex": search, "$options": "i"}},
-            {"company": {"$regex": search, "$options": "i"}},
+            {"university": {"$regex": search, "$options": "i"}},
         ]
 
     total = await master.count_documents(query)
@@ -314,7 +314,7 @@ async def get_dropdown_options() -> dict:
     countries = await master.distinct("country", {"isDuplicate": False})
     states = await master.distinct("state", {"isDuplicate": False})
     industries = await master.distinct("industry", {"isDuplicate": False})
-    companies = await master.distinct("company", {"isDuplicate": False})
+    universities = await master.distinct("university", {"isDuplicate": False})
     designations = await master.distinct("designation", {"isDuplicate": False})
     mail_sources = await master.distinct("mailSource", {"isDuplicate": False})
     
@@ -390,7 +390,7 @@ async def get_dropdown_options() -> dict:
         "countries": [c for c in countries if c],
         "states": [s for s in states if s],
         "industries": [i for i in industries if i],
-        "companies": [c for c in companies if c],
+        "universities": [u for u in universities if u],
         "designations": [d for d in designations if d],
         "mailSources": [m for m in mail_sources if m],
         "uploaders": uploaders,
@@ -452,8 +452,8 @@ async def count_filtered_emails(filters: dict) -> dict:
         query["domain"] = {"$in": filters["domain"]}
     if filters.get("industry"):
         query["industry"] = {"$in": filters["industry"]}
-    if filters.get("company"):
-        query["company"] = {"$in": filters["company"]}
+    if filters.get("university"):
+        query["university"] = {"$in": filters["university"]}
     if filters.get("mailSource"):
         query["mailSource"] = {"$in": filters["mailSource"]}
     if filters.get("type"):
@@ -477,7 +477,7 @@ async def query_for_profile(
     Skips emails already assigned to OTHER employees (doesn't count them against filter_limit).
     
     Args:
-        filters: Filter criteria (country, domain, industry, company, type)
+        filters: Filter criteria (country, domain, industry, university, type)
         daily_limit: Daily limit for sends (used to determine pool size)
         filter_limit: Maximum emails to return from filtered results (0 = no limit)
         employee_id: Current employee ID (to track who claims emails)
@@ -502,7 +502,7 @@ async def query_for_profile(
         filters.get("state"),
         filters.get("domain"),
         filters.get("industry"),
-        filters.get("company"),
+        filters.get("university"),
         filters.get("type"),
         filters.get("mailSource"),
     ])
@@ -515,8 +515,8 @@ async def query_for_profile(
         query["domain"] = {"$in": filters["domain"]}
     if filters.get("industry"):
         query["industry"] = {"$in": filters["industry"]}
-    if filters.get("company"):
-        query["company"] = {"$in": filters["company"]}
+    if filters.get("university"):
+        query["university"] = {"$in": filters["university"]}
     if filters.get("mailSource"):
         query["mailSource"] = {"$in": filters["mailSource"]}
     if filters.get("type"):

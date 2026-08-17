@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 def _default_filters() -> dict:
-    return {"country": [], "domain": [], "industry": [], "company": [], "type": []}
+    return {"country": [], "domain": [], "industry": [], "university": [], "type": []}
 
 
 def _default_sending_options() -> dict:
@@ -284,7 +284,7 @@ def _replace_placeholders(text: str, lead: dict) -> str:
     """Simple [placeholder] substitution for preview and test sends."""
     replacements = {
         "[name]": lead.get("fullName") or lead.get("name") or "there",
-        "[company]": lead.get("company", "your company"),
+        "[university]": lead.get("university", "your university"),
         "[industry]": lead.get("industry", "your industry"),
         "[designation]": lead.get("designation", ""),
         "[country]": lead.get("country", ""),

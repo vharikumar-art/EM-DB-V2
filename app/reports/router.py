@@ -13,7 +13,7 @@ router = APIRouter(prefix="/reports", tags=["Reports"])
 # ── Email Master export ───────────────────────────────────────────────────────
 
 EMAIL_MASTER_FIELDS = [
-    "fullName", "email", "company", "website", "country", "state", "city",
+    "fullName", "email", "university", "website", "country", "state", "city",
     "domain", "industry", "designation", "phone", "linkedin",
     "uploadBatch", "isDuplicate", "createdAt",
 ]
@@ -51,7 +51,7 @@ async def export_email_master_csv(
 # ── Profile emails export ─────────────────────────────────────────────────────
 
 PROFILE_EMAIL_FIELDS = [
-    "fullName", "email", "company", "country", "state", "city",
+    "fullName", "email", "university", "country", "state", "city",
     "domain", "industry", "designation",
     "sendStatus", "threadId", "messageId", "sentDate",
     "errorMessage", "notes", "retryCount", "createdAt",

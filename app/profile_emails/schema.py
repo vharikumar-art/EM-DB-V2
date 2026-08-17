@@ -11,7 +11,7 @@ class ProfileEmailOut(BaseModel):
     masterEmailId: str
     fullName: str = ""
     email: str
-    company: str = ""
+    university: str = ""
     website: str = ""
     country: str = ""
     state: str = ""
@@ -35,7 +35,7 @@ class ProfileEmailOut(BaseModel):
 class ProfileEmailUpdate(BaseModel):
     """Fields an employee can manually edit on a profile email row."""
     fullName: str | None = None
-    company: str | None = None
+    university: str | None = None
     country: str | None = None
     notes: str | None = None
     sendStatus: SendStatus | None = None

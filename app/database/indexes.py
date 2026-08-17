@@ -19,7 +19,7 @@ async def create_indexes() -> None:
     await db["email_master"].create_index("country")
     await db["email_master"].create_index("domain")
     await db["email_master"].create_index("industry")
-    await db["email_master"].create_index("company")
+    await db["email_master"].create_index("university")
     await db["email_master"].create_index("createdAt")
     await db["email_master"].create_index("usedByEmployeeId")
     await db["email_master"].create_index("inProfileEmails")

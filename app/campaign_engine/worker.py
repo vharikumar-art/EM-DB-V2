@@ -237,23 +237,52 @@ async def _run(campaign_id: str) -> None:
     daily_limit: int = campaign.get("dailyLimit", 100)  # Get from campaign
 
     while True:
-        # Check if daily limit reached
+        # Check if daily limit reached. For recurring campaigns, hitting the full
+        # quota means this cycle is complete; for one-time campaigns, pause only if
+        # more work remains.
         if total_sent >= daily_limit:
-            logger.info(
-                "Campaign %s reached daily limit (%d sent). Pausing.",
-                campaign_id, total_sent,
-            )
-            # Pause the campaign so it can be resumed tomorrow
-            try:
-                await campaign_service.set_status(
-                    campaign_id, CampaignStatus.PAUSED, employee_id, is_admin=True
+            recurrence = campaign.get("recurrenceType", "once")
+            if recurrence in ["daily", "weekly"]:
+                logger.info(
+                    "Campaign %s reached daily limit (%d/%d) for this cycle. Continuing scheduling logic; completion will be decided by remaining pending emails.",
+                    campaign_id,
+                    total_sent,
+                    daily_limit,
                 )
-            except:
+                # Do not force completion here. For recurring campaigns, completion is
+                # determined by whether any profile emails remain pending after this run.
                 pass
-            return
+            else:
+                remaining_batch = await pe_service.get_pending_batch(profile_id, 1)
+                if not remaining_batch:
+                    logger.info(
+                        "Campaign %s reached daily limit (%d sent) but no pending emails remain. Finalizing as completed.",
+                        campaign_id,
+                        total_sent,
+                    )
+                    break
 
-        # Respect pause
+                logger.info(
+                    "Campaign %s reached daily limit (%d sent). Pausing.",
+                    campaign_id, total_sent,
+                )
+                try:
+                    await campaign_service.set_status(
+                        campaign_id, CampaignStatus.PAUSED, employee_id, is_admin=True
+                    )
+                except Exception:
+                    pass
+                return
+
+        # Respect pause, but do not leave a fully-finished campaign stuck as paused.
         if await campaign_service.is_paused(campaign_id):
+            remaining_batch = await pe_service.get_pending_batch(profile_id, 1)
+            if not remaining_batch:
+                logger.info(
+                    "Campaign %s is paused but has no pending emails left. Finalizing as completed.",
+                    campaign_id,
+                )
+                break
             logger.info("Campaign %s paused — exiting worker", campaign_id)
             return
 

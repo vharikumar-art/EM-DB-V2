@@ -242,27 +242,45 @@ async def finalize_campaign_execution(
             success = False
             error_message = campaign.get("errorMessage") or "Aborted by worker"
         elif current_status == CampaignStatus.PAUSED.value:
-            # Worker paused it (e.g. daily limit reached)
-            # Just record execution duration
-            await campaigns.update_one(
-                {"_id": to_object_id(campaign_id)},
-                {"$set": {"executionDuration": execution_duration}}
-            )
-            # If it's a recurring campaign, do not exit so it gets rescheduled
-            if campaign.get("recurrenceType") not in ["daily", "weekly"]:
-                return
+            # Pause is only valid while more emails remain. If the queue is empty,
+            # the campaign has actually finished and should not stay paused.
+            if campaign.get("pending", 0) == 0:
+                pass
+            else:
+                await campaigns.update_one(
+                    {"_id": to_object_id(campaign_id)},
+                    {"$set": {"executionDuration": execution_duration}}
+                )
+                if campaign.get("recurrenceType") not in ["daily", "weekly"]:
+                    return
 
     if success:
-        # Check if it should reschedule
+        # Check if it should reschedule.
         recurrence_type = campaign.get("recurrenceType", "once")
         if recurrence_type in ["daily", "weekly"]:
+            if campaign.get("pending", 0) == 0:
+                await campaigns.update_one(
+                    {"_id": to_object_id(campaign_id)},
+                    {
+                        "$set": {
+                            "status": CampaignStatus.COMPLETED.value,
+                            "completedAt": now,
+                            "executionDuration": execution_duration,
+                            "updatedAt": now,
+                            "errorMessage": None,
+                        }
+                    }
+                )
+                await create_notification(
+                    employee_id=campaign.get("employeeId"),
+                    message=f"Campaign '{campaign['campaignName']}' completed because all pending emails have been sent.",
+                    type=NotificationType.SUCCESS,
+                )
+                return
+
             try:
-                # Always reschedule recurring campaigns to the next occurrence.
-                # "daily" = run every day at the same time.
-                # "weekly" = run on the selected days every week.
-                # The worker already exits cleanly if there are no pending
-                # emails, so the next run will simply find nothing to send
-                # (or the user may have added new leads by then).
+                # Daily/weekly campaigns continue to the next scheduled run while
+                # there are still pending emails remaining in the profile queue.
                 display_str = campaign.get("scheduledForDisplay", "00:00")
                 time_str = display_str.split("T")[-1] if "T" in display_str else display_str[-5:]
 
