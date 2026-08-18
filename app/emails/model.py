@@ -14,6 +14,7 @@ def build_email_document(employee_id: str, upload_batch: str, is_duplicate: bool
         "state": row.get("state", ""),
         "city": row.get("city", ""),
         "domain": row.get("domain", ""),
+        "domain_group": row.get("domain_group") or [],
         "industry": row.get("industry", ""),
         "designation": row.get("designation", ""),
         "phone": row.get("phone", ""),

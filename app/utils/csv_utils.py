@@ -1,9 +1,42 @@
 import io
+import re
 from typing import Any
 
 import pandas as pd
 
 from app.utils.email_validator import is_valid_email, normalize_email
+
+ALLOWED_DOMAIN_GROUPS: list[str] = [
+    "IT",
+    "Data Science",
+    "Agriculture",
+    "Engineering",
+    "Business",
+    "Management",
+    "Finance",
+    "Computer Science",
+    "Electronics",
+    "Medicine",
+]
+
+DOMAIN_GROUP_ALIASES: dict[str, str] = {
+    "it": "IT",
+    "data science": "Data Science",
+    "data-science": "Data Science",
+    "computer science": "Computer Science",
+    "cs": "Computer Science",
+    "agri": "Agriculture",
+    "agriculture": "Agriculture",
+    "engineering": "Engineering",
+    "eng": "Engineering",
+    "business": "Business",
+    "management": "Management",
+    "finance": "Finance",
+    "electronics": "Electronics",
+    "medicine": "Medicine",
+    "health": "Medicine",
+    "healthcare": "Medicine",
+}
 
 # Maps expected internal field -> list of acceptable header aliases (case-insensitive)
 FIELD_ALIASES: dict[str, list[str]] = {
@@ -15,6 +48,7 @@ FIELD_ALIASES: dict[str, list[str]] = {
     "state": ["state", "province"],
     "city": ["city"],
     "domain": ["domain", "sector"],
+    "domain_group": ["domain_group", "domain group", "field category", "field_group"],
     "industry": ["industry"],
     "designation": ["designation", "title", "job title"],
     "phone": ["phone", "phone number", "mobile"],
@@ -22,6 +56,45 @@ FIELD_ALIASES: dict[str, list[str]] = {
     "citation": ["citation", "source citation", "reference"],
     "mailSource": ["mail source", "mailsource", "source", "email source"],
 }
+
+
+def normalize_domain_group(raw_value: str | None) -> list[str]:
+    """Normalize category-like values such as 'IT, Data Science' into canonical labels."""
+    if raw_value is None:
+        return []
+
+    text = str(raw_value).strip()
+    if not text:
+        return []
+
+    normalized_text = re.sub(r"\s*(?:,|;|/|\||\n|&|\band\b)\s*", "|", text, flags=re.IGNORECASE)
+    normalized_text = re.sub(r"[-_]+", " ", normalized_text)
+    chunks = [chunk.strip() for chunk in normalized_text.split("|") if chunk and chunk.strip()]
+
+    result: list[str] = []
+    seen: set[str] = set()
+
+    for chunk in chunks:
+        candidate = re.sub(r"\s+", " ", chunk).strip().lower()
+        if not candidate:
+            continue
+
+        canonical = DOMAIN_GROUP_ALIASES.get(candidate)
+        if canonical is None:
+            for allowed in ALLOWED_DOMAIN_GROUPS:
+                allowed_key = allowed.lower()
+                if candidate == allowed_key:
+                    canonical = allowed
+                    break
+                if candidate.replace(" ", "") == allowed_key.replace(" ", ""):
+                    canonical = allowed
+                    break
+
+        if canonical and canonical not in seen:
+            result.append(canonical)
+            seen.add(canonical)
+
+    return result
 
 
 def _map_headers(columns: list[str]) -> dict[str, str]:
@@ -70,6 +143,10 @@ def validate_and_clean_rows(df: pd.DataFrame) -> tuple[list[dict[str, Any]], lis
     for _, row in df.iterrows():
         raw_email = str(row.get("email", "")).strip()
         record = {field: (str(row[field]).strip() if field in df.columns else "") for field in FIELD_ALIASES}
+
+        raw_domain_group = record.get("domain_group") or row.get("domain_group") or row.get("domain", "")
+        record["domain_group"] = normalize_domain_group(raw_domain_group)
+
         if not is_valid_email(raw_email):
             record["email"] = raw_email
             invalid_rows.append(record)

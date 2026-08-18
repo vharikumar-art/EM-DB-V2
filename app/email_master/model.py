@@ -35,6 +35,7 @@ def build_email_master_document(
         "state": row.get("state", ""),
         "city": row.get("city", ""),
         "domain": row.get("domain", ""),
+        "domain_group": row.get("domain_group") or [],
         "industry": row.get("industry", ""),
         "designation": row.get("designation", ""),
         "phone": row.get("phone", ""),

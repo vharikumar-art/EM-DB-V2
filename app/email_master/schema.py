@@ -14,6 +14,7 @@ class EmailMasterOut(BaseModel):
     state: str = ""
     city: str = ""
     domain: str = ""
+    domain_group: list[str] = Field(default_factory=list)
     industry: str = ""
     designation: str = ""
     phone: str = ""
