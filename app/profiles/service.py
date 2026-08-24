@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 def _default_filters() -> dict:
-    return {"country": [], "domain": [], "industry": [], "university": [], "type": []}
+    return {"country": [], "domain": [], "domainGroup": [], "industry": [], "university": [], "type": []}
 
 
 def _default_sending_options() -> dict:

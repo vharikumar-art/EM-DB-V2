@@ -318,6 +318,7 @@ async def get_dropdown_options() -> dict:
     states = await master.distinct("state", {"isDuplicate": False})
     industries = await master.distinct("industry", {"isDuplicate": False})
     universities = await master.distinct("university", {"isDuplicate": False})
+    domain_groups = await master.distinct("domain_group", {"isDuplicate": False})
     designations = await master.distinct("designation", {"isDuplicate": False})
     mail_sources = await master.distinct("mailSource", {"isDuplicate": False})
     
@@ -394,6 +395,7 @@ async def get_dropdown_options() -> dict:
         "states": [s for s in states if s],
         "industries": [i for i in industries if i],
         "universities": [u for u in universities if u],
+        "domainGroups": clean(domain_groups),
         "designations": [d for d in designations if d],
         "mailSources": [m for m in mail_sources if m],
         "uploaders": uploaders,
@@ -455,6 +457,9 @@ async def count_filtered_emails(filters: dict) -> dict:
         query["domain"] = {"$in": filters["domain"]}
     if filters.get("industry"):
         query["industry"] = {"$in": filters["industry"]}
+    domain_groups = filters.get("domainGroup") or filters.get("domain_group")
+    if domain_groups:
+        query["domain_group"] = {"$in": domain_groups}
     if filters.get("university"):
         query["university"] = {"$in": filters["university"]}
     if filters.get("mailSource"):
@@ -504,6 +509,7 @@ async def query_for_profile(
         filters.get("country"),
         filters.get("state"),
         filters.get("domain"),
+        filters.get("domainGroup") or filters.get("domain_group"),
         filters.get("industry"),
         filters.get("university"),
         filters.get("type"),
@@ -518,6 +524,9 @@ async def query_for_profile(
         query["domain"] = {"$in": filters["domain"]}
     if filters.get("industry"):
         query["industry"] = {"$in": filters["industry"]}
+    domain_groups = filters.get("domainGroup") or filters.get("domain_group")
+    if domain_groups:
+        query["domain_group"] = {"$in": domain_groups}
     if filters.get("university"):
         query["university"] = {"$in": filters["university"]}
     if filters.get("mailSource"):
