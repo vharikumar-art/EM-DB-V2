@@ -179,6 +179,9 @@ async def list_emails(
             {"email": {"$regex": search, "$options": "i"}},
             {"fullName": {"$regex": search, "$options": "i"}},
             {"university": {"$regex": search, "$options": "i"}},
+            {"domain": {"$regex": search, "$options": "i"}},
+            {"domain_group": {"$regex": search, "$options": "i"}},
+            {"country": {"$regex": search, "$options": "i"}},
         ]
 
     total = await master.count_documents(query)
