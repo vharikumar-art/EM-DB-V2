@@ -27,6 +27,7 @@ from app.profiles.router import router as profiles_router
 from app.reports.router import router as reports_router
 from app.settings.router import router as settings_router
 from app.templates.router import router as templates_router
+from app.tracking.router import router as tracking_router
 from app.users.router import router as users_router
 
 
@@ -77,7 +78,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(
     CORSMiddleware,
     # allow_origins=settings.cors_origins_list,
-    allow_origins=["http://localhost:5173", "http://13.206.26.177:5001","http://localhost:5174","http://localhost:5175" , "http://13.206.26.177:2003" , "http://192.168.1.23:5173"],
+    allow_origins=["http://localhost:5173", "http://13.206.26.177:5001","http://localhost:5174","http://localhost:5175" , "http://13.206.26.177:2003" , "http://35.154.26.148"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -105,6 +106,7 @@ app.include_router(reports_router)
 app.include_router(settings_router)
 app.include_router(notifications_router)
 app.include_router(options_router)
+app.include_router(tracking_router)
 
 
 # ────────────────────────────────────────────────────────────────────────────
