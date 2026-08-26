@@ -52,7 +52,7 @@ class ProfileCreate(BaseModel):
     profileName: str = Field(min_length=1, max_length=100)
     gmailAccount: EmailStr
     signature: str = Field(default="", description="HTML signature appended to every email")
-    templates: list[Template] = Field(min_length=1, max_length=3, description="1-3 A/B testing templates (required)")
+    templates: list[Template] = Field(min_length=1, max_length=5, description="1-5 A/B testing templates (required)")
     attachments: list[Attachment] = Field(default_factory=list, description="File attachments (sent with all templates)")
     filters: ProfileFilters = Field(default_factory=ProfileFilters)
     filterLimit: int = Field(default=0, ge=0, description="Maximum emails to fetch from filtered results (0 = no limit)")
