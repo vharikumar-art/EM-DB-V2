@@ -27,7 +27,6 @@ from app.profiles.router import router as profiles_router
 from app.reports.router import router as reports_router
 from app.settings.router import router as settings_router
 from app.templates.router import router as templates_router
-#from app.tracking.router import router as tracking_router
 from app.users.router import router as users_router
 
 
@@ -106,7 +105,6 @@ app.include_router(reports_router)
 app.include_router(settings_router)
 app.include_router(notifications_router)
 app.include_router(options_router)
-#app.include_router(tracking_router)
 
 
 # ────────────────────────────────────────────────────────────────────────────

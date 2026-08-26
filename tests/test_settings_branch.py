@@ -43,3 +43,16 @@ def test_create_setting_and_list_branch_options():
         assert updated["values"] == ["Vellore", "Chennai"]
 
     asyncio.run(run_checks())
+
+
+def test_list_branch_options_returns_empty_when_branch_setting_is_missing():
+    mock_collection = AsyncMock()
+    mock_collection.find_one.return_value = None
+
+    async def run_checks():
+        with patch("app.settings.service.get_collection", return_value=mock_collection):
+            branches = await list_branch_options()
+        assert branches == []
+        mock_collection.insert_one.assert_not_awaited()
+
+    asyncio.run(run_checks())
