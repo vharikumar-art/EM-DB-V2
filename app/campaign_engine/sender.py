@@ -124,7 +124,7 @@ def _send_sync(
     msg = _build_mime_message(credentials, to, subject, body_plain, body_html, message_id, attachments)
 
     try:
-        if credentials.use_tls:
+        if credentials.use_tls and credentials.smtp_port != 465:
             server = smtplib.SMTP(credentials.smtp_host, credentials.smtp_port, timeout=30)
             server.ehlo()
             server.starttls()

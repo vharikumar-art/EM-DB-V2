@@ -141,7 +141,7 @@ async def test_connection(account_id: str, employee_id: str, is_admin: bool) -> 
 
 
 def _smtp_login_check(host: str, port: int, email: str, password: str, use_tls: bool) -> None:
-    if use_tls:
+    if use_tls and port != 465:
         server = smtplib.SMTP(host, port, timeout=10)
         server.ehlo()
         server.starttls()
