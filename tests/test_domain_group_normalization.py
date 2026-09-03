@@ -10,6 +10,9 @@ def test_normalize_domain_group_handles_mixed_separators_and_aliases():
     assert normalize_domain_group("unknown / Data Science") == ["Data Science"]
     assert normalize_domain_group("IT, IT, Data Science") == ["IT", "Data Science"]
     assert normalize_domain_group("Medical") == ["Medicine"]
+    assert normalize_domain_group("Blockchain Security Research") == ["Blockchain Security", "Research"]
+    assert normalize_domain_group("IoT Security") == ["IoT Security"]
+    assert normalize_domain_group("Machine Learning") == ["Machine Learning"]
 
 
 def test_domain_group_does_not_copy_legacy_domain_value_when_category_field_is_present():

@@ -333,7 +333,7 @@ DOMAIN_GROUP_ALIASES: dict[str, str] = {
     "healthcare": "Healthcare",
     "health care": "Healthcare",
     "health": "Healthcare",
-    "medical": "Medical",
+    "medical": "Medicine",
     "medicine": "Medicine",
     "biomedical": "Biomedical",
     "bioinformatics": "Bioinformatics",
@@ -445,6 +445,12 @@ def normalize_domain_group(raw_value: str | None) -> list[str]:
     normalized_text = re.sub(r"[-_]+", " ", normalized_text)
     chunks = [chunk.strip() for chunk in normalized_text.split("|") if chunk and chunk.strip()]
 
+    canonical_lookup: dict[str, str] = {}
+    for allowed in ALLOWED_DOMAIN_GROUPS:
+        canonical_lookup[re.sub(r"\s+", " ", allowed.strip().lower())] = allowed
+    for alias, canonical in DOMAIN_GROUP_ALIASES.items():
+        canonical_lookup[re.sub(r"\s+", " ", alias.strip().lower())] = canonical
+
     result: list[str] = []
     seen: set[str] = set()
 
@@ -453,20 +459,29 @@ def normalize_domain_group(raw_value: str | None) -> list[str]:
         if not candidate:
             continue
 
-        canonical = DOMAIN_GROUP_ALIASES.get(candidate)
-        if canonical is None:
-            for allowed in ALLOWED_DOMAIN_GROUPS:
-                allowed_key = allowed.lower()
-                if candidate == allowed_key:
-                    canonical = allowed
-                    break
-                if candidate.replace(" ", "") == allowed_key.replace(" ", ""):
-                    canonical = allowed
+        canonical = canonical_lookup.get(candidate)
+        if canonical is not None:
+            if canonical not in seen:
+                result.append(canonical)
+                seen.add(canonical)
+            continue
+
+        words = candidate.split()
+        position = 0
+        while position < len(words):
+            match = None
+            match_size = 0
+            for size in range(len(words) - position, 0, -1):
+                phrase = " ".join(words[position:position + size])
+                if phrase in canonical_lookup:
+                    match = canonical_lookup[phrase]
+                    match_size = size
                     break
 
-        if canonical and canonical not in seen:
-            result.append(canonical)
-            seen.add(canonical)
+            if match and match not in seen:
+                result.append(match)
+                seen.add(match)
+            position += match_size or 1
 
     return result
 
