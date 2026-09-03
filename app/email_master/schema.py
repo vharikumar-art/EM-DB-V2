@@ -44,6 +44,5 @@ class UploadResult(BaseModel):
 class EmailMasterFilterQuery(BaseModel):
     country: list[str] | None = None
     domain: list[str] | None = None
-    industry: list[str] | None = None
     university: list[str] | None = None
     includeDuplicates: bool = False

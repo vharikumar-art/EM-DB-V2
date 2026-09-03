@@ -141,7 +141,6 @@ async def list_emails(
     country: str | None = None,
     state: str | None = None,
     domain: str | None = None,
-    industry: str | None = None,
     university: str | None = None,
     uploaded_by: str | None = None,
     used_by_employee: str | None = None,
@@ -158,9 +157,12 @@ async def list_emails(
     if state:
         query["state"] = state
     if domain:
-        query["domain"] = domain
-    if industry:
-        query["industry"] = industry
+        query.setdefault("$and", []).append({
+            "$or": [
+                {"domain": domain},
+                {"domain_group": domain},
+            ]
+        })
     if university:
         query["university"] = {"$regex": university, "$options": "i"}
     if uploaded_by:
@@ -314,11 +316,10 @@ async def get_dropdown_options() -> dict:
     users_col = get_collection("users")
 
     domains = await master.distinct("domain", {"isDuplicate": False})
+    domain_groups = await master.distinct("domain_group", {"isDuplicate": False})
     countries = await master.distinct("country", {"isDuplicate": False})
     states = await master.distinct("state", {"isDuplicate": False})
-    industries = await master.distinct("industry", {"isDuplicate": False})
     universities = await master.distinct("university", {"isDuplicate": False})
-    domain_groups = await master.distinct("domain_group", {"isDuplicate": False})
     designations = await master.distinct("designation", {"isDuplicate": False})
     mail_sources = await master.distinct("mailSource", {"isDuplicate": False})
     
@@ -384,18 +385,15 @@ async def get_dropdown_options() -> dict:
                 emp_name = emp_names[i] if i < len(emp_names) else emp_id
                 used_by_employees_data[emp_id] = emp_name
 
-    def clean(lst: list) -> list:
-        return sorted([x for x in lst if x])
+    unified_domains = sorted({value for value in [*domains, *domain_groups] if value})
     uploaders = [{"id": uid, "name": uname} for uid, uname in uploaders_data.items()] if uploaders_data else []
     used_by_employees = [{"id": eid, "name": ename} for eid, ename in used_by_employees_data.items()] if used_by_employees_data else []
 
     return {
-        "domains": [d for d in domains if d],
+        "domains": unified_domains,
         "countries": [c for c in countries if c],
         "states": [s for s in states if s],
-        "industries": [i for i in industries if i],
         "universities": [u for u in universities if u],
-        "domainGroups": clean(domain_groups),
         "designations": [d for d in designations if d],
         "mailSources": [m for m in mail_sources if m],
         "uploaders": uploaders,
@@ -453,22 +451,26 @@ async def count_filtered_emails(filters: dict) -> dict:
         query["country"] = {"$in": filters["country"]}
     if filters.get("state"):
         query["state"] = {"$in": filters["state"]}
-    if filters.get("domain"):
-        query["domain"] = {"$in": filters["domain"]}
-    if filters.get("industry"):
-        query["industry"] = {"$in": filters["industry"]}
-    domain_groups = filters.get("domainGroup") or filters.get("domain_group")
-    if domain_groups:
-        query["domain_group"] = {"$in": domain_groups}
+    domain_values = [
+        *filters.get("domain", []),
+        *(filters.get("domainGroup") or filters.get("domain_group") or []),
+    ]
+    if domain_values:
+        query["$or"] = [
+            {"domain": {"$in": domain_values}},
+            {"domain_group": {"$in": domain_values}},
+        ]
     if filters.get("university"):
         query["university"] = {"$in": filters["university"]}
     if filters.get("mailSource"):
         query["mailSource"] = {"$in": filters["mailSource"]}
     if filters.get("type"):
-        query["$or"] = [
-            {"industry": {"$in": filters["type"]}},
-            {"designation": {"$in": filters["type"]}},
-        ]
+        query.setdefault("$and", []).append({
+            "$or": [
+                {"industry": {"$in": filters["type"]}},
+                {"designation": {"$in": filters["type"]}},
+            ]
+        })
 
     total_count = await master.count_documents(query)
     return {"totalMatching": total_count}
@@ -485,7 +487,7 @@ async def query_for_profile(
     Skips emails already assigned to OTHER employees (doesn't count them against filter_limit).
     
     Args:
-        filters: Filter criteria (country, domain, industry, university, type)
+        filters: Filter criteria (country, domain, domain group, university, type)
         daily_limit: Daily limit for sends (used to determine pool size)
         filter_limit: Maximum emails to return from filtered results (0 = no limit)
         employee_id: Current employee ID (to track who claims emails)
@@ -510,7 +512,6 @@ async def query_for_profile(
         filters.get("state"),
         filters.get("domain"),
         filters.get("domainGroup") or filters.get("domain_group"),
-        filters.get("industry"),
         filters.get("university"),
         filters.get("type"),
         filters.get("mailSource"),
@@ -520,13 +521,18 @@ async def query_for_profile(
         query["country"] = {"$in": filters["country"]}
     if filters.get("state"):
         query["state"] = {"$in": filters["state"]}
-    if filters.get("domain"):
-        query["domain"] = {"$in": filters["domain"]}
-    if filters.get("industry"):
-        query["industry"] = {"$in": filters["industry"]}
-    domain_groups = filters.get("domainGroup") or filters.get("domain_group")
-    if domain_groups:
-        query["domain_group"] = {"$in": domain_groups}
+    domain_values = [
+        *filters.get("domain", []),
+        *(filters.get("domainGroup") or filters.get("domain_group") or []),
+    ]
+    if domain_values:
+        domain_condition = {
+            "$or": [
+                {"domain": {"$in": domain_values}},
+                {"domain_group": {"$in": domain_values}},
+            ]
+        }
+        query.setdefault("$and", []).append(domain_condition)
     if filters.get("university"):
         query["university"] = {"$in": filters["university"]}
     if filters.get("mailSource"):

@@ -33,7 +33,6 @@ class UploadResult(BaseModel):
 class EmailFilterQuery(BaseModel):
     country: list[str] | None = None
     domain: list[str] | None = None
-    industry: list[str] | None = None
     type: list[str] | None = None
     includeDuplicates: bool = False
 

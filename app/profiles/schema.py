@@ -8,7 +8,6 @@ class ProfileFilters(BaseModel):
         default_factory=list,
         validation_alias=AliasChoices("domainGroup", "domain_group"),
     )
-    industry: list[str] = Field(default_factory=list)
     university: list[str] = Field(default_factory=list)
     type: list[str] = Field(default_factory=list)  # maps to designation / industry
     mailSource: list[str] = Field(default_factory=list)  # Google Scholar, University, Other
