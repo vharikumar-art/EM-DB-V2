@@ -17,7 +17,6 @@ from app.notifications.service import create_notification
 from app.profiles.model import MAX_PROFILES_PER_EMPLOYEE, build_profile_document
 from app.profiles.schema import ProfileCreate, ProfileTestEmailRequest, ProfileUpdate
 
-MAX_PROFILE_EMAIL_GENERATION_LIMIT = 600
 from app.utils.response import serialize_doc, serialize_list, to_object_id
 
 COLLECTION = "profiles"
@@ -138,19 +137,15 @@ async def update_profile(
     update_data: dict = {}
     raw = payload.model_dump(exclude_unset=True)
 
-    if "filterLimit" in raw and raw["filterLimit"] is not None and raw["filterLimit"] > MAX_PROFILE_EMAIL_GENERATION_LIMIT:
-        raise BadRequestException(
-            f"Filter limit cannot exceed {MAX_PROFILE_EMAIL_GENERATION_LIMIT}"
-        )
+    if "filterLimit" in raw and raw["filterLimit"] is not None and raw["filterLimit"] < 0:
+        raise BadRequestException("Filter limit cannot be negative")
 
     if "sendingOptions" in raw and raw["sendingOptions"] is not None:
         sending_options = raw["sendingOptions"]
         if isinstance(sending_options, dict) and sending_options.get("dailyLimit") is not None:
             daily_limit = sending_options["dailyLimit"]
-            if daily_limit > MAX_PROFILE_EMAIL_GENERATION_LIMIT:
-                raise BadRequestException(
-                    f"Daily limit cannot exceed {MAX_PROFILE_EMAIL_GENERATION_LIMIT}"
-                )
+            if daily_limit < 0:
+                raise BadRequestException("Daily limit cannot be negative")
 
     for key, val in raw.items():
         if val is not None:

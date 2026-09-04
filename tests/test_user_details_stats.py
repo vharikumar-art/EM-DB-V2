@@ -42,10 +42,18 @@ def test_pending_campaign_statuses_include_failed_and_paused():
     ]
 
 
-def test_effective_generation_limit_caps_requested_batch_size():
+def test_effective_generation_limit_uses_user_requested_value_without_fixed_cap():
     from app.profile_emails import service as profile_emails_service
 
-    assert profile_emails_service._get_effective_generation_limit(1000, 0, False) == 600
+    # blank/zero daily values default to 100
+    assert profile_emails_service._get_effective_generation_limit(0, 0, False) == 100
+    assert profile_emails_service._get_effective_generation_limit(None, 0, False) == 100
+    assert profile_emails_service._get_effective_generation_limit("", 0, False) == 100
+
+    # custom values are respected and no fixed cap is enforced
+    assert profile_emails_service._get_effective_generation_limit(1000, 0, False) == 1000
     assert profile_emails_service._get_effective_generation_limit(1000, 400, False) == 400
-    assert profile_emails_service._get_effective_generation_limit(1000, 1000, False) == 600
+    assert profile_emails_service._get_effective_generation_limit(1000, 1000, False) == 1000
+    assert profile_emails_service._get_effective_generation_limit(3000, 0, False) == 3000
+    assert profile_emails_service._get_effective_generation_limit(1000, 5000, False) == 5000
     assert profile_emails_service._get_effective_generation_limit(1000, 0, True) == 1000

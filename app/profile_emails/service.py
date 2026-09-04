@@ -13,19 +13,33 @@ from app.utils.pagination import build_paginated_response
 from app.utils.response import serialize_doc, serialize_list, to_object_id
 
 COLLECTION = "profile_emails"
-MAX_GENERATION_LIMIT = 600
 
 
-def _get_effective_generation_limit(daily_limit: int, filter_limit: int, is_admin: bool) -> int:
-    """Return the effective batch limit for profile-email generation."""
+def _normalize_daily_limit(value: int | None) -> int:
+    """Treat blank/zero values as the default daily cap of 100."""
+    if value in (None, "", 0):
+        return 100
+    return int(value)
+
+
+def _get_effective_generation_limit(daily_limit: int | None, filter_limit: int | None, is_admin: bool) -> int:
+    """Return the effective batch limit for profile-email generation.
+
+    No fixed hard cap is enforced. If the user sets a filter limit it wins;
+    otherwise we use the daily limit, with blank/zero values defaulting to 100.
+    """
+    daily_limit = _normalize_daily_limit(daily_limit)
+    if filter_limit in (None, "", 0):
+        filter_limit = 0
+    else:
+        filter_limit = int(filter_limit)
+
     if is_admin:
         return daily_limit
 
     requested_limit = filter_limit or daily_limit or 0
     if requested_limit <= 0:
-        return MAX_GENERATION_LIMIT
-    if requested_limit > MAX_GENERATION_LIMIT:
-        return MAX_GENERATION_LIMIT
+        return 100
     return requested_limit
 
 
