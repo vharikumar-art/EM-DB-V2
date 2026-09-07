@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, status
 
-from app.core.dependencies import require_admin
+from app.core.dependencies import CurrentUser, get_current_user, require_admin
 from app.schemas.common import ApiResponse
 from app.users import service
 from app.users.schema import UserCreate, UserUpdate, PasswordUpdate
@@ -21,9 +21,9 @@ async def create_initial_admin(payload: UserCreate):
 
 
 @router.post("", response_model=ApiResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
-async def create_user(payload: UserCreate):
+async def create_user(payload: UserCreate, current_user: CurrentUser = Depends(get_current_user)):
     """Create a new user (admin or employee based on role field)"""
-    user = await service.create_user(payload)
+    user = await service.create_user(payload, current_user)
     return ApiResponse(message="User created successfully", data=user)
 
 

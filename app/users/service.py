@@ -9,11 +9,17 @@ from app.utils.response import serialize_doc, serialize_user_with_password, seri
 COLLECTION = "users"
 
 
-async def create_user(payload: UserCreate) -> dict:
+async def create_user(payload: UserCreate, current_user: CurrentUser | None = None) -> dict:
     users = get_collection(COLLECTION)
     existing = await users.find_one({"email": payload.email})
     if existing:
         raise ConflictException("A user with this email already exists")
+
+    assigned_to_admin = payload.assignedToAdmin
+    if current_user and current_user.role == "admin":
+        from app.employees.service import get_employee_by_user_id
+        admin_employee = await get_employee_by_user_id(current_user.user_id)
+        assigned_to_admin = admin_employee["id"]
 
     doc = build_user_document(
         name=payload.name,
@@ -33,7 +39,7 @@ async def create_user(payload: UserCreate) -> dict:
         emp_doc = build_employee_document(
             user_id=str(created["_id"]),
             branch=payload.branch,
-            assigned_to_admin=payload.assignedToAdmin
+            assigned_to_admin=assigned_to_admin
         )
         employees = get_collection("employees")
         await employees.insert_one(emp_doc)
