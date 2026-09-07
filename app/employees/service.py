@@ -14,8 +14,13 @@ from app.utils.response import serialize_doc, to_object_id
 COLLECTION = "employees"
 
 
-async def create_employee(payload: EmployeeCreate) -> dict:
+async def create_employee(payload: EmployeeCreate, current_user: CurrentUser) -> dict:
     employees = get_collection(COLLECTION)
+
+    assigned_to_admin = payload.assignedToAdmin
+    if current_user.role == "admin":
+        admin_employee = await get_employee_by_user_id(current_user.user_id)
+        assigned_to_admin = admin_employee["id"]
 
     # Create the underlying auth user first.
     user = await create_user(
@@ -24,18 +29,14 @@ async def create_employee(payload: EmployeeCreate) -> dict:
             email=payload.email,
             password=payload.password,
             role=payload.role,
+            assignedToAdmin=assigned_to_admin,
         )
     )
 
     try:
-        doc = build_employee_document(
-            user_id=user["id"],
-            branch=payload.branch,
-            assigned_to_admin=payload.assignedToAdmin,
-        )
-
-        result = await employees.insert_one(doc)
-        created = await employees.find_one({"_id": result.inserted_id})
+        created = await employees.find_one({"userId": user["id"]})
+        if not created:
+            raise NotFoundException("Employee record could not be created")
         employee_out = serialize_doc(created)
         employee_out["name"] = user["name"]
         employee_out["email"] = user["email"]
@@ -44,6 +45,7 @@ async def create_employee(payload: EmployeeCreate) -> dict:
         # Roll back the user record if employee creation fails, to avoid orphan accounts.
         users = get_collection("users")
         await users.delete_one({"_id": to_object_id(user["id"])})
+        await employees.delete_one({"userId": user["id"]})
         raise
 
 
