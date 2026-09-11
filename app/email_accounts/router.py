@@ -16,10 +16,12 @@ async def create_account(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Add a Gmail / SMTP account. The app-password is encrypted at rest immediately."""
-    if current_user.role == "admin" and not employeeId:
+    resolved_employee_id = employeeId or payload.employeeId
+
+    if current_user.role == "admin" and not resolved_employee_id:
         raise BadRequestException("Admins must specify employeeId")
-    
-    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+
+    employee_id, is_admin = await resolve_employee_context(current_user, resolved_employee_id)
     account = await service.create_account(employee_id, payload)
     return ApiResponse(message="Email account added", data=account)
 

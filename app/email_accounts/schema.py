@@ -14,6 +14,7 @@ class EmailAccountCreate(BaseModel):
     smtpHost: str = Field(default="smtp.gmail.com")
     smtpPort: int = Field(default=587)
     useTls: bool = Field(default=True)
+    employeeId: str | None = Field(default=None, description="Target employee for admin requests.")
 
 
 class EmailAccountUpdate(BaseModel):
