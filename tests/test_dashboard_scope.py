@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from app.dashboard import service
@@ -45,6 +46,14 @@ class DashboardScopeTests(unittest.TestCase):
         self.assertFalse(scope["is_global"])
         self.assertEqual(scope["scope_emp_ids"], ["emp1", "emp2"])
         self.assertEqual(scope["scope_user_ids"], ["user1", "user2"])
+
+    def test_current_week_range_uses_monday_to_sunday(self):
+        now = datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc)
+
+        week_start, week_end = service._get_current_week_range(now)
+
+        self.assertEqual(week_start.strftime("%Y-%m-%d"), "2026-09-07")
+        self.assertEqual(week_end.strftime("%Y-%m-%d"), "2026-09-13")
 
 
 if __name__ == "__main__":

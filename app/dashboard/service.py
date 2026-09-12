@@ -90,6 +90,13 @@ async def _resolve_dashboard_scope(role: str | None, user_id: str | None) -> dic
     }
 
 
+def _get_current_week_range(now: datetime) -> tuple[datetime, datetime]:
+    """Return the Monday-Sunday range for the current week in UTC."""
+    start_of_week = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=now.weekday())
+    end_of_week = start_of_week + timedelta(days=6)
+    return start_of_week, end_of_week
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Employee dashboard
 # ─────────────────────────────────────────────────────────────────────────────
@@ -166,15 +173,16 @@ async def get_employee_dashboard(employee_id: str, query: DashboardQuery) -> dic
     overall_sent_res = await send_stats.aggregate(overall_sent_pipeline).to_list(length=1)
     overall_sent = overall_sent_res[0]["total"] if overall_sent_res else 0
 
-    # ── Current Week Sent (Monday–Saturday) — immutable daily_send_stats ───────────
-    days_since_monday = now.weekday()
-    monday_date_str = (now - timedelta(days=days_since_monday)).strftime("%Y-%m-%d")
+    # ── Current Week Sent (Monday–Sunday) — immutable daily_send_stats ───────────
+    week_start, week_end = _get_current_week_range(now)
+    week_start_str = week_start.strftime("%Y-%m-%d")
+    week_end_str = week_end.strftime("%Y-%m-%d")
 
     weekly_sent_pipeline = [
         {
             "$match": {
                 "employeeId": employee_id,
-                "date": {"$gte": monday_date_str},
+                "date": {"$gte": week_start_str, "$lte": week_end_str},
             }
         },
         {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
@@ -334,15 +342,17 @@ async def get_admin_scoped_dashboard(admin_user_id: str, query: DashboardQuery) 
     overall_sent_res = await send_stats.aggregate(overall_sent_pipeline).to_list(length=1)
     overall_sent = overall_sent_res[0]["total"] if overall_sent_res else 0
 
-    # ── Current Week Sent (Monday–Saturday) — immutable daily_send_stats ───────────
+    # ── Current Week Sent (Monday–Sunday) — immutable daily_send_stats ───────────
     now_admin = datetime.now(timezone.utc)
-    monday_date_str = (now_admin - timedelta(days=now_admin.weekday())).strftime("%Y-%m-%d")
+    week_start, week_end = _get_current_week_range(now_admin)
+    week_start_str = week_start.strftime("%Y-%m-%d")
+    week_end_str = week_end.strftime("%Y-%m-%d")
 
     weekly_sent_pipeline = [
         {
             "$match": {
                 "employeeId": {"$in": scope_emp_ids},
-                "date": {"$gte": monday_date_str},
+                "date": {"$gte": week_start_str, "$lte": week_end_str},
             }
         },
         {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
@@ -421,14 +431,16 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
     overall_sent_res = await send_stats.aggregate(overall_sent_pipeline).to_list(length=1)
     overall_sent = overall_sent_res[0]["total"] if overall_sent_res else 0
 
-    # ── Current Week Sent (Monday–Saturday) — immutable daily_send_stats ───────────
+    # ── Current Week Sent (Monday–Sunday) — immutable daily_send_stats ───────────
     now = datetime.now(timezone.utc)
-    monday_date_str = (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
+    week_start, week_end = _get_current_week_range(now)
+    week_start_str = week_start.strftime("%Y-%m-%d")
+    week_end_str = week_end.strftime("%Y-%m-%d")
 
     weekly_sent_pipeline = [
         {
             "$match": {
-                "date": {"$gte": monday_date_str},
+                "date": {"$gte": week_start_str, "$lte": week_end_str},
             }
         },
         {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
