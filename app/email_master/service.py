@@ -22,7 +22,6 @@ async def upload_file(
     file_bytes: bytes,
     filename: str,
     insert_duplicates: bool = False,
-    max_limit: int | None = None,
     mail_source: str | None = None,
 ) -> dict:
     """
@@ -32,7 +31,6 @@ async def upload_file(
     Args:
         uploaded_by_id: User ID who uploaded
         uploaded_by_name: User name who uploaded
-        max_limit: Maximum number of emails to upload from file (1-10000)
         mail_source: Source of emails - Google Scholar, University, Other (overrides CSV value)
     """
     master = get_collection(COLLECTION)
@@ -47,12 +45,6 @@ async def upload_file(
 
     if not valid_rows:
         raise BadRequestException("No valid email rows found in the uploaded file")
-
-    # Apply maxLimit if specified
-    if max_limit:
-        original_valid_count = len(valid_rows)
-        valid_rows = valid_rows[:max_limit]
-        failed_count += original_valid_count - len(valid_rows)
 
     upload_batch = f"batch_{uuid.uuid4().hex[:12]}"
     batch_emails = [row["email"] for row in valid_rows]
@@ -113,11 +105,10 @@ async def upload_file(
     )
 
     total_uploaded = len(valid_rows) + failed_count
-    limit_msg = f" (limited to {max_limit})" if max_limit else ""
     await create_notification(
         employee_id=uploaded_by_id,
         message=(
-            f"Email upload complete: {total_uploaded} records processed{limit_msg} "
+            f"Email upload complete: {total_uploaded} records processed "
             f"({unique_count} new, {duplicate_count} duplicate, {failed_count} invalid)."
         ),
         type=NotificationType.SUCCESS if unique_count > 0 else NotificationType.WARNING,

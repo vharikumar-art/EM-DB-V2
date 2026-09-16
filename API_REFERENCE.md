@@ -236,7 +236,6 @@ curl -X POST http://localhost:8000/email-master/upload \
   -H "Authorization: Bearer <token>" \
   -F "file=@/path/to/leads.csv" \
   -F "insertDuplicates=false" \
-  -F "maxLimit=5000" \
   -F "mailSource=Google Scholar"
 ```
 
@@ -245,7 +244,6 @@ curl -X POST http://localhost:8000/email-master/upload \
 |---|---|---|---|
 | `file` | File | required | .csv, .xlsx, or .xls |
 | `insertDuplicates` | bool | false | Insert duplicate emails (marked as duplicate) |
-| `maxLimit` | int | null | Cap upload at N rows (1-10000) |
 | `mailSource` | string | null | `"Google Scholar"`, `"University"`, or `"Other"` |
 
 **Response:**

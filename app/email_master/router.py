@@ -16,7 +16,6 @@ _ALLOWED_EXTENSIONS = (".csv", ".xlsx", ".xls")
 async def upload_emails(
     file: UploadFile = File(...),
     insertDuplicates: bool = Query(default=False),
-    maxLimit: int | None = Query(default=None, ge=1, le=10000, description="Maximum emails to upload from file"),
     mailSource: str | None = Query(default=None, description="Mail source: Google Scholar, University, Other"),
     current_user: CurrentUser = Depends(get_current_user),
 ):
@@ -41,7 +40,6 @@ async def upload_emails(
         file_bytes=file_bytes,
         filename=file.filename,
         insert_duplicates=insertDuplicates,
-        max_limit=maxLimit,
         mail_source=mailSource,
     )
     return ApiResponse(message="File processed", data=result)
