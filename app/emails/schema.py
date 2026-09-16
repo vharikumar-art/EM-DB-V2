@@ -28,6 +28,8 @@ class UploadResult(BaseModel):
     duplicate: int
     failed: int
     uploadBatch: str
+    failedEmails: list[dict] = Field(default_factory=list)
+    duplicateEmails: list[dict] = Field(default_factory=list)
 
 
 class EmailFilterQuery(BaseModel):

@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, File, Query, UploadFile
 
 from app.core.dependencies import CurrentUser, get_current_user
 from app.emails import service
+from app.emails.schema import UploadResult
 from app.employees.service import get_employee_by_user_id
 from app.schemas.common import ApiResponse, PaginationParams
 from app.utils.pagination import pagination_params
@@ -9,7 +10,7 @@ from app.utils.pagination import pagination_params
 router = APIRouter(prefix="/emails", tags=["Emails"])
 
 
-@router.post("/upload", response_model=ApiResponse)
+@router.post("/upload", response_model=ApiResponse[UploadResult])
 async def upload_emails(
     file: UploadFile = File(...),
     insertDuplicates: bool = Query(default=False),

@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, File, Query, UploadFile
 from app.core.dependencies import CurrentUser, get_current_user, require_admin, require_super_admin
 from app.core.exceptions import BadRequestException
 from app.email_master import service
+from app.email_master.schema import UploadResult
 from app.schemas.common import ApiResponse, PaginationParams
 from app.utils.pagination import pagination_params
 
@@ -11,7 +12,7 @@ router = APIRouter(prefix="/email-master", tags=["Email Master"])
 _ALLOWED_EXTENSIONS = (".csv", ".xlsx", ".xls")
 
 
-@router.post("/upload", response_model=ApiResponse)
+@router.post("/upload", response_model=ApiResponse[UploadResult])
 async def upload_emails(
     file: UploadFile = File(...),
     insertDuplicates: bool = Query(default=False),

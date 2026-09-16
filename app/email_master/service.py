@@ -49,8 +49,9 @@ async def upload_file(
 
     # Apply maxLimit if specified
     if max_limit:
+        original_valid_count = len(valid_rows)
         valid_rows = valid_rows[:max_limit]
-        failed_count += len(invalid_rows) + (len(validate_and_clean_rows(df)[0]) - len(valid_rows))
+        failed_count += original_valid_count - len(valid_rows)
 
     upload_batch = f"batch_{uuid.uuid4().hex[:12]}"
     batch_emails = [row["email"] for row in valid_rows]
@@ -131,7 +132,7 @@ async def upload_file(
         "uploadBatch": upload_batch,
         "sample": serialize_list(docs_to_insert[:15]),
         "duplicateEmails": duplicate_emails[:15],
-        "failedEmails": invalid_rows[:15],
+        "failedEmails": invalid_rows,
     }
 
 

@@ -147,7 +147,7 @@ async def upload_file(employee_id: str, file_bytes: bytes, filename: str, insert
         "uploadBatch": upload_batch,
         "emails": serialize_list(docs_to_insert[:15]),
         "duplicateEmails": duplicate_emails[:15],
-        "failedEmails": invalid_rows[:15],
+        "failedEmails": invalid_rows,
     }
 
 
