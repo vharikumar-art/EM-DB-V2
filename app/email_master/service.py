@@ -1,9 +1,10 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.core.exceptions import BadRequestException
 from app.database.mongodb import get_collection
 from app.email_master.model import build_email_master_document
+from app.settings.service import get_integer_setting
 from app.logs.model import LogAction, build_log_document
 from app.notifications.schema import NotificationType
 from app.notifications.service import create_notification
@@ -67,14 +68,12 @@ async def upload_file(
     seen_in_batch: set[str] = set()
     unique_count = 0
     duplicate_count = 0
-    duplicate_emails: list[dict] = []
 
     for row in valid_rows:
         email_addr = row["email"]
         is_dup = email_addr in existing_emails or email_addr in seen_in_batch
         if is_dup:
             duplicate_count += 1
-            duplicate_emails.append(row)
             if not insert_duplicates:
                 continue
         else:
@@ -131,7 +130,6 @@ async def upload_file(
         "failed": failed_count,
         "uploadBatch": upload_batch,
         "sample": serialize_list(docs_to_insert[:15]),
-        "duplicateEmails": duplicate_emails[:15],
         "failedEmails": invalid_rows,
     }
 
@@ -506,6 +504,34 @@ async def query_for_profile(
         query["$and"] = [
             {"$or": [{"usageCount": 0}, {"usageCount": {"$exists": False}}]}
         ]
+    else:
+        cooldown_days = await get_integer_setting(
+            "used_email_cooldown_days", default=20, minimum=0
+        )
+        max_usage_count = await get_integer_setting(
+            "used_email_max_usage_count", default=0, minimum=0
+        )
+        cutoff = datetime.now(timezone.utc) - timedelta(days=cooldown_days)
+        reusable_after_cooldown = {
+            "$or": [
+                {"lastUsedAt": {"$lte": cutoff}},
+                {
+                    "lastUsedAt": None,
+                    "assignedDate": {"$lte": cutoff},
+                },
+            ]
+        }
+        query.setdefault("$and", []).append(
+            {
+                "$or": [
+                    {"usageCount": 0},
+                    {"usageCount": {"$exists": False}},
+                    reusable_after_cooldown,
+                ]
+            }
+        )
+        if max_usage_count > 0:
+            query.setdefault("$and", []).append({"usageCount": {"$lt": max_usage_count}})
 
     # Track if user provided explicit filters
     has_explicit_filters = any([
@@ -653,6 +679,21 @@ async def release_email_locks(master_ids: list[str]) -> None:
                 "updatedAt": now,
             }
         }
+    )
+
+
+async def mark_email_sent(master_email_id: str) -> None:
+    """Record the successful send time used by the reuse cooldown policy."""
+    from bson import ObjectId
+
+    if not ObjectId.is_valid(master_email_id):
+        return
+
+    now = datetime.now(timezone.utc)
+    master = get_collection(COLLECTION)
+    await master.update_one(
+        {"_id": ObjectId(master_email_id)},
+        {"$set": {"lastUsedAt": now, "updatedAt": now}},
     )
 
 

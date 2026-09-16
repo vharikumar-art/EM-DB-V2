@@ -545,12 +545,20 @@ def validate_and_clean_rows(df: pd.DataFrame) -> tuple[list[dict[str, Any]], lis
             raw_domain_group = str(row.get("domain", "")).strip()
         record["domain_group"] = normalize_domain_group(raw_domain_group)
 
-        if not is_valid_email(raw_email):
+        email_values = [email.strip() for email in raw_email.split(",") if email.strip()]
+        if not email_values:
             record["email"] = raw_email
             invalid_rows.append(record)
             continue
 
-        record["email"] = normalize_email(raw_email)
-        valid_rows.append(record)
+        for email_value in email_values:
+            email_record = record.copy()
+            email_record["email"] = email_value
+            if not is_valid_email(email_value):
+                invalid_rows.append(email_record)
+                continue
+
+            email_record["email"] = normalize_email(email_value)
+            valid_rows.append(email_record)
 
     return valid_rows, invalid_rows

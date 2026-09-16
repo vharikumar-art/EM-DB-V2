@@ -27,6 +27,7 @@ class EmailMasterOut(BaseModel):
     usedByEmployeeNames: list[str] = Field(default_factory=list)
     inProfileEmails: bool = False
     usageCount: int = 0
+    lastUsedAt: str | None = None
     assignedDate: str | None = None
     assignedProfiles: list[dict] = Field(default_factory=list)
     createdAt: str | None = None
@@ -40,7 +41,6 @@ class UploadResult(BaseModel):
     failed: int
     uploadBatch: str
     failedEmails: list[dict] = Field(default_factory=list)
-    duplicateEmails: list[dict] = Field(default_factory=list)
 
 
 class EmailMasterFilterQuery(BaseModel):

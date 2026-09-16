@@ -51,6 +51,18 @@ async def list_setting_values(key: str) -> list[str]:
     return []
 
 
+async def get_integer_setting(key: str, default: int, minimum: int = 0) -> int:
+    """Return a numeric global setting, using a safe default when absent or invalid."""
+    values = await list_setting_values(key)
+    if not values:
+        return default
+
+    try:
+        return max(int(values[0]), minimum)
+    except (TypeError, ValueError):
+        return default
+
+
 async def list_branch_options() -> list[str]:
     return await list_setting_values("branch")
 

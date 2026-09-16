@@ -52,6 +52,7 @@ def build_email_master_document(
         "usedByEmployeeNames": [],       # List of employee names who claimed this email
         "usageCount": 0,                 # How many times this email has been used
         "assignedDate": None,            # When assigned to current employee
+        "lastUsedAt": None,               # When the email was successfully sent
         
         "createdAt": now,
         "updatedAt": now,

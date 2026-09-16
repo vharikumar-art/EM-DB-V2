@@ -494,6 +494,12 @@ curl -X POST "http://localhost:8000/profile-emails/64f1a2b3c4d5e6f7a8b9c0d1/gene
   }'
 ```
 
+To allow previously used emails, include `"allowUsed": true`. Reused emails
+must be outside the configured cooldown period (20 days by default). Super
+admins can configure the cooldown with the `used_email_cooldown_days` setting
+and optionally limit reuse with `used_email_max_usage_count`. Missing settings
+use the defaults and do not prevent connection to an existing database.
+
 **Response:**
 ```json
 {
