@@ -24,6 +24,10 @@ async def create_indexes() -> None:
     await db["email_master"].create_index("usedByEmployeeId")
     await db["email_master"].create_index("inProfileEmails")
     await db["email_master"].create_index("lastUsedAt")
+    await db["email_master"].create_index("hasReply")
+    await db["email_master"].create_index(
+        [("hasReply", 1), ("replyMarkedAt", -1)]
+    )
     # Dedup check is scoped per employee
     await db["email_master"].create_index(
         [("employeeId", 1), ("email", 1)], unique=True

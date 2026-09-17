@@ -53,6 +53,14 @@ def build_email_master_document(
         "usageCount": 0,                 # How many times this email has been used
         "assignedDate": None,            # When assigned to current employee
         "lastUsedAt": None,               # When the email was successfully sent
+
+        # Reply tracking
+        "hasReply": False,
+        "replyReason": None,
+        "replyCustomReason": None,
+        "replyMarkedAt": None,
+        "replyMarkedBy": None,
+        "replyMarkedByName": None,
         
         "createdAt": now,
         "updatedAt": now,

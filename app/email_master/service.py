@@ -290,6 +290,143 @@ async def get_email(email_id: str) -> dict:
     return docs[0] if docs else doc
 
 
+async def mark_email_reply(
+    email: str,
+    reason: str,
+    custom_reason: str | None,
+    marked_by: str,
+    marked_by_name: str | None = None,
+) -> dict:
+    """Mark an address as replied and remove it from active profile email lists."""
+    master = get_collection(COLLECTION)
+    normalized_email = email.strip().lower()
+    now = datetime.now(timezone.utc)
+    update = {
+        "hasReply": True,
+        "replyReason": reason,
+        "replyCustomReason": custom_reason if reason == "other" else None,
+        "replyMarkedAt": now,
+        "replyMarkedBy": marked_by,
+        "replyMarkedByName": marked_by_name or marked_by,
+        "updatedAt": now,
+    }
+    result = await master.update_many(
+        {"email": {"$regex": f"^{normalized_email}$", "$options": "i"}},
+        {"$set": update},
+    )
+    if result.matched_count == 0:
+        from app.core.exceptions import NotFoundException
+        raise NotFoundException("Email record not found")
+
+    matched_cursor = master.find(
+        {"email": {"$regex": f"^{normalized_email}$", "$options": "i"}},
+        {"_id": 1},
+    )
+    master_ids = [doc["_id"] async for doc in matched_cursor]
+    profile_emails = get_collection("profile_emails")
+    if master_ids:
+        await profile_emails.delete_many({"masterEmailId": {"$in": [str(mid) for mid in master_ids]}})
+        await master.update_many(
+            {"_id": {"$in": master_ids}},
+            {
+                "$pull": {"usedInProfiles": {"profileId": {"$exists": True}}},
+                "$set": {"inProfileEmails": False, "updatedAt": now},
+            },
+        )
+
+    doc = await master.find_one(
+        {"email": {"$regex": f"^{normalized_email}$", "$options": "i"}},
+        sort=[("replyMarkedAt", -1)],
+    )
+    return serialize_doc(doc)
+
+
+async def get_user_display_name(user_id: str) -> str:
+    """Return the user's display name, falling back to the authenticated ID."""
+    from bson import ObjectId
+
+    users = get_collection("users")
+    query = {"_id": ObjectId(user_id)} if ObjectId.is_valid(user_id) else {"_id": user_id}
+    user = await users.find_one(query, {"name": 1, "email": 1})
+    return (user or {}).get("name") or (user or {}).get("email") or user_id
+
+
+async def list_email_replies(
+    params: PaginationParams,
+    search: str | None = None,
+) -> dict:
+    """List email-master records marked as having received a reply."""
+    master = get_collection(COLLECTION)
+    query: dict = {"hasReply": True}
+    if search:
+        query["$or"] = [
+            {"email": {"$regex": search, "$options": "i"}},
+            {"fullName": {"$regex": search, "$options": "i"}},
+        ]
+
+    total = await master.count_documents(query)
+    converted_query = {**query, "replyReason": "converted"}
+    other_query = {**query, "replyReason": "other"}
+    converted_count = await master.count_documents(converted_query)
+    other_count = await master.count_documents(other_query)
+    cursor = (
+        master.find(query)
+        .sort("replyMarkedAt", -1)
+        .skip(params.skip)
+        .limit(params.pageSize)
+    )
+    docs = serialize_list([doc async for doc in cursor])
+    response = build_paginated_response(docs, total, params).model_dump()
+    response.update(
+        {
+            "replyCount": total,
+            "convertedCount": converted_count,
+            "otherCount": other_count,
+        }
+    )
+    return response
+
+
+async def update_email_reply(
+    email_id: str,
+    payload: dict,
+    marked_by: str,
+) -> dict:
+    """Edit or clear reply tracking for one email-master record."""
+    master = get_collection(COLLECTION)
+    object_id = to_object_id(email_id)
+    doc = await master.find_one({"_id": object_id})
+    if not doc:
+        from app.core.exceptions import NotFoundException
+        raise NotFoundException("Email record not found")
+
+    has_reply = payload.get("hasReply", doc.get("hasReply", False))
+    reason = payload.get("reason", doc.get("replyReason"))
+    custom_reason = payload.get("customReason", doc.get("replyCustomReason"))
+    if has_reply and reason == "other" and not custom_reason:
+        raise BadRequestException("customReason is required when reason is 'other'")
+    if has_reply and not reason:
+        raise BadRequestException("reason is required when hasReply is true")
+
+    now = datetime.now(timezone.utc)
+    marked_by_name = await get_user_display_name(marked_by)
+    update = {
+        "hasReply": has_reply,
+        "replyReason": reason if has_reply else None,
+        "replyCustomReason": custom_reason if has_reply and reason == "other" else None,
+        "replyMarkedAt": now if has_reply else None,
+        "replyMarkedBy": marked_by if has_reply else None,
+        "replyMarkedByName": marked_by_name if has_reply else None,
+        "updatedAt": now,
+    }
+    updated = await master.find_one_and_update(
+        {"_id": object_id},
+        {"$set": update},
+        return_document=True,
+    )
+    return serialize_doc(updated)
+
+
 async def delete_email(email_id: str) -> None:
     """ADMIN ONLY: Delete email from global pool."""
     master = get_collection(COLLECTION)
@@ -435,7 +572,7 @@ async def count_filtered_emails(filters: dict) -> dict:
     Returns both total count and count respecting filter configuration.
     """
     master = get_collection(COLLECTION)
-    query: dict = {"isDuplicate": False}
+    query: dict = {"isDuplicate": False, "hasReply": {"$ne": True}}
 
     if filters.get("country"):
         query["country"] = {"$in": filters["country"]}
@@ -483,7 +620,7 @@ async def query_for_profile(
         employee_id: Current employee ID (to track who claims emails)
     """
     master = get_collection(COLLECTION)
-    query: dict = {"isDuplicate": False}
+    query: dict = {"isDuplicate": False, "hasReply": {"$ne": True}}
     
     # Always skip emails that are currently locked in a profile
     query["inProfileEmails"] = False

@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, File, Query, UploadFile
 from app.core.dependencies import CurrentUser, get_current_user, require_admin, require_super_admin
 from app.core.exceptions import BadRequestException
 from app.email_master import service
-from app.email_master.schema import UploadResult
+from app.email_master.schema import MarkReplyRequest, UpdateReplyRequest, UploadResult
 from app.schemas.common import ApiResponse, PaginationParams
 from app.utils.pagination import pagination_params
 
@@ -71,6 +71,48 @@ async def count_filtered_emails(
     """Count emails matching filters from GLOBAL pool."""
     result = await service.count_filtered_emails(filters)
     return ApiResponse(message="Filtered email count", data=result)
+
+
+@router.post("/replies", response_model=ApiResponse)
+async def mark_email_reply(
+    payload: MarkReplyRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Mark all matching email-master records as having received a reply."""
+    record = await service.mark_email_reply(
+        email=str(payload.email),
+        reason=payload.reason,
+        custom_reason=payload.customReason,
+        marked_by=current_user.user_id,
+        marked_by_name=await service.get_user_display_name(current_user.user_id),
+    )
+    return ApiResponse(message="Email reply marked", data=record)
+
+
+@router.get("/replies", response_model=ApiResponse)
+async def list_email_replies(
+    search: str | None = Query(default=None),
+    params: PaginationParams = Depends(pagination_params),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """List email-master records that have received a reply."""
+    result = await service.list_email_replies(params=params, search=search)
+    return ApiResponse(message="Email replies fetched", data=result)
+
+
+@router.patch("/replies/{email_id}", response_model=ApiResponse)
+async def update_email_reply(
+    email_id: str,
+    payload: UpdateReplyRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Edit or clear reply tracking for one email-master record."""
+    record = await service.update_email_reply(
+        email_id=email_id,
+        payload=payload.model_dump(exclude_unset=True),
+        marked_by=current_user.user_id,
+    )
+    return ApiResponse(message="Email reply updated", data=record)
 
 
 @router.get("/{email_id}", response_model=ApiResponse)
