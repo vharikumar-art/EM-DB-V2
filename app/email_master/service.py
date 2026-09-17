@@ -624,43 +624,6 @@ async def query_for_profile(
     
     # Always skip emails that are currently locked in a profile
     query["inProfileEmails"] = False
-    
-    # Check if we should allow previously used emails
-    allow_used = filters.get("allowUsed", False)
-    if not allow_used:
-        # usageCount == 0 OR field doesn't exist yet (backward compat with pre-feature docs)
-        query["$and"] = [
-            {"$or": [{"usageCount": 0}, {"usageCount": {"$exists": False}}]}
-        ]
-    else:
-        cooldown_days = await get_integer_setting(
-            "used_email_cooldown_days", default=20, minimum=0
-        )
-        max_usage_count = await get_integer_setting(
-            "used_email_max_usage_count", default=0, minimum=0
-        )
-        cutoff = datetime.now(timezone.utc) - timedelta(days=cooldown_days)
-        reusable_after_cooldown = {
-            "$or": [
-                {"lastUsedAt": {"$lte": cutoff}},
-                {
-                    "lastUsedAt": None,
-                    "assignedDate": {"$lte": cutoff},
-                },
-            ]
-        }
-        query.setdefault("$and", []).append(
-            {
-                "$or": [
-                    {"usageCount": 0},
-                    {"usageCount": {"$exists": False}},
-                    reusable_after_cooldown,
-                ]
-            }
-        )
-        if max_usage_count > 0:
-            query.setdefault("$and", []).append({"usageCount": {"$lt": max_usage_count}})
-
     # Track if user provided explicit filters
     has_explicit_filters = any([
         filters.get("country"),
@@ -702,6 +665,16 @@ async def query_for_profile(
             query["$and"].append(type_or)
         else:
             query["$or"] = type_or["$or"]
+
+    # Return existing profile assignments first so the caller can raise a
+    # clear duplicate-profile error instead of silently selecting another lead.
+    duplicate_query = dict(query)
+    duplicate_query.pop("inProfileEmails", None)
+    duplicate_query["usedInProfiles.0"] = {"$exists": True}
+    duplicate_cursor = master.find(duplicate_query).limit(10)
+    duplicate_records = serialize_list([d async for d in duplicate_cursor])
+    if duplicate_records:
+        return duplicate_records
 
     # Determine fetch limit: use filter_limit if set, otherwise use daily_limit * 10
     fetch_limit = filter_limit if filter_limit > 0 else daily_limit * 10

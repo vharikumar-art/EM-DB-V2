@@ -71,10 +71,19 @@ async def create_profile(employee_id: str, payload: ProfileCreate) -> dict:
             "A profile with this name already exists for this employee"
         )
 
+    gmail_account = str(payload.gmailAccount).strip().lower()
+    existing_account = await profiles.find_one(
+        {"gmailAccount": {"$regex": f"^{gmail_account}$", "$options": "i"}}
+    )
+    if existing_account:
+        raise ConflictException(
+            "A profile already exists using this Gmail account"
+        )
+
     doc = build_profile_document(
         employee_id=employee_id,
         profile_name=payload.profileName,
-        gmail_account=str(payload.gmailAccount),
+        gmail_account=gmail_account,
         signature=payload.signature,
         templates=[t.model_dump() for t in payload.templates],
         attachments=[a.model_dump() for a in payload.attachments] if payload.attachments else [],
@@ -146,6 +155,20 @@ async def update_profile(
             daily_limit = sending_options["dailyLimit"]
             if daily_limit < 0:
                 raise BadRequestException("Daily limit cannot be negative")
+
+    if "gmailAccount" in raw and raw["gmailAccount"] is not None:
+        gmail_account = str(raw["gmailAccount"]).strip().lower()
+        duplicate_account = await profiles.find_one(
+            {
+                "_id": {"$ne": to_object_id(profile_id)},
+                "gmailAccount": {"$regex": f"^{gmail_account}$", "$options": "i"},
+            }
+        )
+        if duplicate_account:
+            raise ConflictException(
+                "A profile already exists using this Gmail account"
+            )
+        raw["gmailAccount"] = gmail_account
 
     for key, val in raw.items():
         if val is not None:
