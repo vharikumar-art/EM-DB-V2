@@ -347,12 +347,24 @@ async def get_user_display_name(user_id: str) -> str:
 
     users = get_collection("users")
     employees = get_collection("employees")
-    query = {"_id": ObjectId(user_id)} if ObjectId.is_valid(user_id) else {"_id": user_id}
-    user = await users.find_one(query, {"name": 1, "email": 1})
+    object_id = ObjectId(user_id) if ObjectId.is_valid(user_id) else None
+    user_queries = [{"_id": object_id or user_id}, {"id": user_id}]
+    user = None
+    for query in user_queries:
+        user = await users.find_one(query, {"name": 1, "email": 1})
+        if user:
+            break
     if user:
         return user.get("name") or user.get("email") or user_id
 
-    employee = await employees.find_one(query, {"userId": 1})
+    employee_queries = [{"userId": user_id}]
+    if object_id:
+        employee_queries.extend([{"userId": object_id}, {"_id": object_id}])
+    employee = None
+    for query in employee_queries:
+        employee = await employees.find_one(query, {"userId": 1})
+        if employee:
+            break
     employee_user_id = (employee or {}).get("userId")
     if employee_user_id:
         employee_user_query = (
