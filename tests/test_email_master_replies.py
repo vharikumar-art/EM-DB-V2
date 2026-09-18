@@ -143,6 +143,42 @@ class EmailMasterReplyTests(unittest.TestCase):
         self.assertEqual(result["otherCount"], 0)
         self.assertEqual(result["total"], 1)
 
+    def test_list_replies_resolves_marker_name_when_stored_value_is_id(self):
+        marker_id = str(ObjectId())
+        documents = [
+            {
+                "_id": ObjectId(),
+                "email": "replied@example.com",
+                "hasReply": True,
+                "replyMarkedBy": marker_id,
+                "replyMarkedByName": marker_id,
+            }
+        ]
+        collection = FakeCollection(documents)
+
+        with patch.object(service, "get_collection", return_value=collection), patch.object(
+            service, "get_user_display_name", return_value="VHK"
+        ):
+            result = asyncio.run(
+                service.list_email_replies(PaginationParams(page=1, pageSize=25))
+            )
+
+        self.assertEqual(result["data"][0]["replyMarkedByName"], "VHK")
+
+    def test_display_name_resolves_employee_id(self):
+        employee_id = ObjectId()
+        user_id = ObjectId()
+        users = FakeCollection([{"_id": user_id, "name": "Muhamad Ali"}])
+        employees = FakeCollection([{"_id": employee_id, "userId": str(user_id)}])
+
+        def get_collection(name):
+            return users if name == "users" else employees
+
+        with patch.object(service, "get_collection", side_effect=get_collection):
+            result = asyncio.run(service.get_user_display_name(str(employee_id)))
+
+        self.assertEqual(result, "Muhamad Ali")
+
     def test_update_reply_can_clear_status(self):
         document = {
             "_id": ObjectId(),

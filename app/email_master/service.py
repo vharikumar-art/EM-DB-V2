@@ -342,12 +342,26 @@ async def mark_email_reply(
 
 
 async def get_user_display_name(user_id: str) -> str:
-    """Return the user's display name, falling back to the authenticated ID."""
+    """Return a user's display name when given either a user or employee ID."""
     from bson import ObjectId
 
     users = get_collection("users")
+    employees = get_collection("employees")
     query = {"_id": ObjectId(user_id)} if ObjectId.is_valid(user_id) else {"_id": user_id}
     user = await users.find_one(query, {"name": 1, "email": 1})
+    if user:
+        return user.get("name") or user.get("email") or user_id
+
+    employee = await employees.find_one(query, {"userId": 1})
+    employee_user_id = (employee or {}).get("userId")
+    if employee_user_id:
+        employee_user_query = (
+            {"_id": ObjectId(str(employee_user_id))}
+            if ObjectId.is_valid(str(employee_user_id))
+            else {"_id": employee_user_id}
+        )
+        user = await users.find_one(employee_user_query, {"name": 1, "email": 1})
+
     return (user or {}).get("name") or (user or {}).get("email") or user_id
 
 
@@ -376,6 +390,12 @@ async def list_email_replies(
         .limit(params.pageSize)
     )
     docs = serialize_list([doc async for doc in cursor])
+    for doc in docs:
+        marked_by = doc.get("replyMarkedBy")
+        marked_by_name = doc.get("replyMarkedByName")
+        if marked_by and (not marked_by_name or str(marked_by_name) == str(marked_by)):
+            doc["replyMarkedByName"] = await get_user_display_name(str(marked_by))
+
     response = build_paginated_response(docs, total, params).model_dump()
     response.update(
         {
