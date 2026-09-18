@@ -1,3 +1,5 @@
+from datetime import date
+
 from fastapi import APIRouter, Depends, File, Query, UploadFile
 
 from app.core.dependencies import CurrentUser, get_current_user, require_admin, require_super_admin
@@ -92,12 +94,31 @@ async def mark_email_reply(
 @router.get("/replies", response_model=ApiResponse)
 async def list_email_replies(
     search: str | None = Query(default=None),
+    reason: str | None = Query(default=None),
+    replyMarkedByName: str | None = Query(default=None),
+    updatedTime: str | None = Query(default=None),
+    updatedStartDate: date | None = Query(default=None),
+    updatedEndDate: date | None = Query(default=None),
     params: PaginationParams = Depends(pagination_params),
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """List email-master records that have received a reply."""
-    result = await service.list_email_replies(params=params, search=search)
-    return ApiResponse(message="Email replies fetched", data=result)
+    result = await service.list_email_replies(
+        params=params,
+        search=search,
+        user_id=current_user.user_id,
+        role=current_user.role,
+        reason=reason,
+        reply_marked_by_name=replyMarkedByName,
+        updated_time=updatedTime,
+        updated_start_date=updatedStartDate,
+        updated_end_date=updatedEndDate,
+    )
+    options = await service.get_reply_filter_options(
+        user_id=current_user.user_id,
+        role=current_user.role,
+    )
+    return ApiResponse(message="Email replies fetched", data=result, options=options)
 
 
 @router.patch("/replies/{email_id}", response_model=ApiResponse)
@@ -111,6 +132,7 @@ async def update_email_reply(
         email_id=email_id,
         payload=payload.model_dump(exclude_unset=True),
         marked_by=current_user.user_id,
+        role=current_user.role,
     )
     return ApiResponse(message="Email reply updated", data=record)
 

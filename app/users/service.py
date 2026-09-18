@@ -241,14 +241,41 @@ async def update_user(user_id: str, payload: UserUpdate) -> dict:
     return serialize_user_with_password(result)
 
 
-async def delete_user(user_id: str) -> None:
+async def delete_user(user_id: str, actor_role: str | None = None) -> None:
     users = get_collection(COLLECTION)
+    employees = get_collection("employees")
+    user = await users.find_one(
+        {"_id": to_object_id(user_id)}, {"name": 1, "email": 1, "role": 1}
+    )
+    if not user:
+        raise NotFoundException("User not found")
+
+    employee = await employees.find_one(
+        {"userId": user_id}, {"_id": 1, "userId": 1}
+    )
+
+    if actor_role in {"admin", "super_admin"}:
+        # Notify while the employee assignment still exists so admins receive the event.
+        try:
+            from app.notifications.schema import NotificationType
+            from app.notifications.service import create_notification
+
+            notification_target = str(employee["_id"]) if employee else user_id
+            display_name = user.get("name") or user.get("email") or user_id
+            await create_notification(
+                notification_target,
+                f"User {display_name} was deleted.",
+                NotificationType.INFO,
+            )
+        except Exception:
+            # Deletion must not fail if notification delivery/storage is unavailable.
+            pass
+
     result = await users.delete_one({"_id": to_object_id(user_id)})
     if result.deleted_count == 0:
         raise NotFoundException("User not found")
         
     # Cascade delete the employee record to prevent orphans
-    employees = get_collection("employees")
     await employees.delete_many({"userId": user_id})
 
 

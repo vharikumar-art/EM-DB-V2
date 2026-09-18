@@ -1,7 +1,8 @@
 import uuid
-from datetime import datetime, timedelta, timezone
+import re
+from datetime import date, datetime, time, timedelta, timezone
 
-from app.core.exceptions import BadRequestException
+from app.core.exceptions import BadRequestException, ForbiddenException
 from app.database.mongodb import get_collection
 from app.email_master.model import build_email_master_document
 from app.settings.service import get_integer_setting
@@ -377,13 +378,182 @@ async def get_user_display_name(user_id: str) -> str:
     return (user or {}).get("name") or (user or {}).get("email") or user_id
 
 
+async def _get_reply_marker_scope(user_id: str, role: str) -> set[str] | None:
+    """Return marker IDs visible to a user, or None for an unrestricted user."""
+    if role == "super_admin":
+        return None
+
+    employees = get_collection("employees")
+    scope: set[str] = {str(user_id)}
+    own_employee = await employees.find_one({"userId": user_id}, {"_id": 1})
+    if not own_employee:
+        from bson import ObjectId
+
+        if ObjectId.is_valid(user_id):
+            own_employee = await employees.find_one(
+                {"userId": ObjectId(user_id)}, {"_id": 1}
+            )
+
+    own_employee_id = str(own_employee["_id"]) if own_employee else None
+    if own_employee_id:
+        scope.add(own_employee_id)
+
+    if role != "admin" or not own_employee_id:
+        return scope
+
+    assigned_queries = [{"assignedToAdmin": own_employee_id}]
+    from bson import ObjectId
+
+    if ObjectId.is_valid(own_employee_id):
+        assigned_queries.append({"assignedToAdmin": ObjectId(own_employee_id)})
+    seen_employee_ids: set[str] = set()
+    for assigned_query in assigned_queries:
+        assigned = employees.find(assigned_query, {"_id": 1, "userId": 1})
+        async for employee in assigned:
+            employee_id = str(employee["_id"])
+            if employee_id in seen_employee_ids:
+                continue
+            seen_employee_ids.add(employee_id)
+            scope.add(employee_id)
+            if employee.get("userId"):
+                scope.add(str(employee["userId"]))
+
+    return scope
+
+
+def _reply_updated_range(
+    updated_time: str | None,
+    updated_start_date: date | None,
+    updated_end_date: date | None,
+) -> tuple[datetime, datetime] | None:
+    if not updated_time:
+        if updated_start_date or updated_end_date:
+            if not updated_start_date or not updated_end_date:
+                raise BadRequestException(
+                    "updatedStartDate and updatedEndDate are both required"
+                )
+            if updated_start_date > updated_end_date:
+                raise BadRequestException("updatedStartDate must be before updatedEndDate")
+            return (
+                datetime.combine(updated_start_date, time.min, tzinfo=timezone.utc),
+                datetime.combine(updated_end_date, time.max, tzinfo=timezone.utc),
+            )
+        return None
+
+    if updated_time == "custom":
+        return _reply_updated_range(None, updated_start_date, updated_end_date)
+    if updated_time not in {"last_7_days", "last_15_days", "last_30_days"}:
+        raise BadRequestException(
+            "updatedTime must be last_7_days, last_15_days, last_30_days, or custom"
+        )
+
+    days = int(updated_time.split("_")[1])
+    now = datetime.now(timezone.utc)
+    return now - timedelta(days=days), now
+
+
+async def get_reply_filter_options(
+    user_id: str | None = None,
+    role: str | None = None,
+) -> dict:
+    """Return filter values available to the current user's reply scope."""
+    master = get_collection(COLLECTION)
+    query: dict = {"hasReply": True}
+    if user_id and role:
+        marker_scope = await _get_reply_marker_scope(user_id, role)
+        if marker_scope is not None:
+            query["replyMarkedBy"] = {"$in": list(marker_scope)}
+
+    reasons: set[str] = set()
+    marker_names: set[str] = set()
+    async for doc in master.find(
+        query, {"replyReason": 1, "replyMarkedBy": 1, "replyMarkedByName": 1}
+    ):
+        if doc.get("replyReason"):
+            reasons.add(doc["replyReason"])
+        marker_id = str(doc.get("replyMarkedBy")) if doc.get("replyMarkedBy") else None
+        marker_name = doc.get("replyMarkedByName")
+        if marker_id and (not marker_name or str(marker_name) == marker_id):
+            marker_name = await get_user_display_name(marker_id)
+        if marker_name and marker_name != marker_id:
+            marker_names.add(str(marker_name))
+
+    reason_labels = {
+        "replied": "Replied",
+        "converted": "Converted",
+        "other": "Other",
+    }
+    return {
+        "reasons": [
+            {"value": reason, "label": reason_labels.get(reason, reason)}
+            for reason in sorted(reasons)
+        ],
+        "replyMarkedByNames": [
+            {"value": name, "label": name} for name in sorted(marker_names, key=str.casefold)
+        ],
+        "updatedTimePresets": [
+            {"value": "last_7_days", "label": "Last 7 days"},
+            {"value": "last_15_days", "label": "Last 15 days"},
+            {"value": "last_30_days", "label": "Last 30 days"},
+            {"value": "custom", "label": "Custom date range"},
+        ],
+    }
+
+
 async def list_email_replies(
     params: PaginationParams,
     search: str | None = None,
+    user_id: str | None = None,
+    role: str | None = None,
+    reason: str | None = None,
+    reply_marked_by_name: str | None = None,
+    updated_time: str | None = None,
+    updated_start_date: date | None = None,
+    updated_end_date: date | None = None,
 ) -> dict:
     """List email-master records marked as having received a reply."""
+    updated_range = _reply_updated_range(
+        updated_time, updated_start_date, updated_end_date
+    )
     master = get_collection(COLLECTION)
     query: dict = {"hasReply": True}
+    marker_scope: set[str] | None = None
+    if user_id and role:
+        marker_scope = await _get_reply_marker_scope(user_id, role)
+        if marker_scope is not None:
+            query["replyMarkedBy"] = {"$in": list(marker_scope)}
+    if reason:
+        query["replyReason"] = reason
+    if reply_marked_by_name:
+        name_conditions = [
+            {
+                "replyMarkedByName": {
+                    "$regex": f"^{re.escape(reply_marked_by_name)}$",
+                    "$options": "i",
+                }
+            }
+        ]
+        marker_query: dict = {"hasReply": True}
+        if marker_scope is not None:
+            marker_query["replyMarkedBy"] = {"$in": list(marker_scope)}
+        matching_marker_ids: set[str] = set()
+        async for marker_doc in master.find(
+            marker_query, {"replyMarkedBy": 1, "replyMarkedByName": 1}
+        ):
+            marker_id = marker_doc.get("replyMarkedBy")
+            if not marker_id:
+                continue
+            stored_name = marker_doc.get("replyMarkedByName")
+            resolved_name = stored_name
+            if not stored_name or str(stored_name) == str(marker_id):
+                resolved_name = await get_user_display_name(str(marker_id))
+            if resolved_name and str(resolved_name).casefold() == reply_marked_by_name.casefold():
+                matching_marker_ids.add(str(marker_id))
+        if matching_marker_ids:
+            name_conditions.append({"replyMarkedBy": {"$in": list(matching_marker_ids)}})
+        query.setdefault("$and", []).append({"$or": name_conditions})
+    if updated_range:
+        query["updatedAt"] = {"$gte": updated_range[0], "$lte": updated_range[1]}
     if search:
         query["$or"] = [
             {"email": {"$regex": search, "$options": "i"}},
@@ -423,6 +593,7 @@ async def update_email_reply(
     email_id: str,
     payload: dict,
     marked_by: str,
+    role: str | None = None,
 ) -> dict:
     """Edit or clear reply tracking for one email-master record."""
     master = get_collection(COLLECTION)
@@ -431,6 +602,11 @@ async def update_email_reply(
     if not doc:
         from app.core.exceptions import NotFoundException
         raise NotFoundException("Email record not found")
+
+    if role:
+        marker_scope = await _get_reply_marker_scope(marked_by, role)
+        if marker_scope is not None and str(doc.get("replyMarkedBy")) not in marker_scope:
+            raise ForbiddenException("You do not have access to this email reply")
 
     has_reply = payload.get("hasReply", doc.get("hasReply", False))
     reason = payload.get("reason", doc.get("replyReason"))

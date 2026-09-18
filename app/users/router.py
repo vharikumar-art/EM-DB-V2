@@ -68,9 +68,10 @@ async def update_user_password(user_id: str, payload: PasswordUpdate):
     return ApiResponse(message="Password updated", data=user)
 
 
-from app.core.dependencies import require_admin, require_super_admin
-
-@router.delete("/{user_id}", response_model=ApiResponse, dependencies=[Depends(require_super_admin)])
-async def delete_user(user_id: str):
-    await service.delete_user(user_id)
+@router.delete("/{user_id}", response_model=ApiResponse)
+async def delete_user(
+    user_id: str,
+    current_user: CurrentUser = Depends(require_admin),
+):
+    await service.delete_user(user_id, actor_role=current_user.role)
     return ApiResponse(message="User deleted")

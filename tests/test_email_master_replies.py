@@ -1,6 +1,6 @@
 import asyncio
 import unittest
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import patch
 
 from bson import ObjectId
@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from app.email_master import service
 from app.email_master.schema import MarkReplyRequest, UpdateReplyRequest
+from app.core.exceptions import BadRequestException, ForbiddenException
 from app.schemas.common import PaginationParams
 
 
@@ -49,10 +50,22 @@ class FakeCollection:
     @staticmethod
     def matches(document, query):
         for key, expected in query.items():
+            if key == "$and":
+                if not all(FakeCollection.matches(document, condition) for condition in expected):
+                    return False
+                continue
             actual = document.get(key)
             if isinstance(expected, dict) and "$regex" in expected:
                 import re
                 if not re.search(expected["$regex"], actual or "", re.IGNORECASE):
+                    return False
+            elif isinstance(expected, dict) and "$in" in expected:
+                if actual not in expected["$in"]:
+                    return False
+            elif isinstance(expected, dict) and "$gte" in expected:
+                if actual is None or actual < expected["$gte"]:
+                    return False
+                if "$lte" in expected and actual > expected["$lte"]:
                     return False
             elif isinstance(expected, dict) and expected.get("$ne") is not None:
                 if actual == expected["$ne"]:
@@ -178,6 +191,173 @@ class EmailMasterReplyTests(unittest.TestCase):
             result = asyncio.run(service.get_user_display_name(str(employee_id)))
 
         self.assertEqual(result, "Muhamad Ali")
+
+    def test_employee_lists_only_own_replies(self):
+        employee_user_id = str(ObjectId())
+        employee_id = ObjectId()
+        documents = [
+            {
+                "_id": ObjectId(),
+                "email": "own@example.com",
+                "hasReply": True,
+                "replyMarkedBy": employee_user_id,
+                "replyMarkedByName": "Employee",
+            },
+            {
+                "_id": ObjectId(),
+                "email": "other@example.com",
+                "hasReply": True,
+                "replyMarkedBy": str(ObjectId()),
+                "replyMarkedByName": "Other",
+            },
+        ]
+        master = FakeCollection(documents)
+        employees = FakeCollection([{"_id": employee_id, "userId": employee_user_id}])
+
+        def get_collection(name):
+            return master if name == "email_master" else employees
+
+        with patch.object(service, "get_collection", side_effect=get_collection):
+            result = asyncio.run(
+                service.list_email_replies(
+                    PaginationParams(page=1, pageSize=25),
+                    user_id=employee_user_id,
+                    role="employee",
+                )
+            )
+
+        self.assertEqual([item["email"] for item in result["data"]], ["own@example.com"])
+
+    def test_admin_lists_own_and_assigned_employee_replies(self):
+        admin_user_id = str(ObjectId())
+        admin_employee_id = ObjectId()
+        assigned_user_id = str(ObjectId())
+        assigned_employee_id = ObjectId()
+        documents = [
+            {"_id": ObjectId(), "email": "admin@example.com", "hasReply": True,
+             "replyMarkedBy": admin_user_id, "replyMarkedByName": "Admin"},
+            {"_id": ObjectId(), "email": "assigned@example.com", "hasReply": True,
+             "replyMarkedBy": assigned_user_id, "replyMarkedByName": "Assigned"},
+            {"_id": ObjectId(), "email": "hidden@example.com", "hasReply": True,
+             "replyMarkedBy": str(ObjectId()), "replyMarkedByName": "Hidden"},
+        ]
+        master = FakeCollection(documents)
+        employees = FakeCollection([
+            {"_id": admin_employee_id, "userId": admin_user_id},
+            {"_id": assigned_employee_id, "userId": assigned_user_id,
+             "assignedToAdmin": str(admin_employee_id)},
+        ])
+
+        def get_collection(name):
+            return master if name == "email_master" else employees
+
+        with patch.object(service, "get_collection", side_effect=get_collection):
+            result = asyncio.run(
+                service.list_email_replies(
+                    PaginationParams(page=1, pageSize=25),
+                    user_id=admin_user_id,
+                    role="admin",
+                )
+            )
+
+        self.assertEqual(
+            {item["email"] for item in result["data"]},
+            {"admin@example.com", "assigned@example.com"},
+        )
+
+    def test_employee_cannot_update_another_users_reply(self):
+        employee_user_id = str(ObjectId())
+        document = {
+            "_id": ObjectId(),
+            "email": "other@example.com",
+            "hasReply": True,
+            "replyMarkedBy": str(ObjectId()),
+            "replyReason": "replied",
+        }
+        master = FakeCollection([document])
+        employees = FakeCollection([{"_id": ObjectId(), "userId": employee_user_id}])
+
+        def get_collection(name):
+            return master if name == "email_master" else employees
+
+        with patch.object(service, "get_collection", side_effect=get_collection):
+            with self.assertRaises(ForbiddenException):
+                asyncio.run(
+                    service.update_email_reply(
+                        email_id=str(document["_id"]),
+                        payload={"hasReply": False},
+                        marked_by=employee_user_id,
+                        role="employee",
+                    )
+                )
+
+    def test_list_replies_filters_reason_and_custom_updated_date_range(self):
+        documents = [
+            {
+                "_id": ObjectId(),
+                "email": "matching@example.com",
+                "hasReply": True,
+                "replyReason": "converted",
+                "updatedAt": datetime(2026, 9, 15, tzinfo=timezone.utc),
+            },
+            {
+                "_id": ObjectId(),
+                "email": "wrong-reason@example.com",
+                "hasReply": True,
+                "replyReason": "other",
+                "updatedAt": datetime(2026, 9, 15, tzinfo=timezone.utc),
+            },
+            {
+                "_id": ObjectId(),
+                "email": "outside-range@example.com",
+                "hasReply": True,
+                "replyReason": "converted",
+                "updatedAt": datetime(2026, 8, 1, tzinfo=timezone.utc),
+            },
+        ]
+        collection = FakeCollection(documents)
+
+        with patch.object(service, "get_collection", return_value=collection):
+            result = asyncio.run(
+                service.list_email_replies(
+                    PaginationParams(page=1, pageSize=25),
+                    reason="converted",
+                    updated_start_date=date(2026, 9, 1),
+                    updated_end_date=date(2026, 9, 30),
+                )
+            )
+
+        self.assertEqual([item["email"] for item in result["data"]], ["matching@example.com"])
+
+    def test_invalid_updated_time_preset_is_rejected(self):
+        with self.assertRaises(BadRequestException):
+            asyncio.run(
+                service.list_email_replies(
+                    PaginationParams(page=1, pageSize=25),
+                    updated_time="last_10_days",
+                )
+            )
+
+    def test_reply_filter_options_include_frontend_dropdown_values(self):
+        collection = FakeCollection([
+            {
+                "_id": ObjectId(),
+                "hasReply": True,
+                "replyReason": "converted",
+                "replyMarkedBy": "user-1",
+                "replyMarkedByName": "VHK",
+            }
+        ])
+
+        with patch.object(service, "get_collection", return_value=collection):
+            options = asyncio.run(service.get_reply_filter_options())
+
+        self.assertEqual(options["reasons"], [{"value": "converted", "label": "Converted"}])
+        self.assertEqual(options["replyMarkedByNames"], [{"value": "VHK", "label": "VHK"}])
+        self.assertEqual(
+            [item["value"] for item in options["updatedTimePresets"]],
+            ["last_7_days", "last_15_days", "last_30_days", "custom"],
+        )
 
     def test_update_reply_can_clear_status(self):
         document = {
