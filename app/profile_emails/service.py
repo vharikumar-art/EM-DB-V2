@@ -101,19 +101,6 @@ async def generate_list(
         employee_id=profile["employeeId"],  # Pass employee ID
     )
 
-    duplicate_records = [
-        record for record in master_records if record.get("usedInProfiles")
-    ]
-    if duplicate_records:
-        duplicate_emails = ", ".join(
-            record.get("email", "") for record in duplicate_records[:10]
-        )
-        suffix = "..." if len(duplicate_records) > 10 else ""
-        raise BadRequestException(
-            f"These email(s) already exist in another profile: "
-            f"{duplicate_emails}{suffix}"
-        )
-
     if not master_records:
         # Count total emails in master to help diagnose
         master_col = get_collection(COLLECTION)

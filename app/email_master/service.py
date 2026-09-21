@@ -780,7 +780,14 @@ async def count_filtered_emails(filters: dict) -> dict:
     Returns both total count and count respecting filter configuration.
     """
     master = get_collection(COLLECTION)
-    query: dict = {"isDuplicate": False, "hasReply": {"$ne": True}}
+    query: dict = {
+        "isDuplicate": False,
+        "hasReply": {"$ne": True},
+        "inProfileEmails": {"$ne": True},
+    }
+
+    if not filters.get("allowUsed", False):
+        query["usageCount"] = {"$in": [0, None]}
 
     if filters.get("country"):
         query["country"] = {"$in": filters["country"]}
@@ -830,18 +837,12 @@ async def query_for_profile(
     master = get_collection(COLLECTION)
     query: dict = {"isDuplicate": False, "hasReply": {"$ne": True}}
     
-    # Always skip emails that are currently locked in a profile
-    query["inProfileEmails"] = False
-    # Track if user provided explicit filters
-    has_explicit_filters = any([
-        filters.get("country"),
-        filters.get("state"),
-        filters.get("domain"),
-        filters.get("domainGroup") or filters.get("domain_group"),
-        filters.get("university"),
-        filters.get("type"),
-        filters.get("mailSource"),
-    ])
+    # Always skip emails that are currently locked in a profile. Missing legacy
+    # fields are treated as unlocked by using $ne rather than matching False.
+    query["inProfileEmails"] = {"$ne": True}
+
+    if not filters.get("allowUsed", False):
+        query["usageCount"] = {"$in": [0, None]}
 
     if filters.get("country"):
         query["country"] = {"$in": filters["country"]}
@@ -874,21 +875,13 @@ async def query_for_profile(
         else:
             query["$or"] = type_or["$or"]
 
-    # Return existing profile assignments first so the caller can raise a
-    # clear duplicate-profile error instead of silently selecting another lead.
-    duplicate_query = dict(query)
-    duplicate_query.pop("inProfileEmails", None)
-    duplicate_query["usedInProfiles.0"] = {"$exists": True}
-    duplicate_cursor = master.find(duplicate_query).limit(10)
-    duplicate_records = serialize_list([d async for d in duplicate_cursor])
-    if duplicate_records:
-        return duplicate_records
+    # A positive filter limit caps the result; zero or missing means no limit.
+    fetch_limit = filter_limit if filter_limit > 0 else None
 
-    # Determine fetch limit: use filter_limit if set, otherwise use daily_limit * 10
-    fetch_limit = filter_limit if filter_limit > 0 else daily_limit * 10
-    
-    # Fetch all matching records (including already-assigned)
-    if not filters.get("mailSource"):
+    if fetch_limit is None:
+        cursor = master.find(query)
+        all_results = serialize_list([d async for d in cursor])
+    elif not filters.get("mailSource"):
         # Fetch random sample when mailSource is empty
         pipeline = [
             {"$match": query},
@@ -910,7 +903,7 @@ async def query_for_profile(
         available_results.append(email_record)
     
     # Return only the requested limit
-    return available_results[:fetch_limit]
+    return available_results if fetch_limit is None else available_results[:fetch_limit]
 
 
 async def mark_used_in_profile(master_ids: list[str], profile_id: str, employee_id: str) -> None:
