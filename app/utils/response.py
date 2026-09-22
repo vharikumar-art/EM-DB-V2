@@ -30,6 +30,9 @@ def serialize_user_with_password(doc: dict[str, Any] | None) -> dict[str, Any] |
     result = serialize_doc(doc)
     
     if result:
+        # Keep the response stable for legacy users that may store the field as
+        # `phone` or do not have a phone number yet.
+        result.setdefault("phoneNumber", result.get("phone"))
         if result.get("role") == "admin":
             result.setdefault("accessLevel", "full")
         result.pop("password", None)
