@@ -14,12 +14,19 @@ class UserStatus(str, Enum):
     INACTIVE = "inactive"
 
 
+class AdminAccessLevel(str, Enum):
+    PARTIAL = "partial"
+    FULL = "full"
+
+
 def build_user_document(
     name: str,
     email: str,
+    phone_number: str | None,
     hashed_password: str,
     role: UserRole,
     encrypted_password: str,
+    access_level: str = AdminAccessLevel.FULL.value,
     branch: str | None = None,
     status: UserStatus = UserStatus.ACTIVE,
 ) -> dict[str, Any]:
@@ -27,6 +34,8 @@ def build_user_document(
     return {
         "name": name,
         "email": email,
+        "phoneNumber": phone_number,
+        "accessLevel": access_level,
         "password": hashed_password,
         "passwordEncrypted": encrypted_password,
         "role": role.value,

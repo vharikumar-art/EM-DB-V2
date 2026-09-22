@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query, status
 
-from app.core.dependencies import CurrentUser, get_current_user, resolve_employee_context
+from app.core.dependencies import CurrentUser, get_current_user, require_write_access, resolve_employee_context
 from app.core.exceptions import BadRequestException
 from app.email_accounts import service
 from app.email_accounts.schema import EmailAccountCreate, EmailAccountUpdate
@@ -9,7 +9,7 @@ from app.schemas.common import ApiResponse
 router = APIRouter(prefix="/email-accounts", tags=["Email Accounts"])
 
 
-@router.post("", response_model=ApiResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=ApiResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_write_access)])
 async def create_account(
     payload: EmailAccountCreate,
     employeeId: str | None = Query(default=None),
@@ -49,7 +49,7 @@ async def get_account(
     return ApiResponse(message="Account fetched", data=account)
 
 
-@router.patch("/{account_id}", response_model=ApiResponse)
+@router.patch("/{account_id}", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def update_account(
     account_id: str,
     payload: EmailAccountUpdate,
@@ -62,7 +62,7 @@ async def update_account(
     return ApiResponse(message="Account updated", data=account)
 
 
-@router.delete("/{account_id}", response_model=ApiResponse)
+@router.delete("/{account_id}", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def delete_account(
     account_id: str,
     employeeId: str | None = Query(default=None),
@@ -74,7 +74,7 @@ async def delete_account(
     return ApiResponse(message="Account deleted")
 
 
-@router.post("/{account_id}/test", response_model=ApiResponse)
+@router.post("/{account_id}/test", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def test_connection(
     account_id: str,
     employeeId: str | None = Query(default=None),
@@ -90,7 +90,7 @@ async def test_connection(
     )
 
 
-@router.post("/test-credentials/validate", response_model=ApiResponse)
+@router.post("/test-credentials/validate", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def test_credentials_directly(
     payload: EmailAccountCreate,
     current_user: CurrentUser = Depends(get_current_user),

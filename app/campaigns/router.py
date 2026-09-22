@@ -4,7 +4,7 @@ from app.campaigns import service
 from app.campaigns.model import CampaignStatus
 from app.campaigns.schema import CampaignStartRequest, CampaignScheduleRequest, SchedulerProcessResponse, SchedulerStatusResponse
 from app.campaigns.scheduler import process_scheduled_campaigns, get_scheduler_status
-from app.core.dependencies import CurrentUser, get_current_user, resolve_employee_context, require_admin
+from app.core.dependencies import CurrentUser, get_current_user, require_write_access, resolve_employee_context, require_admin
 from app.core.exceptions import BadRequestException
 from app.schemas.common import ApiResponse, PaginationParams
 from app.utils.pagination import pagination_params
@@ -17,7 +17,7 @@ router = APIRouter(prefix="/campaigns", tags=["Campaigns"])
 # Start
 # ---------------------------------------------------------------------------
 
-@router.post("/start", response_model=ApiResponse)
+@router.post("/start", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def start_campaign(
     payload: CampaignStartRequest,
     background_tasks: BackgroundTasks,
@@ -34,7 +34,7 @@ async def start_campaign(
     return ApiResponse(message="Campaign started", data=campaign)
 
 
-@router.post("/{campaign_id}/pause", response_model=ApiResponse)
+@router.post("/{campaign_id}/pause", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def pause_campaign(
     campaign_id: str,
     employeeId: str | None = Query(default=None),
@@ -47,7 +47,7 @@ async def pause_campaign(
     return ApiResponse(message="Campaign paused", data=campaign)
 
 
-@router.post("/{campaign_id}/resume", response_model=ApiResponse)
+@router.post("/{campaign_id}/resume", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def resume_campaign(
     campaign_id: str,
     background_tasks: BackgroundTasks,
@@ -95,7 +95,7 @@ async def get_campaign(
     return ApiResponse(message="Campaign fetched", data=campaign)
 
 
-@router.delete("/{campaign_id}", response_model=ApiResponse)
+@router.delete("/{campaign_id}", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def delete_campaign(
     campaign_id: str,
     employeeId: str | None = Query(default=None),
@@ -107,7 +107,7 @@ async def delete_campaign(
     return ApiResponse(message="Campaign deleted")
 
 
-@router.patch("/{campaign_id}/daily-limit", response_model=ApiResponse)
+@router.patch("/{campaign_id}/daily-limit", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def update_daily_limit(
     campaign_id: str,
     dailyLimit: int = Query(..., ge=1, le=10000, description="New daily limit"),
@@ -124,7 +124,7 @@ async def update_daily_limit(
 # Scheduling
 # ---------------------------------------------------------------------------
 
-@router.post("/schedule", response_model=ApiResponse)
+@router.post("/schedule", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def schedule_campaign(
     payload: CampaignScheduleRequest,
     employeeId: str | None = Query(default=None),
@@ -213,7 +213,7 @@ async def detect_duplicates(
     )
 
 
-@router.post("/admin/consolidate", response_model=ApiResponse)
+@router.post("/admin/consolidate", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def consolidate_duplicates(
     profileId: str = Query(...),
     keepCampaignId: str = Query(...),

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query, status
 
-from app.core.dependencies import CurrentUser, get_current_user, resolve_employee_context
+from app.core.dependencies import CurrentUser, get_current_user, require_write_access, resolve_employee_context
 from app.schemas.common import ApiResponse, PaginationParams
 from app.templates import service
 from app.templates.schema import TemplateCreate, TemplatePreviewRequest, TemplateUpdate
@@ -9,7 +9,7 @@ from app.utils.pagination import pagination_params
 router = APIRouter(prefix="/templates", tags=["Templates"])
 
 
-@router.post("", response_model=ApiResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=ApiResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_write_access)])
 async def create_template(
     payload: TemplateCreate,
     current_user: CurrentUser = Depends(get_current_user),
@@ -41,7 +41,7 @@ async def get_template(
     return ApiResponse(message="Template fetched", data=template)
 
 
-@router.patch("/{template_id}", response_model=ApiResponse)
+@router.patch("/{template_id}", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def update_template(
     template_id: str,
     payload: TemplateUpdate,
@@ -52,7 +52,7 @@ async def update_template(
     return ApiResponse(message="Template updated", data=template)
 
 
-@router.delete("/{template_id}", response_model=ApiResponse)
+@router.delete("/{template_id}", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def delete_template(
     template_id: str,
     current_user: CurrentUser = Depends(get_current_user),

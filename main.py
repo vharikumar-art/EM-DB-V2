@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.core.rate_limit import limiter
 from app.dashboard.router import router as dashboard_router
 from app.database.indexes import create_indexes
+from app.database.migrations import migrate_admin_access_levels
 from app.database.mongodb import close_mongo_connection, connect_to_mongo
 from app.email_accounts.router import router as email_accounts_router
 from app.email_master.router import router as email_master_router
@@ -49,6 +50,7 @@ async def lifespan(app: FastAPI):
     # Startup
     await connect_to_mongo()
     await create_indexes()
+    await migrate_admin_access_levels()
 
     # Start internal scheduler loop (replaces external cron)
     scheduler_task = asyncio.create_task(_scheduler_loop())

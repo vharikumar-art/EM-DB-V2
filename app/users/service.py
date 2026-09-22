@@ -1,7 +1,7 @@
-from app.core.exceptions import ConflictException, NotFoundException
+from app.core.exceptions import ConflictException, ForbiddenException, NotFoundException
 from app.core.security import encrypt_password, hash_password, verify_password
 from app.database.mongodb import get_collection
-from app.users.model import UserRole, build_user_document
+from app.users.model import AdminAccessLevel, UserRole, build_user_document
 from app.users.schema import UserCreate, UserUpdate, PasswordUpdate
 from app.core.dependencies import CurrentUser
 from app.utils.response import serialize_doc, serialize_user_with_password, serialize_list_users_with_password, to_object_id
@@ -21,9 +21,17 @@ async def create_user(payload: UserCreate, current_user: CurrentUser | None = No
         admin_employee = await get_employee_by_user_id(current_user.user_id)
         assigned_to_admin = admin_employee["id"]
 
+    access_level = payload.accessLevel.value
+    if payload.role != UserRole.ADMIN:
+        access_level = AdminAccessLevel.FULL.value
+    elif current_user and current_user.role != "super_admin":
+        access_level = AdminAccessLevel.FULL.value
+
     doc = build_user_document(
         name=payload.name,
         email=str(payload.email),
+        phone_number=str(payload.phoneNumber).strip() if payload.phoneNumber else None,
+        access_level=access_level,
         hashed_password=hash_password(payload.password),
         role=UserRole(payload.role),
         encrypted_password=encrypt_password(payload.password),
@@ -56,6 +64,8 @@ async def create_initial_super_admin(payload: UserCreate) -> dict:
     super_admin_payload = UserCreate(
         name=payload.name,
         email=payload.email,
+        phoneNumber=payload.phoneNumber,
+        accessLevel=payload.accessLevel,
         password=payload.password,
         role=UserRole.SUPER_ADMIN,
         branch=payload.branch,
@@ -200,9 +210,24 @@ async def list_users(current_user: CurrentUser) -> list[dict]:
 
 
 
-async def update_user(user_id: str, payload: UserUpdate) -> dict:
+async def update_user(user_id: str, payload: UserUpdate, current_user: CurrentUser) -> dict:
     users = get_collection(COLLECTION)
     update_data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+
+    if "accessLevel" in update_data:
+        target = await users.find_one({"_id": to_object_id(user_id)}, {"role": 1})
+        if not target:
+            raise NotFoundException("User not found")
+        if target.get("role") != UserRole.ADMIN.value:
+            raise ForbiddenException("Access level can only be changed for admin users")
+        if current_user.role != "super_admin":
+            raise ForbiddenException(
+                "Only super admins can change admin access levels"
+            )
+        update_data["accessLevel"] = update_data["accessLevel"].value
+
+    if "phoneNumber" in update_data:
+        update_data["phoneNumber"] = update_data["phoneNumber"].strip()
     
     # Extract employee-specific fields
     assigned_to_admin = update_data.pop("assignedToAdmin", None)

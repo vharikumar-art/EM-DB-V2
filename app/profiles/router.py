@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query, UploadFile, File
 
-from app.core.dependencies import CurrentUser, get_current_user, resolve_employee_context
+from app.core.dependencies import CurrentUser, get_current_user, require_write_access, resolve_employee_context
 from app.core.exceptions import BadRequestException
 from app.profiles import service
 from app.profiles.schema import ProfileCreate, ProfileTestEmailRequest, ProfileUpdate
@@ -9,7 +9,7 @@ from app.schemas.common import ApiResponse
 router = APIRouter(prefix="/profiles", tags=["Profiles"])
 
 
-@router.post("", response_model=ApiResponse)
+@router.post("", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def create_profile(
     payload: ProfileCreate,
     employeeId: str | None = Query(default=None),
@@ -47,7 +47,7 @@ async def get_profile(
     return ApiResponse(message="Profile fetched", data=profile)
 
 
-@router.patch("/{profile_id}", response_model=ApiResponse)
+@router.patch("/{profile_id}", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def update_profile(
     profile_id: str,
     payload: ProfileUpdate,
@@ -60,7 +60,7 @@ async def update_profile(
     return ApiResponse(message="Profile updated", data=profile)
 
 
-@router.post("/{profile_id}/test-email", response_model=ApiResponse)
+@router.post("/{profile_id}/test-email", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def test_profile_email(
     profile_id: str,
     payload: ProfileTestEmailRequest,
@@ -73,7 +73,7 @@ async def test_profile_email(
     return ApiResponse(message=result["message"], data=result, success=result["success"])
 
 
-@router.post("/{profile_id}/activate", response_model=ApiResponse)
+@router.post("/{profile_id}/activate", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def activate_profile(
     profile_id: str,
     employeeId: str | None = Query(default=None),
@@ -85,7 +85,7 @@ async def activate_profile(
     return ApiResponse(message="Profile activated", data=profile)
 
 
-@router.post("/{profile_id}/deactivate", response_model=ApiResponse)
+@router.post("/{profile_id}/deactivate", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def deactivate_profile(
     profile_id: str,
     employeeId: str | None = Query(default=None),
@@ -97,7 +97,7 @@ async def deactivate_profile(
     return ApiResponse(message="Profile deactivated", data=profile)
 
 
-@router.delete("/{profile_id}", response_model=ApiResponse)
+@router.delete("/{profile_id}", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def delete_profile(
     profile_id: str,
     employeeId: str | None = Query(default=None),
@@ -109,7 +109,7 @@ async def delete_profile(
     return ApiResponse(message="Profile deleted")
 
 
-@router.post("/{profile_id}/templates", response_model=ApiResponse)
+@router.post("/{profile_id}/templates", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def add_template(
     profile_id: str,
     payload: dict,  # TemplateAdd
@@ -122,7 +122,7 @@ async def add_template(
     return ApiResponse(message="Template added", data=profile)
 
 
-@router.patch("/{profile_id}/templates/{template_id}", response_model=ApiResponse)
+@router.patch("/{profile_id}/templates/{template_id}", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def update_template(
     profile_id: str,
     template_id: str,
@@ -136,7 +136,7 @@ async def update_template(
     return ApiResponse(message="Template updated", data=profile)
 
 
-@router.delete("/{profile_id}/templates/{template_id}", response_model=ApiResponse)
+@router.delete("/{profile_id}/templates/{template_id}", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def delete_template(
     profile_id: str,
     template_id: str,
@@ -149,7 +149,7 @@ async def delete_template(
     return ApiResponse(message="Template deleted", data=profile)
 
 
-@router.post("/{profile_id}/templates/{template_id}/upload-attachment", response_model=ApiResponse)
+@router.post("/{profile_id}/templates/{template_id}/upload-attachment", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def upload_attachment(
     profile_id: str,
     template_id: str,
@@ -163,7 +163,7 @@ async def upload_attachment(
     return ApiResponse(message="Attachment uploaded", data=result)
 
 
-@router.delete("/{profile_id}/templates/{template_id}/attachments/{attachment_id}", response_model=ApiResponse)
+@router.delete("/{profile_id}/templates/{template_id}/attachments/{attachment_id}", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def delete_attachment(
     profile_id: str,
     template_id: str,
@@ -177,7 +177,7 @@ async def delete_attachment(
     return ApiResponse(message="Attachment deleted", data=result)
 
 
-@router.post("/{profile_id}/attachments/upload", response_model=ApiResponse)
+@router.post("/{profile_id}/attachments/upload", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def upload_profile_attachment(
     profile_id: str,
     file: UploadFile = File(...),
@@ -190,7 +190,7 @@ async def upload_profile_attachment(
     return ApiResponse(message="Attachment uploaded", data=result)
 
 
-@router.delete("/{profile_id}/attachments/{attachment_id}", response_model=ApiResponse)
+@router.delete("/{profile_id}/attachments/{attachment_id}", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def delete_profile_attachment(
     profile_id: str,
     attachment_id: str,

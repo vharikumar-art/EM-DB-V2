@@ -1,6 +1,7 @@
 import uuid
 import re
 from datetime import date, datetime, time, timedelta, timezone
+from typing import Any
 
 from app.core.exceptions import BadRequestException, ForbiddenException
 from app.database.mongodb import get_collection
@@ -15,6 +16,19 @@ from app.utils.pagination import build_paginated_response
 from app.utils.response import serialize_doc, serialize_list, to_object_id
 
 COLLECTION = "email_master"
+
+
+def _filter_values(value: Any) -> list[str]:
+    """Normalize one filter value or a comma-separated value into a list."""
+    if value is None:
+        return []
+    values = value if isinstance(value, list) else [value]
+    return [
+        item.strip()
+        for value_item in values
+        for item in str(value_item).split(",")
+        if item.strip()
+    ]
 
 
 async def upload_file(
@@ -789,28 +803,34 @@ async def count_filtered_emails(filters: dict) -> dict:
     if not filters.get("allowUsed", False):
         query["usageCount"] = {"$in": [0, None]}
 
-    if filters.get("country"):
-        query["country"] = {"$in": filters["country"]}
-    if filters.get("state"):
-        query["state"] = {"$in": filters["state"]}
+    country_values = _filter_values(filters.get("country"))
+    state_values = _filter_values(filters.get("state"))
     domain_values = [
-        *filters.get("domain", []),
-        *(filters.get("domainGroup") or filters.get("domain_group") or []),
+        *_filter_values(filters.get("domain")),
+        *_filter_values(filters.get("domainGroup") or filters.get("domain_group")),
     ]
+    university_values = _filter_values(filters.get("university"))
+    mail_source_values = _filter_values(filters.get("mailSource"))
+    type_values = _filter_values(filters.get("type"))
+
+    if country_values:
+        query["country"] = {"$in": country_values}
+    if state_values:
+        query["state"] = {"$in": state_values}
     if domain_values:
         query["$or"] = [
             {"domain": {"$in": domain_values}},
             {"domain_group": {"$in": domain_values}},
         ]
-    if filters.get("university"):
-        query["university"] = {"$in": filters["university"]}
-    if filters.get("mailSource"):
-        query["mailSource"] = {"$in": filters["mailSource"]}
-    if filters.get("type"):
+    if university_values:
+        query["university"] = {"$in": university_values}
+    if mail_source_values:
+        query["mailSource"] = {"$in": mail_source_values}
+    if type_values:
         query.setdefault("$and", []).append({
             "$or": [
-                {"industry": {"$in": filters["type"]}},
-                {"designation": {"$in": filters["type"]}},
+                {"industry": {"$in": type_values}},
+                {"designation": {"$in": type_values}},
             ]
         })
 
@@ -844,14 +864,20 @@ async def query_for_profile(
     if not filters.get("allowUsed", False):
         query["usageCount"] = {"$in": [0, None]}
 
-    if filters.get("country"):
-        query["country"] = {"$in": filters["country"]}
-    if filters.get("state"):
-        query["state"] = {"$in": filters["state"]}
+    country_values = _filter_values(filters.get("country"))
+    state_values = _filter_values(filters.get("state"))
     domain_values = [
-        *filters.get("domain", []),
-        *(filters.get("domainGroup") or filters.get("domain_group") or []),
+        *_filter_values(filters.get("domain")),
+        *_filter_values(filters.get("domainGroup") or filters.get("domain_group")),
     ]
+    university_values = _filter_values(filters.get("university"))
+    mail_source_values = _filter_values(filters.get("mailSource"))
+    type_values = _filter_values(filters.get("type"))
+
+    if country_values:
+        query["country"] = {"$in": country_values}
+    if state_values:
+        query["state"] = {"$in": state_values}
     if domain_values:
         domain_condition = {
             "$or": [
@@ -860,15 +886,15 @@ async def query_for_profile(
             ]
         }
         query.setdefault("$and", []).append(domain_condition)
-    if filters.get("university"):
-        query["university"] = {"$in": filters["university"]}
-    if filters.get("mailSource"):
-        query["mailSource"] = {"$in": filters["mailSource"]}
-    if filters.get("type"):
+    if university_values:
+        query["university"] = {"$in": university_values}
+    if mail_source_values:
+        query["mailSource"] = {"$in": mail_source_values}
+    if type_values:
         # Append to $and if it exists, otherwise use $or directly
         type_or = {"$or": [
-            {"industry": {"$in": filters["type"]}},
-            {"designation": {"$in": filters["type"]}},
+            {"industry": {"$in": type_values}},
+            {"designation": {"$in": type_values}},
         ]}
         if "$and" in query:
             query["$and"].append(type_or)

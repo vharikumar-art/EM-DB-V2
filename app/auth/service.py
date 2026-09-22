@@ -22,6 +22,7 @@ async def login(payload: LoginRequest) -> TokenPair:
 
     user_id = str(user["_id"])
     role = user["role"]
+    access_level = user.get("accessLevel", "full")
     
     # Get employeeId if user is employee (not admin)
     employee_id = None
@@ -33,8 +34,8 @@ async def login(payload: LoginRequest) -> TokenPair:
             pass  # If employee record not found, continue without it
     
     return TokenPair(
-        accessToken=create_access_token(user_id, role, employee_id),
-        refreshToken=create_refresh_token(user_id, role, employee_id),
+        accessToken=create_access_token(user_id, role, employee_id, access_level),
+        refreshToken=create_refresh_token(user_id, role, employee_id, access_level),
         role=role,
         userId=user_id,
         employeeId=employee_id,
@@ -56,11 +57,12 @@ async def refresh_access_token(refresh_token: str) -> TokenPair:
 
     user_id = payload["sub"]
     role = payload["role"]
+    access_level = payload.get("accessLevel", "full")
     employee_id = payload.get("employee_id")  # Extract employee_id from token
 
     return TokenPair(
-        accessToken=create_access_token(user_id, role, employee_id),
-        refreshToken=create_refresh_token(user_id, role, employee_id),
+        accessToken=create_access_token(user_id, role, employee_id, access_level),
+        refreshToken=create_refresh_token(user_id, role, employee_id, access_level),
         role=role,
         userId=user_id,
         employeeId=employee_id,

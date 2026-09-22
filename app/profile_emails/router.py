@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query, status
 
-from app.core.dependencies import CurrentUser, get_current_user, resolve_employee_context
+from app.core.dependencies import CurrentUser, get_current_user, require_write_access, resolve_employee_context
 from app.profile_emails import service
 from app.profile_emails.schema import (
     GenerateListRequest,
@@ -16,7 +16,7 @@ router = APIRouter(prefix="/profile-emails", tags=["Profile Emails"])
 # Generate list
 # ---------------------------------------------------------------------------
 
-@router.post("/{profile_id}/generate", response_model=ApiResponse)
+@router.post("/{profile_id}/generate", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def generate_list(
     profile_id: str,
     payload: GenerateListRequest = None,
@@ -95,7 +95,7 @@ async def get_profile_email(
     return ApiResponse(message="Record fetched", data=record)
 
 
-@router.patch("/record/{profile_email_id}", response_model=ApiResponse)
+@router.patch("/record/{profile_email_id}", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def update_profile_email(
     profile_email_id: str,
     payload: ProfileEmailUpdate,
@@ -116,6 +116,7 @@ async def update_profile_email(
     "/record/{profile_email_id}",
     response_model=ApiResponse,
     status_code=status.HTTP_200_OK,
+    dependencies=[Depends(require_write_access)],
 )
 async def delete_profile_email(
     profile_email_id: str,
@@ -132,7 +133,7 @@ async def delete_profile_email(
 # Bulk operations
 # ---------------------------------------------------------------------------
 
-@router.post("/{profile_id}/retry-failed", response_model=ApiResponse)
+@router.post("/{profile_id}/retry-failed", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def retry_failed(
     profile_id: str,
     employeeId: str | None = Query(default=None),
@@ -144,7 +145,7 @@ async def retry_failed(
     return ApiResponse(message="Failed emails reset to pending", data=result)
 
 
-@router.delete("/{profile_id}/clear", response_model=ApiResponse)
+@router.delete("/{profile_id}/clear", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def clear_profile_list(
     profile_id: str,
     employeeId: str | None = Query(default=None),
@@ -156,7 +157,7 @@ async def clear_profile_list(
     return ApiResponse(message="Profile list cleared", data=result)
 
 
-@router.post("/bulk-delete", response_model=ApiResponse)
+@router.post("/bulk-delete", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def bulk_delete(
     ids: list[str],
     employeeId: str | None = Query(default=None),

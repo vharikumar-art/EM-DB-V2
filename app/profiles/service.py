@@ -229,12 +229,25 @@ async def send_test_email(
         raise BadRequestException("This profile has no templates configured")
 
     template = None
-    if payload.templateId:
+    if payload.templateId is not None:
+        requested_template = str(payload.templateId).strip()
+
+        # Support both persisted template IDs and array indexes (0, 1, 2, ...).
         for item in templates:
-            if str(item.get("id")) == str(payload.templateId):
+            if item.get("id") is not None and str(item["id"]) == requested_template:
                 template = item
                 break
-    if template is None:
+
+        if template is None and requested_template.isdigit():
+            template_index = int(requested_template)
+            if template_index < len(templates):
+                template = templates[template_index]
+
+        if template is None:
+            raise BadRequestException(
+                f"Template '{payload.templateId}' was not found in this profile"
+            )
+    else:
         template = random.choice(templates)
 
     sender_email = str(existing.get("gmailAccount") or "").strip()

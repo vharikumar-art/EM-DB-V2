@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, File, Query, UploadFile
 
-from app.core.dependencies import CurrentUser, get_current_user
+from app.core.dependencies import CurrentUser, get_current_user, require_write_access
 from app.emails import service
 from app.emails.schema import UploadResult
 from app.employees.service import get_employee_by_user_id
@@ -14,7 +14,7 @@ router = APIRouter(prefix="/emails", tags=["Emails"])
 async def upload_emails(
     file: UploadFile = File(...),
     insertDuplicates: bool = Query(default=False),
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(require_write_access),
 ):
     if not (file.filename.lower().endswith(".csv") or file.filename.lower().endswith(".xlsx") or file.filename.lower().endswith(".xls")):
         from app.core.exceptions import BadRequestException

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, status
 
-from app.core.dependencies import CurrentUser, get_current_user, require_admin
+from app.core.dependencies import CurrentUser, get_current_user, require_admin, require_write_access
 from app.schemas.common import ApiResponse
 from app.users import service
 from app.users.schema import UserCreate, UserUpdate, PasswordUpdate
@@ -20,7 +20,7 @@ async def create_initial_admin(payload: UserCreate):
     return ApiResponse(message="Initial admin created", data=user)
 
 
-@router.post("", response_model=ApiResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
+@router.post("", response_model=ApiResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_write_access)])
 async def create_user(payload: UserCreate, current_user: CurrentUser = Depends(get_current_user)):
     """Create a new user (admin or employee based on role field)"""
     user = await service.create_user(payload, current_user)
@@ -28,7 +28,7 @@ async def create_user(payload: UserCreate, current_user: CurrentUser = Depends(g
 
 
 # ── must be before /{user_id} routes so FastAPI doesn't treat "migrate-branch" as a user_id
-@router.post("/migrate-branch", response_model=ApiResponse, dependencies=[Depends(require_admin)])
+@router.post("/migrate-branch", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def migrate_branch():
     """Add branch 'Vellore' to all existing users that don't have it"""
     result = await service.migrate_add_branch()
@@ -56,13 +56,13 @@ async def get_user(user_id: str):
     return ApiResponse(message="User fetched", data=user)
 
 
-@router.patch("/{user_id}", response_model=ApiResponse, dependencies=[Depends(require_admin)])
-async def update_user(user_id: str, payload: UserUpdate):
-    user = await service.update_user(user_id, payload)
+@router.patch("/{user_id}", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
+async def update_user(user_id: str, payload: UserUpdate, current_user: CurrentUser = Depends(get_current_user)):
+    user = await service.update_user(user_id, payload, current_user)
     return ApiResponse(message="User updated", data=user)
 
 
-@router.patch("/{user_id}/password", response_model=ApiResponse, dependencies=[Depends(require_admin)])
+@router.patch("/{user_id}/password", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def update_user_password(user_id: str, payload: PasswordUpdate):
     user = await service.update_password(user_id, payload)
     return ApiResponse(message="Password updated", data=user)

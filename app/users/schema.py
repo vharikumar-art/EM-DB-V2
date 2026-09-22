@@ -1,11 +1,13 @@
 from pydantic import BaseModel, EmailStr, Field
 
-from app.users.model import UserRole, UserStatus
+from app.users.model import AdminAccessLevel, UserRole, UserStatus
 
 
 class UserCreate(BaseModel):
     name: str = Field(min_length=2, max_length=100)
     email: EmailStr
+    phoneNumber: str | None = Field(default=None, min_length=7, max_length=20)
+    accessLevel: AdminAccessLevel = AdminAccessLevel.FULL
     password: str = Field(min_length=8, max_length=128)
     role: UserRole = UserRole.EMPLOYEE
     branch: str | None = Field(default=None, max_length=100, description="Branch name (department, location, etc.)")
@@ -15,6 +17,8 @@ class UserCreate(BaseModel):
 
 class UserUpdate(BaseModel):
     name: str | None = None
+    phoneNumber: str | None = Field(default=None, min_length=7, max_length=20)
+    accessLevel: AdminAccessLevel | None = None
     status: UserStatus | None = None
     branch: str | None = None
     assignedToAdmin: str | None = None
@@ -24,6 +28,8 @@ class UserOut(BaseModel):
     id: str
     name: str
     email: EmailStr
+    phoneNumber: str | None = None
+    accessLevel: AdminAccessLevel = AdminAccessLevel.FULL
     role: UserRole
     status: UserStatus
     branch: str | None = None

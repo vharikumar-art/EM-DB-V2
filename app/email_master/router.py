@@ -2,7 +2,7 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
 
-from app.core.dependencies import CurrentUser, get_current_user, require_admin, require_super_admin
+from app.core.dependencies import CurrentUser, get_current_user, require_admin, require_super_admin, require_write_access
 from app.core.exceptions import BadRequestException
 from app.email_master import service
 from app.email_master.schema import MarkReplyRequest, UpdateReplyRequest, UploadResult
@@ -19,7 +19,7 @@ async def upload_emails(
     file: UploadFile = File(...),
     insertDuplicates: bool = Query(default=False),
     mailSource: str | None = Query(default=None, description="Mail source: Google Scholar, University, Other"),
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(require_write_access),
 ):
     """Upload email CSV/Excel file to global pool. Tracks who uploaded."""
     if not any(file.filename.lower().endswith(ext) for ext in _ALLOWED_EXTENSIONS):
@@ -78,7 +78,7 @@ async def count_filtered_emails(
 @router.post("/replies", response_model=ApiResponse)
 async def mark_email_reply(
     payload: MarkReplyRequest,
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(require_write_access),
 ):
     """Mark all matching email-master records as having received a reply."""
     record = await service.mark_email_reply(
@@ -125,7 +125,7 @@ async def list_email_replies(
 async def update_email_reply(
     email_id: str,
     payload: UpdateReplyRequest,
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(require_write_access),
 ):
     """Edit or clear reply tracking for one email-master record."""
     record = await service.update_email_reply(

@@ -10,9 +10,10 @@ bearer_scheme = HTTPBearer(auto_error=False)
 
 
 class CurrentUser:
-    def __init__(self, user_id: str, role: str):
+    def __init__(self, user_id: str, role: str, access_level: str = "full"):
         self.user_id = user_id
         self.role = role
+        self.access_level = access_level if role == "admin" else "full"
 
 
 async def get_current_user(
@@ -30,10 +31,11 @@ async def get_current_user(
 
     user_id = payload.get("sub")
     role = payload.get("role")
+    access_level = payload.get("accessLevel", "full")
     if not user_id or not role:
         raise UnauthorizedException("Malformed token payload")
 
-    return CurrentUser(user_id=user_id, role=role)
+    return CurrentUser(user_id=user_id, role=role, access_level=access_level)
 
 
 def require_roles(*allowed_roles: str):
@@ -50,6 +52,14 @@ def require_roles(*allowed_roles: str):
 require_super_admin = require_roles("super_admin")
 require_admin = require_roles("super_admin", "admin")
 require_any_role = require_roles("super_admin", "admin", "employee")
+
+
+async def require_write_access(
+    current_user: CurrentUser = Depends(get_current_user),
+) -> CurrentUser:
+    if current_user.role == "admin" and current_user.access_level == "partial":
+        raise ForbiddenException("Partial-access admins have read-only access")
+    return current_user
 
 
 

@@ -30,6 +30,8 @@ def serialize_user_with_password(doc: dict[str, Any] | None) -> dict[str, Any] |
     result = serialize_doc(doc)
     
     if result:
+        if result.get("role") == "admin":
+            result.setdefault("accessLevel", "full")
         result.pop("password", None)
         
         if "passwordEncrypted" in result:
