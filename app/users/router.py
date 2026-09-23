@@ -71,7 +71,7 @@ async def update_user_password(user_id: str, payload: PasswordUpdate):
 @router.delete("/{user_id}", response_model=ApiResponse)
 async def delete_user(
     user_id: str,
-    current_user: CurrentUser = Depends(require_admin),
+    current_user: CurrentUser = Depends(require_write_access),
 ):
     await service.delete_user(user_id, actor_role=current_user.role)
     return ApiResponse(message="User deleted")
