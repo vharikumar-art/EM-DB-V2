@@ -57,8 +57,18 @@ require_any_role = require_roles("super_admin", "admin", "employee")
 async def require_write_access(
     current_user: CurrentUser = Depends(get_current_user),
 ) -> CurrentUser:
+    # Partial admins may write their own employee data. Route-level write
+    # resolvers enforce that they cannot target assigned employees.
+    return current_user
+
+
+async def require_full_admin(
+    current_user: CurrentUser = Depends(get_current_user),
+) -> CurrentUser:
+    if current_user.role not in {"admin", "super_admin"}:
+        raise ForbiddenException("Admin access is required")
     if current_user.role == "admin" and current_user.access_level == "partial":
-        raise ForbiddenException("Partial-access admins have read-only access")
+        raise ForbiddenException("Full access is required for this admin operation")
     return current_user
 
 
@@ -104,6 +114,35 @@ async def resolve_employee_context(
             return allowed_ids, True
             
     return employee_id, False
+
+
+async def resolve_write_employee_context(
+    current_user: CurrentUser,
+    employee_id_param: str | None = None,
+) -> tuple[str | None, bool]:
+    """Resolve a mutation target, limiting partial admins to their own data."""
+    from app.employees.service import get_employee_by_user_id
+
+    if current_user.role == "super_admin":
+        return employee_id_param, True
+
+    try:
+        employee = await get_employee_by_user_id(current_user.user_id)
+        own_employee_id = str(employee.get("id", current_user.user_id))
+    except Exception:
+        own_employee_id = current_user.user_id
+
+    if current_user.role == "admin" and current_user.access_level == "partial":
+        if employee_id_param and employee_id_param != own_employee_id:
+            raise ForbiddenException(
+                "Partial-access admins cannot modify assigned employee data"
+            )
+        return own_employee_id, False
+
+    if current_user.role == "admin":
+        return await resolve_employee_context(current_user, employee_id_param)
+
+    return own_employee_id, False
 
 
 async def validate_data_ownership(

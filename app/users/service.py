@@ -228,6 +228,12 @@ async def update_user(user_id: str, payload: UserUpdate, current_user: CurrentUs
 
     if "phoneNumber" in update_data:
         update_data["phoneNumber"] = update_data["phoneNumber"].strip()
+
+    if current_user.role == "admin" and current_user.access_level == "partial":
+        if user_id != current_user.user_id:
+            raise ForbiddenException(
+                "Partial-access admins cannot modify assigned employee data"
+            )
     
     # Extract employee-specific fields
     assigned_to_admin = update_data.pop("assignedToAdmin", None)
@@ -266,7 +272,11 @@ async def update_user(user_id: str, payload: UserUpdate, current_user: CurrentUs
     return serialize_user_with_password(result)
 
 
-async def delete_user(user_id: str, actor_role: str | None = None) -> None:
+async def delete_user(
+    user_id: str,
+    actor_role: str | None = None,
+    actor_id: str | None = None,
+) -> None:
     users = get_collection(COLLECTION)
     employees = get_collection("employees")
     user = await users.find_one(

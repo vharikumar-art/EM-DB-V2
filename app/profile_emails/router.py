@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query, status
 
-from app.core.dependencies import CurrentUser, get_current_user, require_write_access, resolve_employee_context
+from app.core.dependencies import CurrentUser, get_current_user, require_write_access, resolve_employee_context, resolve_write_employee_context
 from app.profile_emails import service
 from app.profile_emails.schema import (
     GenerateListRequest,
@@ -27,7 +27,7 @@ async def generate_list(
     Apply profile filters against email_master and populate the working list.
     Existing PENDING rows are replaced; SENT / FAILED rows are preserved.
     """
-    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
     payload = payload or GenerateListRequest()
     result = await service.generate_list(
         profile_id=profile_id,
@@ -102,7 +102,7 @@ async def update_profile_email(
     employeeId: str | None = Query(default=None),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
     updated = await service.update_profile_email(
         profile_email_id,
         employee_id,
@@ -124,7 +124,7 @@ async def delete_profile_email(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Delete a single row. Email Master is never affected."""
-    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
     await service.delete_profile_email(profile_email_id, employee_id, is_admin)
     return ApiResponse(message="Record deleted")
 
@@ -140,7 +140,7 @@ async def retry_failed(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Reset all FAILED emails in this profile to PENDING for re-sending."""
-    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
     result = await service.retry_failed(profile_id, employee_id, is_admin)
     return ApiResponse(message="Failed emails reset to pending", data=result)
 
@@ -152,7 +152,7 @@ async def clear_profile_list(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Delete the entire working list for this profile. Email Master is never affected."""
-    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
     result = await service.clear_profile_list(profile_id, employee_id, is_admin)
     return ApiResponse(message="Profile list cleared", data=result)
 
@@ -164,6 +164,6 @@ async def bulk_delete(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Delete multiple profile_email rows by ID."""
-    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
     result = await service.bulk_delete(ids, employee_id, is_admin)
     return ApiResponse(message="Records deleted", data=result)

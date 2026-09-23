@@ -4,7 +4,7 @@ from app.campaigns import service
 from app.campaigns.model import CampaignStatus
 from app.campaigns.schema import CampaignStartRequest, CampaignScheduleRequest, SchedulerProcessResponse, SchedulerStatusResponse
 from app.campaigns.scheduler import process_scheduled_campaigns, get_scheduler_status
-from app.core.dependencies import CurrentUser, get_current_user, require_write_access, resolve_employee_context, require_admin
+from app.core.dependencies import CurrentUser, get_current_user, require_write_access, resolve_employee_context, resolve_write_employee_context, require_admin
 from app.core.exceptions import BadRequestException
 from app.schemas.common import ApiResponse, PaginationParams
 from app.utils.pagination import pagination_params
@@ -25,7 +25,7 @@ async def start_campaign(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Create a campaign record and kick off async send loop."""
-    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
     campaign = await service.create_campaign(payload, employee_id, is_admin)
 
     from app.campaign_engine.worker import run_campaign
@@ -40,7 +40,7 @@ async def pause_campaign(
     employeeId: str | None = Query(default=None),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
     campaign = await service.set_status(
         campaign_id, CampaignStatus.PAUSED, employee_id, is_admin
     )
@@ -54,7 +54,7 @@ async def resume_campaign(
     employeeId: str | None = Query(default=None),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
     campaign = await service.set_status(
         campaign_id, CampaignStatus.RUNNING, employee_id, is_admin
     )
@@ -102,7 +102,7 @@ async def delete_campaign(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Delete campaign. Can't delete running campaigns. Admins can specify employeeId."""
-    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
     await service.delete_campaign(campaign_id, employee_id, is_admin)
     return ApiResponse(message="Campaign deleted")
 
@@ -115,7 +115,7 @@ async def update_daily_limit(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Update the daily limit for a campaign."""
-    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
     campaign = await service.update_daily_limit(campaign_id, dailyLimit, employee_id, is_admin)
     return ApiResponse(message="Daily limit updated", data=campaign)
 
@@ -136,7 +136,7 @@ async def schedule_campaign(
     The campaign will not execute immediately. It will be queued and executed
     by the Linux Cron scheduler when the scheduled_for time arrives.
     """
-    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
     campaign = await service.create_scheduled_campaign(payload, employee_id, is_admin)
     return ApiResponse(message="Campaign scheduled successfully", data=campaign)
 

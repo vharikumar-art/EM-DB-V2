@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query, status
 
-from app.core.dependencies import CurrentUser, get_current_user, require_write_access, resolve_employee_context
+from app.core.dependencies import CurrentUser, get_current_user, require_write_access, resolve_employee_context, resolve_write_employee_context
 from app.core.exceptions import BadRequestException
 from app.email_accounts import service
 from app.email_accounts.schema import EmailAccountCreate, EmailAccountUpdate
@@ -21,7 +21,7 @@ async def create_account(
     if current_user.role == "admin" and not resolved_employee_id:
         raise BadRequestException("Admins must specify employeeId")
 
-    employee_id, is_admin = await resolve_employee_context(current_user, resolved_employee_id)
+    employee_id, is_admin = await resolve_write_employee_context(current_user, resolved_employee_id)
     account = await service.create_account(employee_id, payload)
     return ApiResponse(message="Email account added", data=account)
 
@@ -57,7 +57,7 @@ async def update_account(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Update email account. Admins can specify employeeId."""
-    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
     account = await service.update_account(account_id, employee_id, is_admin, payload)
     return ApiResponse(message="Account updated", data=account)
 

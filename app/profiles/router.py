@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query, UploadFile, File
 
-from app.core.dependencies import CurrentUser, get_current_user, require_write_access, resolve_employee_context
+from app.core.dependencies import CurrentUser, get_current_user, require_write_access, resolve_employee_context, resolve_write_employee_context
 from app.core.exceptions import BadRequestException
 from app.profiles import service
 from app.profiles.schema import ProfileCreate, ProfileTestEmailRequest, ProfileUpdate
@@ -55,7 +55,7 @@ async def update_profile(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Update profile. Admins can specify employeeId."""
-    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
     profile = await service.update_profile(profile_id, employee_id, is_admin, payload)
     return ApiResponse(message="Profile updated", data=profile)
 
@@ -68,7 +68,7 @@ async def test_profile_email(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Send a real test email using the profile's configured sender, chosen template, and attachments."""
-    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
     result = await service.send_test_email(profile_id, employee_id, is_admin, payload)
     return ApiResponse(message=result["message"], data=result, success=result["success"])
 
@@ -80,7 +80,7 @@ async def activate_profile(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Activate profile. Admins can specify employeeId."""
-    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
     profile = await service.set_active_status(profile_id, employee_id, is_admin, True)
     return ApiResponse(message="Profile activated", data=profile)
 
@@ -92,7 +92,7 @@ async def deactivate_profile(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Deactivate profile. Admins can specify employeeId."""
-    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
     profile = await service.set_active_status(profile_id, employee_id, is_admin, False)
     return ApiResponse(message="Profile deactivated", data=profile)
 
@@ -104,7 +104,7 @@ async def delete_profile(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Delete profile. Admins can specify employeeId."""
-    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
     await service.delete_profile(profile_id, employee_id, is_admin)
     return ApiResponse(message="Profile deleted")
 
@@ -117,7 +117,7 @@ async def add_template(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Add a new template to a profile"""
-    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
     profile = await service.add_template(profile_id, employee_id, is_admin, payload)
     return ApiResponse(message="Template added", data=profile)
 
@@ -131,7 +131,7 @@ async def update_template(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Update a template in a profile"""
-    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
     profile = await service.update_template(profile_id, employee_id, is_admin, template_id, payload)
     return ApiResponse(message="Template updated", data=profile)
 
@@ -144,7 +144,7 @@ async def delete_template(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Delete a template from a profile"""
-    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
     profile = await service.delete_template(profile_id, employee_id, is_admin, template_id)
     return ApiResponse(message="Template deleted", data=profile)
 
@@ -158,7 +158,7 @@ async def upload_attachment(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Upload an attachment file for a template"""
-    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
     result = await service.upload_attachment(profile_id, template_id, file, employee_id, is_admin)
     return ApiResponse(message="Attachment uploaded", data=result)
 

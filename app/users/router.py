@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, status
 
-from app.core.dependencies import CurrentUser, get_current_user, require_admin, require_write_access
+from app.core.dependencies import CurrentUser, get_current_user, require_admin, require_full_admin, require_write_access
 from app.schemas.common import ApiResponse
 from app.users import service
 from app.users.schema import UserCreate, UserUpdate, PasswordUpdate
@@ -20,7 +20,7 @@ async def create_initial_admin(payload: UserCreate):
     return ApiResponse(message="Initial admin created", data=user)
 
 
-@router.post("", response_model=ApiResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_write_access)])
+@router.post("", response_model=ApiResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_full_admin)])
 async def create_user(payload: UserCreate, current_user: CurrentUser = Depends(get_current_user)):
     """Create a new user (admin or employee based on role field)"""
     user = await service.create_user(payload, current_user)
@@ -28,7 +28,7 @@ async def create_user(payload: UserCreate, current_user: CurrentUser = Depends(g
 
 
 # ── must be before /{user_id} routes so FastAPI doesn't treat "migrate-branch" as a user_id
-@router.post("/migrate-branch", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
+@router.post("/migrate-branch", response_model=ApiResponse, dependencies=[Depends(require_full_admin)])
 async def migrate_branch():
     """Add branch 'Vellore' to all existing users that don't have it"""
     result = await service.migrate_add_branch()
@@ -71,7 +71,7 @@ async def update_user_password(user_id: str, payload: PasswordUpdate):
 @router.delete("/{user_id}", response_model=ApiResponse)
 async def delete_user(
     user_id: str,
-    current_user: CurrentUser = Depends(require_write_access),
+    current_user: CurrentUser = Depends(require_full_admin),
 ):
-    await service.delete_user(user_id, actor_role=current_user.role)
+    await service.delete_user(user_id, actor_role=current_user.role, actor_id=current_user.user_id)
     return ApiResponse(message="User deleted")

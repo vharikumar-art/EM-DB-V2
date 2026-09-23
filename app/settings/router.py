@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, status
 
-from app.core.dependencies import CurrentUser, get_current_user, require_admin, require_write_access
+from app.core.dependencies import CurrentUser, get_current_user, require_admin, require_full_admin
 from app.schemas.common import ApiResponse
 from app.settings.schema import SettingCreate, SettingUpdate
 from app.settings.service import (
@@ -16,7 +16,7 @@ from app.settings.service import (
 router = APIRouter(prefix="/settings", tags=["Settings"])
 
 
-@router.post("", response_model=ApiResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_write_access)])
+@router.post("", response_model=ApiResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_full_admin)])
 async def create_settings(payload: SettingCreate, current_user: CurrentUser = Depends(get_current_user)):
     setting = await create_setting(payload)
     return ApiResponse(message="Setting created", data=setting)
@@ -46,13 +46,13 @@ async def get_setting_route(setting_id: str, current_user: CurrentUser = Depends
     return ApiResponse(message="Setting fetched", data=setting)
 
 
-@router.patch("/{setting_id}", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
+@router.patch("/{setting_id}", response_model=ApiResponse, dependencies=[Depends(require_full_admin)])
 async def update_settings_route(setting_id: str, payload: SettingUpdate, current_user: CurrentUser = Depends(get_current_user)):
     setting = await update_setting(setting_id, payload)
     return ApiResponse(message="Setting updated", data=setting)
 
 
-@router.delete("/{setting_id}", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
+@router.delete("/{setting_id}", response_model=ApiResponse, dependencies=[Depends(require_full_admin)])
 async def delete_settings_route(setting_id: str, current_user: CurrentUser = Depends(get_current_user)):
     await delete_setting(setting_id)
     return ApiResponse(message="Setting deleted")
