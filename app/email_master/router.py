@@ -49,6 +49,9 @@ async def upload_emails(
         insert_duplicates=insertDuplicates,
         mail_source=mailSource,
     )
+    # Invalidate the dropdown cache so the new upload's countries/domains
+    # appear immediately the next time the dropdown endpoint is called.
+    service.invalidate_dropdown_cache()
     return ApiResponse(message="File processed", data=result)
 
 
@@ -272,11 +275,7 @@ async def list_emails(
         search=search,
     )
     
-    # Get dropdown options to include in response
-    options = await service.get_dropdown_options()
-    
     return ApiResponse(
         message="Emails fetched",
         data=result,
-        options=options,
     )

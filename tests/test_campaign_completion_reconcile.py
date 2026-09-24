@@ -7,7 +7,7 @@ from bson import ObjectId
 from app.campaign_engine import worker
 
 
-def test_worker_keeps_recurring_campaign_scheduled_until_pending_is_zero(monkeypatch):
+def test_worker_stops_recurring_campaign_at_daily_limit(monkeypatch):
     campaign_id = str(ObjectId())
     profile_id = str(ObjectId())
     employee_id = str(ObjectId())
@@ -60,11 +60,10 @@ def test_worker_keeps_recurring_campaign_scheduled_until_pending_is_zero(monkeyp
         return SimpleNamespace(success=True, thread_id=None, message_id="msg-1", error=None)
 
     async def fake_mark_sending(pe_id):
-        return None
+        return True
 
     async def fake_mark_sent(pe_id, thread_id, message_id, template_id=None):
-        campaign_doc["sent"] += 1
-        campaign_doc["pending"] = max(0, campaign_doc["pending"] - 1)
+        return None
 
     async def fake_increment_counters(campaign_id_arg, sent=0, failed=0, skipped=0):
         campaign_doc["sent"] += sent
@@ -93,8 +92,8 @@ def test_worker_keeps_recurring_campaign_scheduled_until_pending_is_zero(monkeyp
 
     asyncio.run(worker._run(campaign_id))
 
-    assert campaign_doc["pending"] == 0
-    assert campaign_doc["status"] == "completed"
+    assert campaign_doc["pending"] == 400
+    assert campaign_doc["status"] == "running"
     campaign_id = str(ObjectId())
     profile_id = str(ObjectId())
     employee_id = str(ObjectId())
@@ -171,7 +170,7 @@ def test_worker_keeps_recurring_campaign_scheduled_until_pending_is_zero(monkeyp
         return SimpleNamespace(success=True, thread_id=None, message_id="msg-1", error=None)
 
     async def fake_mark_sending(pe_id):
-        return None
+        return True
 
     async def fake_mark_sent(pe_id, thread_id, message_id, template_id=None):
         return None

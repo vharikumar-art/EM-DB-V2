@@ -17,6 +17,20 @@ from app.utils.response import serialize_doc, serialize_list, to_object_id
 
 COLLECTION = "email_master"
 
+# ── In-memory cache for dropdown options ─────────────────────────────────────
+# These values rarely change (only when a new CSV is uploaded), so we cache
+# the result for 30 minutes to avoid full-collection scans on every page load.
+_DROPDOWN_CACHE: dict | None = None
+_DROPDOWN_CACHE_AT: datetime | None = None
+_DROPDOWN_CACHE_TTL_SECONDS = 30 * 60  # 30 minutes
+
+
+def invalidate_dropdown_cache() -> None:
+    """Call this after a new upload so the cache refreshes on next request."""
+    global _DROPDOWN_CACHE, _DROPDOWN_CACHE_AT
+    _DROPDOWN_CACHE = None
+    _DROPDOWN_CACHE_AT = None
+
 
 def _filter_values(value: Any) -> list[str]:
     """Normalize one filter value or a comma-separated value into a list."""
@@ -191,7 +205,12 @@ async def list_emails(
             {"country": {"$regex": search, "$options": "i"}},
         ]
 
-    total = await master.count_documents(query)
+    # Use fast estimated count when there are no filters applied
+    if query:
+        total = await master.count_documents(query)
+    else:
+        total = await master.estimated_document_count()
+
     cursor = (
         master.find(query)
         .sort("uploadedDate", -1)
@@ -200,7 +219,7 @@ async def list_emails(
     )
     docs = serialize_list([d async for d in cursor])
     
-    # Enrich with employee names
+    # Enrich with employee names (batch lookups — no N+1)
     docs = await _enrich_emails_with_employee_names(docs)
     
     return build_paginated_response(docs, total, params)
@@ -208,85 +227,89 @@ async def list_emails(
 
 async def _enrich_emails_with_employee_names(docs: list[dict]) -> list[dict]:
     """Populate employee names from usedInProfiles or usedByEmployeeId.
-    
-    The employeeId stored can be either:
-    - employees._id  (assigned after profile email generation)
-    - users._id      (assigned directly in older records)
-    We try both to resolve the name.
+
+    Uses batched DB lookups (2 queries total) instead of N+1 individual queries.
     """
     if not docs:
         return docs
-    
+
     from bson import ObjectId
     users_col = get_collection("users")
     employees_col = get_collection("employees")
-    
-    # Cache for resolved names (keyed by raw id string)
+
+    # ── Step 1: Collect all unique employee/user IDs across the page ──────────
+    all_ids: set[str] = set()
+    for doc in docs:
+        if old_id := doc.get("usedByEmployeeId"):
+            all_ids.add(str(old_id))
+        for up in doc.get("usedInProfiles", []):
+            if uid := up.get("employeeId"):
+                all_ids.add(str(uid))
+        for eid in doc.get("usedByEmployeeIds", []):
+            all_ids.add(str(eid))
+
+    valid_object_ids = [ObjectId(i) for i in all_ids if ObjectId.is_valid(i)]
+
+    # ── Step 2: Batch-fetch employees and users in exactly 2 queries ──────────
     name_cache: dict[str, str] = {}
-    
-    async def resolve_name(id_str: str) -> str:
-        """Try employees._id first, then users._id directly."""
-        if id_str in name_cache:
-            return name_cache[id_str]
-        
-        if not ObjectId.is_valid(id_str):
-            name_cache[id_str] = id_str
-            return id_str
-        
-        emp_name = None
-        
-        # 1) Try as employees._id → get linked user name
-        try:
-            emp_doc = await employees_col.find_one({"_id": ObjectId(id_str)})
-            if emp_doc and emp_doc.get("userId"):
-                user_doc = await users_col.find_one({"_id": ObjectId(emp_doc["userId"])})
-                if user_doc:
-                    emp_name = user_doc.get("name")
-        except Exception:
-            pass
-        
-        # 2) Try as users._id directly
-        if not emp_name:
-            try:
-                user_doc = await users_col.find_one({"_id": ObjectId(id_str)})
-                if user_doc:
-                    emp_name = user_doc.get("name")
-            except Exception:
-                pass
-        
-        # 3) Fall back to raw ID
-        result = emp_name or id_str
-        name_cache[id_str] = result
-        return result
-    
+
+    if valid_object_ids:
+        # employees._id → userId mapping
+        emp_to_user: dict[str, str] = {}
+        async for emp in employees_col.find(
+            {"_id": {"$in": valid_object_ids}}, {"_id": 1, "userId": 1}
+        ):
+            emp_to_user[str(emp["_id"])] = str(emp["userId"]) if emp.get("userId") else ""
+
+        # Gather all user IDs we need to resolve (direct IDs + linked from employees)
+        all_user_ids = [
+            ObjectId(uid)
+            for uid in {*[v for v in emp_to_user.values() if v], *all_ids}
+            if ObjectId.is_valid(uid)
+        ]
+        user_names: dict[str, str] = {}
+        async for user in users_col.find(
+            {"_id": {"$in": all_user_ids}}, {"_id": 1, "name": 1}
+        ):
+            user_names[str(user["_id"])] = user.get("name") or ""
+
+        # Build the final cache: raw id → display name
+        for raw_id in all_ids:
+            if not ObjectId.is_valid(raw_id):
+                name_cache[raw_id] = raw_id
+                continue
+            # Try as employee ID first
+            linked_user_id = emp_to_user.get(raw_id)
+            name = (user_names.get(linked_user_id) if linked_user_id else None) \
+                or user_names.get(raw_id) \
+                or raw_id
+            name_cache[raw_id] = name
+
+    # ── Step 3: Annotate docs using the cache (no more DB calls) ─────────────
     for doc in docs:
         if "usedByEmployeeIds" not in doc:
             doc["usedByEmployeeIds"] = []
         if "usedByEmployeeNames" not in doc:
             doc["usedByEmployeeNames"] = []
-            
+
         old_id = doc.get("usedByEmployeeId")
         old_name = doc.get("usedByEmployeeName")
-        
-        # Populate from old single fields if lists are empty
+
         if not doc["usedByEmployeeIds"] and old_id:
             id_str = str(old_id)
             doc["usedByEmployeeIds"].append(id_str)
-            if old_name:
-                doc["usedByEmployeeNames"].append(old_name)
-            else:
-                doc["usedByEmployeeNames"].append(await resolve_name(id_str))
-                
-        # Fallback from usedInProfiles if still empty
+            doc["usedByEmployeeNames"].append(
+                old_name or name_cache.get(id_str, id_str)
+            )
+
         if not doc["usedByEmployeeIds"]:
-            used_profiles = doc.get("usedInProfiles", [])
-            for up in used_profiles:
+            for up in doc.get("usedInProfiles", []):
                 uid = up.get("employeeId")
                 if uid and str(uid) not in doc["usedByEmployeeIds"]:
                     id_str = str(uid)
                     doc["usedByEmployeeIds"].append(id_str)
-                    doc["usedByEmployeeNames"].append(await resolve_name(id_str))
-    
+                    doc["usedByEmployeeNames"].append(name_cache.get(id_str, id_str))
+
     return docs
 
 
@@ -659,86 +682,131 @@ async def delete_email(email_id: str) -> None:
 
 
 async def get_dropdown_options() -> dict:
-    """Returns distinct filter values for the GLOBAL email pool."""
+    """Returns distinct filter values for the GLOBAL email pool.
+
+    Results are cached in-memory for 30 minutes to avoid repeated full-collection
+    scans on a potentially large email_master table.
+    """
+    global _DROPDOWN_CACHE, _DROPDOWN_CACHE_AT
+
+    # ── Serve from cache if still fresh ──────────────────────────────────────
+    now = datetime.now(timezone.utc)
+    if _DROPDOWN_CACHE is not None and _DROPDOWN_CACHE_AT is not None:
+        age = (now - _DROPDOWN_CACHE_AT).total_seconds()
+        if age < _DROPDOWN_CACHE_TTL_SECONDS:
+            return _DROPDOWN_CACHE
+
+    from bson import ObjectId
     master = get_collection(COLLECTION)
     employees_col = get_collection("employees")
     users_col = get_collection("users")
 
-    domains = await master.distinct("domain", {"isDuplicate": False})
-    domain_groups = await master.distinct("domain_group", {"isDuplicate": False})
-    countries = await master.distinct("country", {"isDuplicate": False})
-    states = await master.distinct("state", {"isDuplicate": False})
-    universities = await master.distinct("university", {"isDuplicate": False})
-    designations = await master.distinct("designation", {"isDuplicate": False})
-    mail_sources = await master.distinct("mailSource", {"isDuplicate": False})
-    
-    # Get all uploaders with their names
-    uploaders_data = {}
-    cursor = master.find({}, {"uploadedBy": 1, "uploadedByName": 1})
-    async for doc in cursor:
+    # ── Run all distinct() queries concurrently ───────────────────────────────
+    import asyncio
+    no_dup = {"isDuplicate": False}
+    (
+        domains,
+        domain_groups,
+        countries,
+        states,
+        universities,
+        designations,
+        mail_sources,
+    ) = await asyncio.gather(
+        master.distinct("domain", no_dup),
+        master.distinct("domain_group", no_dup),
+        master.distinct("country", no_dup),
+        master.distinct("state", no_dup),
+        master.distinct("university", no_dup),
+        master.distinct("designation", no_dup),
+        master.distinct("mailSource", no_dup),
+    )
+
+    # ── Collect uploaders (stored directly on the document) ───────────────────
+    uploaders_data: dict[str, str] = {}
+    async for doc in master.find(
+        {"uploadedBy": {"$exists": True, "$ne": None}},
+        {"uploadedBy": 1, "uploadedByName": 1},
+    ):
         uid = doc.get("uploadedBy")
         uname = doc.get("uploadedByName") or uid
         if uid and uid not in uploaders_data:
             uploaders_data[uid] = uname
 
-    # Get all employees who have used emails
-    used_by_employees_data = {}
-    
-    # From usedInProfiles
-    cursor = master.find(
-        {"usedInProfiles": {"$exists": True, "$ne": []}},
-        {"usedInProfiles": 1}
-    )
-    async for doc in cursor:
-        used_profiles = doc.get("usedInProfiles", [])
-        for profile in used_profiles:
-            emp_id = profile.get("employeeId")
-            if emp_id and emp_id not in used_by_employees_data:
-                # Try to get employee name
-                try:
-                    employee = await employees_col.find_one({"_id": emp_id})
-                    if employee:
-                        user_id = employee.get("userId")
-                        if user_id:
-                            user = await users_col.find_one({"_id": user_id})
-                            if user:
-                                emp_name = user.get("name", emp_id)
-                                used_by_employees_data[emp_id] = emp_name
-                                continue
-                except Exception:
-                    pass
-                # Fallback to ID
-                used_by_employees_data[emp_id] = emp_id
-    
-    # From usedByEmployeeId field (Legacy)
-    cursor = master.find(
+    # ── Collect all unique employee IDs that have used emails ─────────────────
+    raw_used_emp: dict[str, str | None] = {}  # id → stored name (may be None)
+
+    # From usedByEmployeeId (legacy single field)
+    async for doc in master.find(
         {"usedByEmployeeId": {"$exists": True, "$ne": None}},
-        {"usedByEmployeeId": 1, "usedByEmployeeName": 1}
-    )
-    async for doc in cursor:
-        emp_id = doc.get("usedByEmployeeId")
-        emp_name = doc.get("usedByEmployeeName")
-        if emp_id and emp_id not in used_by_employees_data:
-            used_by_employees_data[emp_id] = emp_name or emp_id
-            
-    # From usedByEmployeeIds field (New)
-    cursor = master.find(
+        {"usedByEmployeeId": 1, "usedByEmployeeName": 1},
+    ):
+        eid = doc.get("usedByEmployeeId")
+        if eid and str(eid) not in raw_used_emp:
+            raw_used_emp[str(eid)] = doc.get("usedByEmployeeName")
+
+    # From usedByEmployeeIds (new multi field)
+    async for doc in master.find(
         {"usedByEmployeeIds": {"$exists": True, "$not": {"$size": 0}}},
-        {"usedByEmployeeIds": 1, "usedByEmployeeNames": 1}
-    )
-    async for doc in cursor:
+        {"usedByEmployeeIds": 1, "usedByEmployeeNames": 1},
+    ):
         emp_ids = doc.get("usedByEmployeeIds", [])
         emp_names = doc.get("usedByEmployeeNames", [])
-        for i, emp_id in enumerate(emp_ids):
-            if emp_id and emp_id not in used_by_employees_data:
-                emp_name = emp_names[i] if i < len(emp_names) else emp_id
-                used_by_employees_data[emp_id] = emp_name
+        for i, eid in enumerate(emp_ids):
+            if eid and str(eid) not in raw_used_emp:
+                raw_used_emp[str(eid)] = emp_names[i] if i < len(emp_names) else None
 
-    unified_domains = sorted({value for value in [*domains, *domain_groups] if value})
-    uploaders = [{"id": uid, "name": uname} for uid, uname in uploaders_data.items()] if uploaders_data else []
-    used_by_employees = [{"id": eid, "name": ename} for eid, ename in used_by_employees_data.items()] if used_by_employees_data else []
+    # From usedInProfiles (embedded array)
+    async for doc in master.find(
+        {"usedInProfiles": {"$exists": True, "$ne": []}},
+        {"usedInProfiles": 1},
+    ):
+        for profile in doc.get("usedInProfiles", []):
+            eid = profile.get("employeeId")
+            if eid and str(eid) not in raw_used_emp:
+                raw_used_emp[str(eid)] = None  # name unknown yet
 
-    return {
+    # ── Batch-resolve missing names (2 DB queries, not N) ────────────────────
+    unresolved_ids = [
+        str(eid) for eid, name in raw_used_emp.items() if not name
+    ]
+    if unresolved_ids:
+        valid_obj_ids = [ObjectId(i) for i in unresolved_ids if ObjectId.is_valid(i)]
+        # employees._id → userId
+        emp_to_user: dict[str, str] = {}
+        async for emp in employees_col.find(
+            {"_id": {"$in": valid_obj_ids}}, {"_id": 1, "userId": 1}
+        ):
+            emp_to_user[str(emp["_id"])] = str(emp["userId"]) if emp.get("userId") else ""
+
+        # All user IDs we need names for
+        need_user_ids = [
+            ObjectId(uid)
+            for uid in {*emp_to_user.values(), *unresolved_ids}
+            if uid and ObjectId.is_valid(uid)
+        ]
+        user_names: dict[str, str] = {}
+        async for user in users_col.find(
+            {"_id": {"$in": need_user_ids}}, {"_id": 1, "name": 1}
+        ):
+            user_names[str(user["_id"])] = user.get("name") or ""
+
+        for eid in unresolved_ids:
+            linked = emp_to_user.get(eid)
+            name = (user_names.get(linked) if linked else None) or user_names.get(eid)
+            if name:
+                raw_used_emp[eid] = name
+
+    # ── Build final result ────────────────────────────────────────────────────
+    unified_domains = sorted({v for v in [*domains, *domain_groups] if v})
+    uploaders = [
+        {"id": uid, "name": uname} for uid, uname in uploaders_data.items()
+    ]
+    used_by_employees = [
+        {"id": eid, "name": name or eid} for eid, name in raw_used_emp.items()
+    ]
+
+    result = {
         "domains": unified_domains,
         "countries": [c for c in countries if c],
         "states": [s for s in states if s],
@@ -748,6 +816,11 @@ async def get_dropdown_options() -> dict:
         "uploaders": uploaders,
         "usedByEmployees": used_by_employees,
     }
+
+    # ── Store in cache ────────────────────────────────────────────────────────
+    _DROPDOWN_CACHE = result
+    _DROPDOWN_CACHE_AT = now
+    return result
 
 
 async def get_uploader_stats() -> dict:

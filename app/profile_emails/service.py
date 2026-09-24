@@ -425,12 +425,16 @@ async def get_pending_batch(
     return serialize_list([d async for d in cursor])
 
 
-async def mark_sending(profile_email_id: str) -> None:
+async def mark_sending(profile_email_id: str) -> bool:
     col = get_collection(COLLECTION)
-    await col.update_one(
-        {"_id": to_object_id(profile_email_id)},
+    result = await col.update_one(
+        {
+            "_id": to_object_id(profile_email_id),
+            "sendStatus": SendStatus.PENDING.value,
+        },
         {"$set": {"sendStatus": SendStatus.SENDING.value, "updatedAt": datetime.now(timezone.utc)}},
     )
+    return result.modified_count == 1
 
 
 async def mark_sent(

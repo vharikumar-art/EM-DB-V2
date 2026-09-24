@@ -27,6 +27,7 @@ Error handling:
 import asyncio
 import logging
 import random
+import uuid
 from datetime import datetime, timezone
 
 from app.campaign_engine.sender import SMTPCredentials, send_email
@@ -83,11 +84,18 @@ async def run_campaign(campaign_id: str) -> None:
     Entry point called by the campaigns router via BackgroundTasks.
     All exceptions are caught here so they never crash the FastAPI process.
     """
+    worker_token = uuid.uuid4().hex
+    if not await campaign_service.claim_campaign_worker(campaign_id, worker_token):
+        logger.info("Campaign %s is already being processed by another worker", campaign_id)
+        return
+
     try:
         await _run(campaign_id)
     except Exception as exc:
         logger.exception("Unhandled error in campaign %s: %s", campaign_id, exc)
         await campaign_service.abort_campaign(campaign_id, str(exc)[:300])
+    finally:
+        await campaign_service.release_campaign_worker(campaign_id, worker_token)
 
 
 async def _run(campaign_id: str) -> None:
@@ -101,6 +109,14 @@ async def _run(campaign_id: str) -> None:
         return
 
     campaign = serialize_doc(campaign_doc)
+    if campaign.get("status") in {
+        CampaignStatus.PAUSED.value,
+        CampaignStatus.COMPLETED.value,
+        CampaignStatus.FAILED.value,
+    }:
+        logger.info("Campaign %s is already %s; worker will not send", campaign_id, campaign.get("status"))
+        return
+
     profile_id: str = campaign["profileId"]
     employee_id: str = campaign["employeeId"]
 
@@ -245,14 +261,12 @@ async def _run(campaign_id: str) -> None:
             recurrence = campaign.get("recurrenceType", "once")
             if recurrence in ["daily", "weekly"]:
                 logger.info(
-                    "Campaign %s reached daily limit (%d/%d) for this cycle. Continuing scheduling logic; completion will be decided by remaining pending emails.",
+                    "Campaign %s reached daily limit (%d/%d) for this cycle. Stopping until the next scheduled run.",
                     campaign_id,
                     total_sent,
                     daily_limit,
                 )
-                # Do not force completion here. For recurring campaigns, completion is
-                # determined by whether any profile emails remain pending after this run.
-                pass
+                return
             else:
                 remaining_batch = await pe_service.get_pending_batch(profile_id, 1)
                 if not remaining_batch:
@@ -330,7 +344,14 @@ async def _run(campaign_id: str) -> None:
             lead_email: str = pe["email"]
 
             # Mark as SENDING
-            await pe_service.mark_sending(pe_id)
+            claimed = await pe_service.mark_sending(pe_id)
+            if not claimed:
+                logger.info(
+                    "Campaign %s skipped %s because another worker already claimed it",
+                    campaign_id,
+                    lead_email,
+                )
+                continue
 
             # ----------------------------------------------------------
             # Select random template (A/B testing) - using weighted selection

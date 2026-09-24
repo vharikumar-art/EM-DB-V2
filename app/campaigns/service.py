@@ -15,6 +15,49 @@ from app.utils.response import serialize_doc, serialize_list, to_object_id
 COLLECTION = "campaigns"
 
 
+async def claim_campaign_worker(campaign_id: str, worker_token: str) -> bool:
+    """Atomically allow only one worker to execute a campaign at a time."""
+    campaigns = get_collection(COLLECTION)
+    now = datetime.now(timezone.utc)
+    stale_before = now - timedelta(minutes=30)
+    result = await campaigns.find_one_and_update(
+        {
+            "_id": to_object_id(campaign_id),
+            "$or": [
+                {"workerLock": {"$exists": False}},
+                {"workerLock": None},
+                {"workerLockAt": {"$lt": stale_before}},
+            ],
+        },
+        {
+            "$set": {
+                "workerLock": worker_token,
+                "workerLockAt": now,
+                "updatedAt": now,
+            }
+        },
+    )
+    return result is not None
+
+
+async def release_campaign_worker(campaign_id: str, worker_token: str) -> None:
+    """Release a campaign worker lock only when owned by this worker."""
+    campaigns = get_collection(COLLECTION)
+    await campaigns.update_one(
+        {
+            "_id": to_object_id(campaign_id),
+            "workerLock": worker_token,
+        },
+        {
+            "$set": {
+                "workerLock": None,
+                "workerLockAt": None,
+                "updatedAt": datetime.now(timezone.utc),
+            }
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Create / start
 # ---------------------------------------------------------------------------
