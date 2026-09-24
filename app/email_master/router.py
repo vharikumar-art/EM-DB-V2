@@ -1,7 +1,7 @@
 import csv
 import io
 from datetime import date
-from typing import Literal
+from typing import List, Literal
 
 import pandas as pd
 from fastapi import APIRouter, Depends, File, Query, UploadFile
@@ -249,28 +249,34 @@ async def clear_all_emails(
 
 @router.get("", response_model=ApiResponse)
 async def list_emails(
-    country: str | None = Query(default=None),
-    state: str | None = Query(default=None),
-    domain: str | None = Query(default=None),
-    university: str | None = Query(default=None),
-    uploadedBy: str | None = Query(default=None),
-    usedByEmployee: str | None = Query(default=None),
-    mailSource: str | None = Query(default=None),
+    country: List[str] = Query(default=[]),
+    state: List[str] = Query(default=[]),
+    domain: List[str] = Query(default=[]),
+    university: List[str] = Query(default=[]),
+    uploadedBy: List[str] = Query(default=[]),
+    usedByEmployee: List[str] = Query(default=[]),
+    mailSource: List[str] = Query(default=[]),
     search: str | None = Query(default=None),
     includeDuplicates: bool = Query(default=True),
     params: PaginationParams = Depends(pagination_params),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    """List emails from GLOBAL pool with filters."""
+    """List emails from GLOBAL pool with filters.
+    
+    All filter params support multi-selection:
+    - Repeat the param:  ?country=India&country=USA
+    - Or comma-separate: ?country=India,USA
+    Both formats work and are combined with OR logic (match any selected value).
+    """
     result = await service.list_emails(
         params,
-        country=country,
-        state=state,
-        domain=domain,
-        university=university,
-        uploaded_by=uploadedBy,
-        used_by_employee=usedByEmployee,
-        mail_source=mailSource,
+        country=country or None,
+        state=state or None,
+        domain=domain or None,
+        university=university or None,
+        uploaded_by=uploadedBy or None,
+        used_by_employee=usedByEmployee or None,
+        mail_source=mailSource or None,
         include_duplicates=includeDuplicates,
         search=search,
     )

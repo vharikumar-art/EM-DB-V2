@@ -157,53 +157,100 @@ async def upload_file(
 
 async def list_emails(
     params: PaginationParams,
-    country: str | None = None,
-    state: str | None = None,
-    domain: str | None = None,
-    university: str | None = None,
-    uploaded_by: str | None = None,
-    used_by_employee: str | None = None,
-    mail_source: str | None = None,
+    country: list[str] | str | None = None,
+    state: list[str] | str | None = None,
+    domain: list[str] | str | None = None,
+    university: list[str] | str | None = None,
+    uploaded_by: list[str] | str | None = None,
+    used_by_employee: list[str] | str | None = None,
+    mail_source: list[str] | str | None = None,
     include_duplicates: bool = True,
     search: str | None = None,
 ) -> dict:
-    """List emails from GLOBAL pool with optional filters."""
+    """List emails from GLOBAL pool with optional filters.
+    
+    All filter params support multi-value lists — values are combined with OR logic.
+    Comma-separated strings (e.g. 'India,USA') are also accepted and split automatically.
+    """
     master = get_collection(COLLECTION)
     query: dict = {}
+    and_clauses: list[dict] = []
 
-    if country:
-        query["country"] = country
-    if state:
-        query["state"] = state
-    if domain:
-        query.setdefault("$and", []).append({
-            "$or": [
-                {"domain": domain},
-                {"domain_group": domain},
-            ]
-        })
-    if university:
-        query["university"] = {"$regex": university, "$options": "i"}
-    if uploaded_by:
-        query["uploadedBy"] = uploaded_by
-    if used_by_employee:
-        query["$or"] = [
-            {"usedByEmployeeId": used_by_employee},
-            {"usedByEmployeeIds": used_by_employee}
-        ]
-    if mail_source:
-        query["mailSource"] = mail_source
+    # Helper: normalise a raw filter value (str, list[str], or None)
+    # into a clean de-duplicated list, splitting on commas.
+    def _vals(v) -> list[str]:
+        return _filter_values(v)
+
+    # ── country ──────────────────────────────────────────────────────────────
+    countries = _vals(country)
+    if countries:
+        query["country"] = {"$in": countries} if len(countries) > 1 else countries[0]
+
+    # ── state ────────────────────────────────────────────────────────────────
+    states = _vals(state)
+    if states:
+        query["state"] = {"$in": states} if len(states) > 1 else states[0]
+
+    # ── domain / domain_group (searches both fields) ──────────────────────────
+    domains = _vals(domain)
+    if domains:
+        if len(domains) == 1:
+            and_clauses.append({"$or": [
+                {"domain": domains[0]},
+                {"domain_group": domains[0]},
+            ]})
+        else:
+            and_clauses.append({"$or": [
+                {"domain": {"$in": domains}},
+                {"domain_group": {"$in": domains}},
+            ]})
+
+    # ── university (partial match, multi-value → OR of regex) ─────────────────
+    universities = _vals(university)
+    if universities:
+        if len(universities) == 1:
+            query["university"] = {"$regex": universities[0], "$options": "i"}
+        else:
+            and_clauses.append({"$or": [
+                {"university": {"$regex": u, "$options": "i"}}
+                for u in universities
+            ]})
+
+    # ── uploadedBy ────────────────────────────────────────────────────────────
+    uploaders = _vals(uploaded_by)
+    if uploaders:
+        query["uploadedBy"] = {"$in": uploaders} if len(uploaders) > 1 else uploaders[0]
+
+    # ── usedByEmployee ────────────────────────────────────────────────────────
+    used_emps = _vals(used_by_employee)
+    if used_emps:
+        and_clauses.append({"$or": [
+            {"usedByEmployeeId": {"$in": used_emps}},
+            {"usedByEmployeeIds": {"$in": used_emps}},
+        ]})
+
+    # ── mailSource ────────────────────────────────────────────────────────────
+    mail_sources = _vals(mail_source)
+    if mail_sources:
+        query["mailSource"] = {"$in": mail_sources} if len(mail_sources) > 1 else mail_sources[0]
+
+    # ── includeDuplicates ─────────────────────────────────────────────────────
     if not include_duplicates:
         query["isDuplicate"] = False
+
+    # ── search (full-text across key fields) ──────────────────────────────────
     if search:
-        query["$or"] = [
+        and_clauses.append({"$or": [
             {"email": {"$regex": search, "$options": "i"}},
             {"fullName": {"$regex": search, "$options": "i"}},
             {"university": {"$regex": search, "$options": "i"}},
             {"domain": {"$regex": search, "$options": "i"}},
             {"domain_group": {"$regex": search, "$options": "i"}},
             {"country": {"$regex": search, "$options": "i"}},
-        ]
+        ]})
+
+    if and_clauses:
+        query["$and"] = and_clauses
 
     # Use fast estimated count when there are no filters applied
     if query:
