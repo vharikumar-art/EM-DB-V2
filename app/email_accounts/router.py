@@ -69,7 +69,7 @@ async def delete_account(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Delete email account. Admins can specify employeeId."""
-    employee_id, is_admin = await resolve_employee_context(current_user, employeeId)
+    employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
     await service.delete_account(account_id, employee_id, is_admin)
     return ApiResponse(message="Account deleted")
 

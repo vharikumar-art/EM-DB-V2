@@ -6,7 +6,8 @@ Does not use LangChain or AI.
 """
 
 PLACEHOLDER_MAP = {
-    "name":        lambda lead: _get_first_name(lead.get("fullName", "")),
+    "name":        lambda lead: lead.get("fullName", "") or "there",
+    "first_name":  lambda lead: _get_first_name(lead.get("fullName", "")),
     "full_name":   lambda lead: lead.get("fullName", ""),
     "university":     lambda lead: lead.get("university", ""),
     "industry":    lambda lead: lead.get("industry", ""),

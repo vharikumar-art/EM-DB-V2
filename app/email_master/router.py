@@ -1,6 +1,11 @@
+import csv
+import io
 from datetime import date
+from typing import Literal
 
+import pandas as pd
 from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi.responses import StreamingResponse
 
 from app.core.dependencies import CurrentUser, get_current_user, require_admin, require_super_admin, require_write_access
 from app.core.exceptions import BadRequestException
@@ -54,6 +59,79 @@ async def get_dropdown_options(
     """Get dropdown filter options from GLOBAL pool."""
     options = await service.get_dropdown_options()
     return ApiResponse(message="Dropdown options fetched", data=options)
+
+
+@router.get("/download")
+async def download_emails(
+    format: Literal["csv", "xlsx"] = Query(default="csv", description="Download format"),
+    country: str | None = Query(default=None),
+    state: str | None = Query(default=None),
+    domain: str | None = Query(default=None),
+    university: str | None = Query(default=None),
+    mailSource: str | None = Query(default=None),
+    search: str | None = Query(default=None),
+    includeDuplicates: bool = Query(default=True),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Download the global email-master pool as CSV or Excel."""
+    query: dict = {}
+    and_filters: list[dict] = []
+    if country:
+        query["country"] = country
+    if state:
+        query["state"] = state
+    if domain:
+        and_filters.append({"$or": [{"domain": domain}, {"domain_group": domain}]})
+    if university:
+        query["university"] = {"$regex": university, "$options": "i"}
+    if mailSource:
+        query["mailSource"] = mailSource
+    if not includeDuplicates:
+        query["isDuplicate"] = False
+    if search:
+        and_filters.append({"$or": [
+            {"email": {"$regex": search, "$options": "i"}},
+            {"fullName": {"$regex": search, "$options": "i"}},
+            {"university": {"$regex": search, "$options": "i"}},
+            {"domain": {"$regex": search, "$options": "i"}},
+            {"domain_group": {"$regex": search, "$options": "i"}},
+            {"country": {"$regex": search, "$options": "i"}},
+        ]})
+    if and_filters:
+        query["$and"] = and_filters
+
+    fields = [
+        "fullName", "email", "university", "website", "country", "state",
+        "city", "domain", "domain_group", "industry", "designation", "phone",
+        "linkedin", "citation", "mailSource", "uploadBatch", "isDuplicate",
+        "uploadedByName", "createdAt",
+    ]
+    master = service.get_collection(service.COLLECTION)
+    rows = []
+    async for doc in master.find(query).sort("createdAt", -1):
+        rows.append({field: str(doc.get(field, "")) for field in fields})
+
+    if format == "xlsx":
+        buffer = io.BytesIO()
+        pd.DataFrame(rows, columns=fields).to_excel(buffer, index=False, engine="openpyxl")
+        buffer.seek(0)
+        return StreamingResponse(
+            iter([buffer.getvalue()]),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": "attachment; filename=email_master.xlsx"},
+        )
+
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=fields, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(rows)
+
+    buffer.seek(0)
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=email_master.csv"},
+    )
 
 
 @router.get("/stats/uploaders", response_model=ApiResponse)
