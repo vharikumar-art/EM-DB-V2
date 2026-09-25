@@ -59,6 +59,8 @@ class CampaignOut(BaseModel):
     failed: int
     skipped: int
     replies: int
+    processedEmails: int = 0
+    progressPercent: float = 0
     dailyLimit: int | None = None
     limitOverride: int | None = None
     startedAt: str | None = None

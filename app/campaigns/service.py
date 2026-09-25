@@ -15,6 +15,18 @@ from app.utils.response import serialize_doc, serialize_list, to_object_id
 COLLECTION = "campaigns"
 
 
+def _add_campaign_progress(doc: dict) -> dict:
+    result = serialize_doc(doc)
+    total = max(int(result.get("totalEmails") or 0), 0)
+    processed = sum(
+        max(int(result.get(field) or 0), 0)
+        for field in ("sent", "failed", "skipped")
+    )
+    result["processedEmails"] = processed
+    result["progressPercent"] = round((processed / total) * 100, 1) if total else 0
+    return result
+
+
 async def claim_campaign_worker(campaign_id: str, worker_token: str) -> bool:
     """Atomically allow only one worker to execute a campaign at a time."""
     campaigns = get_collection(COLLECTION)
@@ -504,7 +516,7 @@ async def list_campaigns(
         .skip(params.skip)
         .limit(params.pageSize)
     )
-    docs = serialize_list([d async for d in cursor])
+    docs = [_add_campaign_progress(doc) async for doc in cursor]
     return build_paginated_response(docs, total, params)
 
 
@@ -512,7 +524,7 @@ async def get_campaign(
     campaign_id: str, employee_id: str, is_admin: bool
 ) -> dict:
     doc = await _get_campaign_owned(campaign_id, employee_id, is_admin)
-    return serialize_doc(doc)
+    return _add_campaign_progress(doc)
 
 
 async def update_daily_limit(

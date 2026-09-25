@@ -438,6 +438,15 @@ async def _run(campaign_id: str) -> None:
                 await campaign_service.increment_counters(campaign_id, failed=1)
                 total_failed += 1
 
+                await _push_progress(
+                    employee_id=employee_id,
+                    campaign_id=campaign_id,
+                    event="failed",
+                    email=lead_email,
+                    total_sent=total_sent,
+                    total_failed=total_failed,
+                )
+
                 # Auth failure → abort entire campaign immediately
                 if "Authentication" in error_msg or "auth" in error_msg.lower():
                     auth_failure_count += 1
