@@ -40,6 +40,9 @@ async def create_indexes() -> None:
     await db["email_master"].create_index(
         [("isDuplicate", 1), ("uploadedDate", -1)]
     )
+    await db["email_master"].create_index(
+        [("isDuplicate", 1), ("createdAt", -1)]
+    )
     # Compound: country / state / domain / etc scoped to non-duplicates (used in distinct)
     await db["email_master"].create_index(
         [("isDuplicate", 1), ("country", 1)]

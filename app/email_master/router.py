@@ -1,11 +1,13 @@
 import csv
 import io
+import os
+import tempfile
 from datetime import date
 from typing import List, Literal
 
-import pandas as pd
 from fastapi import APIRouter, Depends, File, Query, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from starlette.background import BackgroundTask
 
 from app.core.dependencies import CurrentUser, get_current_user, require_admin, require_super_admin, require_write_access
 from app.core.exceptions import BadRequestException
@@ -66,7 +68,10 @@ async def get_dropdown_options(
 
 @router.get("/download")
 async def download_emails(
-    format: Literal["csv", "xlsx"] = Query(default="csv", description="Download format"),
+    format: Literal["xlsx", "csv"] = Query(
+        default="xlsx",
+        description="Download format: xlsx or csv",
+    ),
     country: str | None = Query(default=None),
     state: str | None = Query(default=None),
     domain: str | None = Query(default=None),
@@ -110,28 +115,53 @@ async def download_emails(
         "uploadedByName", "createdAt",
     ]
     master = service.get_collection(service.COLLECTION)
-    rows = []
-    async for doc in master.find(query).sort("createdAt", -1):
-        rows.append({field: str(doc.get(field, "")) for field in fields})
+    projection = {field: 1 for field in fields}
 
     if format == "xlsx":
-        buffer = io.BytesIO()
-        pd.DataFrame(rows, columns=fields).to_excel(buffer, index=False, engine="openpyxl")
-        buffer.seek(0)
-        return StreamingResponse(
-            iter([buffer.getvalue()]),
+        from openpyxl import Workbook
+
+        temp_file = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+        temp_path = temp_file.name
+        temp_file.close()
+
+        workbook = Workbook(write_only=True)
+        worksheet = workbook.create_sheet("Email Master")
+        worksheet.append(fields)
+
+        cursor = master.find(query, projection).sort("createdAt", -1).batch_size(2000)
+        async for doc in cursor:
+            worksheet.append([str(doc.get(field, "")) for field in fields])
+        workbook.save(temp_path)
+
+        return FileResponse(
+            temp_path,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": "attachment; filename=email_master.xlsx"},
+            filename="email_master.xlsx",
+            background=BackgroundTask(os.unlink, temp_path),
         )
 
-    buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=fields, extrasaction="ignore")
-    writer.writeheader()
-    writer.writerows(rows)
+    async def generate_csv():
+        cursor = master.find(query, projection).sort("createdAt", -1).batch_size(2000)
+        buffer = io.StringIO()
+        writer = csv.DictWriter(buffer, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        yield buffer.getvalue()
 
-    buffer.seek(0)
+        rows_in_chunk = 0
+        async for doc in cursor:
+            writer.writerow({field: str(doc.get(field, "")) for field in fields})
+            rows_in_chunk += 1
+            if rows_in_chunk >= 500:
+                yield buffer.getvalue()
+                buffer.seek(0)
+                buffer.truncate(0)
+                rows_in_chunk = 0
+
+        if rows_in_chunk:
+            yield buffer.getvalue()
+
     return StreamingResponse(
-        iter([buffer.getvalue()]),
+        generate_csv(),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=email_master.csv"},
     )
