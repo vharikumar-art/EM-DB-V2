@@ -40,15 +40,27 @@ async def create_indexes() -> None:
     await db["email_master"].create_index(
         [("isDuplicate", 1), ("uploadedDate", -1)]
     )
-    # Compound: country / state / domain scoped to non-duplicates (used in distinct)
+    # Compound: country / state / domain / etc scoped to non-duplicates (used in distinct)
     await db["email_master"].create_index(
         [("isDuplicate", 1), ("country", 1)]
+    )
+    await db["email_master"].create_index(
+        [("isDuplicate", 1), ("state", 1)]
     )
     await db["email_master"].create_index(
         [("isDuplicate", 1), ("domain", 1)]
     )
     await db["email_master"].create_index(
         [("isDuplicate", 1), ("domain_group", 1)]
+    )
+    await db["email_master"].create_index(
+        [("isDuplicate", 1), ("university", 1)]
+    )
+    await db["email_master"].create_index(
+        [("isDuplicate", 1), ("designation", 1)]
+    )
+    await db["email_master"].create_index(
+        [("isDuplicate", 1), ("mailSource", 1)]
     )
     # Dedup check is scoped per employee
     await db["email_master"].create_index(

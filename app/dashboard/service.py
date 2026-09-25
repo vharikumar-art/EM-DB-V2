@@ -144,14 +144,8 @@ async def get_employee_dashboard(employee_id: str, query: DashboardQuery) -> dic
     active_profiles  = await profiles.count_documents(
         {"employeeId": employee_id, "isActive": True}
     )
-    # Count unique campaigns (by campaignId/name, not all status instances)
-    unique_campaigns_pipeline = [
-        {"$match": {"employeeId": employee_id}},
-        {"$group": {"_id": "$campaignName"}},
-        {"$count": "total"}
-    ]
-    unique_campaigns_result = await campaigns.aggregate(unique_campaigns_pipeline).to_list(length=1)
-    total_campaigns = unique_campaigns_result[0]["total"] if unique_campaigns_result else 0
+    # Each campaign document is one campaign, even when names are reused.
+    total_campaigns = await campaigns.count_documents({"employeeId": employee_id})
     
     running_campaigns = await campaigns.count_documents(
         {
@@ -315,13 +309,7 @@ async def get_admin_scoped_dashboard(admin_user_id: str, query: DashboardQuery) 
     })
     
     # ── Campaigns (scoped) ───────────────────────────────────────────────────
-    unique_campaigns_pipeline = [
-        {"$match": {"employeeId": {"$in": scope_emp_ids}}},
-        {"$group": {"_id": "$campaignName"}},
-        {"$count": "total"}
-    ]
-    unique_campaigns_result = await campaigns.aggregate(unique_campaigns_pipeline).to_list(length=1)
-    total_campaigns = unique_campaigns_result[0]["total"] if unique_campaigns_result else 0
+    total_campaigns = await campaigns.count_documents({"employeeId": {"$in": scope_emp_ids}})
     
     running_campaigns = await campaigns.count_documents({
         "employeeId": {"$in": scope_emp_ids},
@@ -407,12 +395,7 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
     total_duplicates = duplicates_result[0]["total"] if duplicates_result else 0
     
     # Count unique campaigns (by campaignName, not all status instances)
-    unique_campaigns_pipeline = [
-        {"$group": {"_id": "$campaignName"}},
-        {"$count": "total"}
-    ]
-    unique_campaigns_result = await campaigns.aggregate(unique_campaigns_pipeline).to_list(length=1)
-    total_campaigns = unique_campaigns_result[0]["total"] if unique_campaigns_result else 0
+    total_campaigns = await campaigns.count_documents({})
     
     running_campaigns = await campaigns.count_documents({
         "status": {"$in": [CampaignStatus.RUNNING.value, CampaignStatus.PROCESSING.value]}
@@ -578,14 +561,8 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
             "employeeId": emp_id
         })
         
-        # Get employee's total campaigns (unique campaigns by campaignName, using employeeId)
-        emp_total_campaigns_pipeline = [
-            {"$match": {"employeeId": emp_id}},
-            {"$group": {"_id": "$campaignName"}},
-            {"$count": "total"}
-        ]
-        emp_total_campaigns_result = await campaigns.aggregate(emp_total_campaigns_pipeline).to_list(length=1)
-        emp_total_campaigns = emp_total_campaigns_result[0]["total"] if emp_total_campaigns_result else 0
+        # Each campaign document is one campaign, even when names are reused.
+        emp_total_campaigns = await campaigns.count_documents({"employeeId": emp_id})
         
         # Get employee's running campaigns (status: "running", using employeeId)
         emp_running_campaigns = await campaigns.count_documents({
