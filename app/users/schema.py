@@ -18,7 +18,8 @@ class UserCreate(BaseModel):
 class UserUpdate(BaseModel):
     name: str | None = None
     phoneNumber: str | None = Field(default=None, min_length=7, max_length=20)
-    accessLevel: AdminAccessLevel | None = None
+    accessLevel: AdminAccessLevel | None = AdminAccessLevel.FULL
+    role: UserRole | None = None
     status: UserStatus | None = None
     branch: str | None = None
     assignedToAdmin: str | None = None

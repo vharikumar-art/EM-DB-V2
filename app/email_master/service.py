@@ -391,7 +391,7 @@ async def mark_email_reply(
     update = {
         "hasReply": True,
         "replyReason": reason,
-        "replyCustomReason": custom_reason if reason == "other" else None,
+        "replyCustomReason": custom_reason,
         "replyMarkedAt": now,
         "replyMarkedBy": marked_by,
         "replyMarkedByName": marked_by_name or marked_by,
@@ -697,8 +697,6 @@ async def update_email_reply(
     has_reply = payload.get("hasReply", doc.get("hasReply", False))
     reason = payload.get("reason", doc.get("replyReason"))
     custom_reason = payload.get("customReason", doc.get("replyCustomReason"))
-    if has_reply and reason == "other" and not custom_reason:
-        raise BadRequestException("customReason is required when reason is 'other'")
     if has_reply and not reason:
         raise BadRequestException("reason is required when hasReply is true")
 
@@ -707,7 +705,7 @@ async def update_email_reply(
     update = {
         "hasReply": has_reply,
         "replyReason": reason if has_reply else None,
-        "replyCustomReason": custom_reason if has_reply and reason == "other" else None,
+        "replyCustomReason": custom_reason if has_reply else None,
         "replyMarkedAt": now if has_reply else None,
         "replyMarkedBy": marked_by if has_reply else None,
         "replyMarkedByName": marked_by_name if has_reply else None,
@@ -728,6 +726,39 @@ async def delete_email(email_id: str) -> None:
     if result.deleted_count == 0:
         from app.core.exceptions import NotFoundException
         raise NotFoundException("Email record not found")
+
+
+async def delete_emails_by_upload_month_range(
+    start_month: int,
+    start_year: int,
+    end_month: int,
+    end_year: int,
+) -> dict:
+    """Delete email-master records uploaded during an inclusive month range."""
+    try:
+        start_date = datetime(start_year, start_month, 1, tzinfo=timezone.utc)
+        end_date = datetime(end_year, end_month, 1, tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise BadRequestException("Month and year values must be valid") from exc
+
+    if start_date > end_date:
+        raise BadRequestException("Start month must not be after end month")
+
+    if end_month == 12:
+        end_exclusive = datetime(end_year + 1, 1, 1, tzinfo=timezone.utc)
+    else:
+        end_exclusive = datetime(end_year, end_month + 1, 1, tzinfo=timezone.utc)
+
+    query = {"uploadedDate": {"$gte": start_date, "$lt": end_exclusive}}
+    master = get_collection(COLLECTION)
+    result = await master.delete_many(query)
+    return {
+        "deletedCount": result.deleted_count,
+        "startMonth": start_month,
+        "startYear": start_year,
+        "endMonth": end_month,
+        "endYear": end_year,
+    }
 
 
 async def _update_dropdown_filters(docs_to_insert: list[dict], uploaded_by_id: str, uploaded_by_name: str) -> None:

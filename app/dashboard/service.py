@@ -744,11 +744,12 @@ async def get_upload_history(
     emp_to_user: dict[str, str] = {}
     async for emp in employees_col.find({}, {"_id": 1, "userId": 1}):
         emp_to_user[str(emp["_id"])] = str(emp.get("userId", ""))
+    user_to_emp = {user_id: employee_id for employee_id, user_id in emp_to_user.items()}
 
-    # Resolve the requested employeeId filter to a userId for matching
-    filter_user_id: str | None = None
+    # Logs may contain either the user ID or the employee document ID.
+    filter_user_id = None
     if employee_id:
-        filter_user_id = emp_to_user.get(employee_id)
+        filter_user_id = emp_to_user.get(employee_id, employee_id)
 
     match_stage: dict = {
         "action": "UPLOAD",
@@ -761,13 +762,15 @@ async def get_upload_history(
     employee_set: dict[str, dict] = {}  # employeeId -> {id, name, email}
 
     async for log in logs.aggregate(pipeline):
-        emp_id = log.get("employeeId")
+        logged_id = str(log.get("employeeId", ""))
+        emp_id = emp_to_user.get(logged_id, logged_id)
 
-        # emp_id here is the userId stored in logs (not employees._id)
+        # Older /emails uploads store employees._id; newer email-master uploads
+        # store users._id. Normalize both to userId for consistent display.
         if emp_id not in active_users:
             continue
 
-        if not is_global and emp_id not in scope_user_ids:
+        if not is_global and emp_id not in scope_user_ids and user_to_emp.get(emp_id) not in scope_emp_ids:
             continue
 
         user_info = active_users[emp_id]
@@ -805,12 +808,16 @@ async def get_upload_history(
 
     # ── Apply employee filter
     if employee_id:
-        if not is_global and employee_id not in scope_emp_ids and employee_id not in scope_user_ids and filter_user_id not in scope_user_ids:
+        if (
+            not is_global
+            and employee_id not in scope_emp_ids
+            and filter_user_id not in scope_user_ids
+        ):
             raw_records = []
         else:
             raw_records = [
                 r for r in raw_records
-                if r["employeeId"] == employee_id or r["employeeId"] == filter_user_id
+                if r["employeeId"] == filter_user_id
             ]
 
     # ── Group by (employeeId, date_key) → one row per employee per calendar day
@@ -871,6 +878,8 @@ async def get_upload_history(
     campaigns_col = get_collection("campaigns")
 
     all_user_ids = list(employee_set.keys())
+    emp_ids_for_today = [user_to_emp[uid] for uid in all_user_ids if uid in user_to_emp]
+    today_log_ids = list(set(all_user_ids + emp_ids_for_today))
 
     # Today's upload stats from logs (grouped by employeeId = userId)
     today_upload_agg = await logs.aggregate([
@@ -878,7 +887,7 @@ async def get_upload_history(
             "$match": {
                 "action": "UPLOAD",
                 "runDate": {"$gte": today_start},
-                "employeeId": {"$in": all_user_ids},
+                "employeeId": {"$in": today_log_ids},
             }
         },
         {
@@ -891,11 +900,10 @@ async def get_upload_history(
             }
         }
     ]).to_list(None)
-    today_upload_map = {r["_id"]: r for r in today_upload_agg}
-
-    # Build reverse map: userId -> employees._id
-    user_to_emp: dict[str, str] = {v: k for k, v in emp_to_user.items()}
-    emp_ids_for_today = [user_to_emp[uid] for uid in all_user_ids if uid in user_to_emp]
+    today_upload_map = {
+        emp_to_user.get(str(r["_id"]), str(r["_id"])): r
+        for r in today_upload_agg
+    }
 
     # Today's sent emails from profile_emails
     today_sent_agg = await pe_col.aggregate([

@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, EmailStr, Field, model_validator
+from pydantic import BaseModel, EmailStr, Field
 
 
 class EmailMasterOut(BaseModel):
@@ -66,24 +66,8 @@ class MarkReplyRequest(BaseModel):
     reason: ReplyReason
     customReason: str | None = None
 
-    @model_validator(mode="after")
-    def validate_custom_reason(self):
-        if self.reason == "other" and not self.customReason:
-            raise ValueError("customReason is required when reason is 'other'")
-        if self.reason != "other" and self.customReason:
-            raise ValueError("customReason is only allowed when reason is 'other'")
-        return self
-
 
 class UpdateReplyRequest(BaseModel):
     hasReply: bool | None = None
     reason: ReplyReason | None = None
     customReason: str | None = None
-
-    @model_validator(mode="after")
-    def validate_custom_reason(self):
-        if self.reason == "other" and not self.customReason:
-            raise ValueError("customReason is required when reason is 'other'")
-        if self.reason is not None and self.reason != "other" and self.customReason:
-            raise ValueError("customReason is only allowed when reason is 'other'")
-        return self

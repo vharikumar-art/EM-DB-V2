@@ -107,18 +107,19 @@ class FakeCollection:
 
 
 class EmailMasterReplyTests(unittest.TestCase):
-    def test_other_reason_requires_custom_reason(self):
-        with self.assertRaises(ValidationError):
-            MarkReplyRequest(email="client@example.com", reason="other")
+    def test_custom_reason_is_optional_for_all_reply_reasons(self):
+        for reason in ("replied", "converted", "other"):
+            request = MarkReplyRequest(email="client@example.com", reason=reason)
+            self.assertIsNone(request.customReason)
 
         request = MarkReplyRequest(
             email="client@example.com",
-            reason="other",
+            reason="converted",
             customReason="Asked for a proposal",
         )
         self.assertEqual(request.customReason, "Asked for a proposal")
 
-    def test_mark_reply_saves_custom_reason(self):
+    def test_mark_reply_saves_custom_reason_for_any_reason(self):
         document = {"_id": ObjectId(), "email": "client@example.com", "hasReply": False}
         collection = FakeCollection([document])
 
@@ -126,14 +127,14 @@ class EmailMasterReplyTests(unittest.TestCase):
             result = asyncio.run(
                 service.mark_email_reply(
                     email="client@example.com",
-                    reason="other",
+                    reason="replied",
                     custom_reason="Asked for a proposal",
                     marked_by="user-1",
                 )
             )
 
         self.assertTrue(result["hasReply"])
-        self.assertEqual(result["replyReason"], "other")
+        self.assertEqual(result["replyReason"], "replied")
         self.assertEqual(result["replyCustomReason"], "Asked for a proposal")
         self.assertEqual(result["replyMarkedBy"], "user-1")
         self.assertEqual(result["replyMarkedByName"], "user-1")
@@ -381,6 +382,66 @@ class EmailMasterReplyTests(unittest.TestCase):
         self.assertFalse(result["hasReply"])
         self.assertIsNone(result["replyReason"])
         self.assertIsNone(result["replyMarkedAt"])
+
+    def test_update_reply_saves_custom_reason_for_non_other_category(self):
+        document = {
+            "_id": ObjectId(),
+            "email": "client@example.com",
+            "hasReply": True,
+            "replyReason": "converted",
+        }
+        collection = FakeCollection([document])
+
+        with patch.object(service, "get_collection", return_value=collection), patch.object(
+            service, "get_user_display_name", return_value="User"
+        ):
+            result = asyncio.run(
+                service.update_email_reply(
+                    email_id=str(document["_id"]),
+                    payload={"customReason": "Asked for a proposal"},
+                    marked_by="user-1",
+                )
+            )
+
+        self.assertEqual(result["replyReason"], "converted")
+        self.assertEqual(result["replyCustomReason"], "Asked for a proposal")
+
+    def test_delete_by_upload_month_range_uses_inclusive_month_bounds(self):
+        class RangeCollection:
+            async def delete_many(self, query):
+                self.query = query
+                return type("DeleteResult", (), {"deleted_count": 3})()
+
+        collection = RangeCollection()
+        with patch.object(service, "get_collection", return_value=collection):
+            result = asyncio.run(
+                service.delete_emails_by_upload_month_range(
+                    start_month=8,
+                    start_year=2026,
+                    end_month=9,
+                    end_year=2026,
+                )
+            )
+
+        self.assertEqual(result["deletedCount"], 3)
+        self.assertEqual(
+            collection.query["uploadedDate"],
+            {
+                "$gte": datetime(2026, 8, 1, tzinfo=timezone.utc),
+                "$lt": datetime(2026, 10, 1, tzinfo=timezone.utc),
+            },
+        )
+
+    def test_delete_by_upload_month_range_rejects_reversed_range(self):
+        with self.assertRaises(BadRequestException):
+            asyncio.run(
+                service.delete_emails_by_upload_month_range(
+                    start_month=10,
+                    start_year=2026,
+                    end_month=9,
+                    end_year=2026,
+                )
+            )
 
 if __name__ == "__main__":
     unittest.main()

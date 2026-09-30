@@ -97,7 +97,7 @@ async def generate_list(
     master_records = await query_for_profile(
         filters=filters,
         daily_limit=effective_daily_limit,
-        filter_limit=filter_limit,
+        filter_limit=effective_daily_limit,
         employee_id=profile["employeeId"],  # Pass employee ID
     )
 

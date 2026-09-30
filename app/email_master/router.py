@@ -1,9 +1,11 @@
 import csv
 import io
+import logging
 import os
 import tempfile
 from datetime import date
 from typing import List, Literal
+import time
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
@@ -17,6 +19,7 @@ from app.schemas.common import ApiResponse, PaginationParams
 from app.utils.pagination import pagination_params
 
 router = APIRouter(prefix="/email-master", tags=["Email Master"])
+logger = logging.getLogger(__name__)
 
 _ALLOWED_EXTENSIONS = (".csv", ".xlsx", ".xls")
 
@@ -128,7 +131,7 @@ async def download_emails(
         worksheet = workbook.create_sheet("Email Master")
         worksheet.append(fields)
 
-        cursor = master.find(query, projection).sort("createdAt", -1).batch_size(2000)
+        cursor = master.find(query, projection).sort("createdAt", -1).batch_size(10000)
         async for doc in cursor:
             worksheet.append([str(doc.get(field, "")) for field in fields])
         workbook.save(temp_path)
@@ -141,24 +144,50 @@ async def download_emails(
         )
 
     async def generate_csv():
-        cursor = master.find(query, projection).sort("createdAt", -1).batch_size(2000)
-        buffer = io.StringIO()
-        writer = csv.DictWriter(buffer, fieldnames=fields, extrasaction="ignore")
-        writer.writeheader()
+        cursor = master.find(
+            query,
+            projection
+        ).sort("createdAt", -1).batch_size(10000)
+        buffer = io.StringIO(newline="")
+        writer = csv.writer(buffer)
+        writer.writerow(fields)
         yield buffer.getvalue()
+        buffer.seek(0)
+        buffer.truncate(0)
 
-        rows_in_chunk = 0
-        async for doc in cursor:
-            writer.writerow({field: str(doc.get(field, "")) for field in fields})
-            rows_in_chunk += 1
-            if rows_in_chunk >= 500:
-                yield buffer.getvalue()
-                buffer.seek(0)
-                buffer.truncate(0)
-                rows_in_chunk = 0
+        row_count = 0
+        cursor_wait_seconds = 0.0
+        row_prepare_seconds = 0.0
+        csv_write_seconds = 0.0
+        while True:
+            fetch_started = time.perf_counter()
+            docs = await cursor.to_list(length=5000)
+            cursor_wait_seconds += time.perf_counter() - fetch_started
+            if not docs:
+                break
 
-        if rows_in_chunk:
+            encode_started = time.perf_counter()
+            rows = [
+                [str(doc.get(field, "")) for field in fields]
+                for doc in docs
+            ]
+            row_prepare_seconds += time.perf_counter() - encode_started
+            row_count += len(rows)
+
+            write_started = time.perf_counter()
+            writer.writerows(rows)
+            csv_write_seconds += time.perf_counter() - write_started
             yield buffer.getvalue()
+            buffer.seek(0)
+            buffer.truncate(0)
+
+        logger.info(
+            "email_master_csv_export rows=%d cursor_wait_seconds=%.3f row_prepare_seconds=%.3f csv_write_seconds=%.3f",
+            row_count,
+            cursor_wait_seconds,
+            row_prepare_seconds,
+            csv_write_seconds,
+        )
 
     return StreamingResponse(
         generate_csv(),
@@ -246,6 +275,27 @@ async def update_email_reply(
         role=current_user.role,
     )
     return ApiResponse(message="Email reply updated", data=record)
+
+
+@router.delete("/admin/delete-by-upload-month-range", response_model=ApiResponse)
+async def delete_emails_by_upload_month_range(
+    startMonth: int = Query(..., ge=1, le=12),
+    startYear: int = Query(..., ge=1, le=9998),
+    endMonth: int = Query(..., ge=1, le=12),
+    endYear: int = Query(..., ge=1, le=9998),
+    current_user: CurrentUser = Depends(require_super_admin),
+):
+    """Delete email-master records uploaded within an inclusive month range."""
+    result = await service.delete_emails_by_upload_month_range(
+        start_month=startMonth,
+        start_year=startYear,
+        end_month=endMonth,
+        end_year=endYear,
+    )
+    return ApiResponse(
+        message=f"Deleted {result['deletedCount']} email(s) from email master",
+        data=result,
+    )
 
 
 @router.get("/{email_id}", response_model=ApiResponse)

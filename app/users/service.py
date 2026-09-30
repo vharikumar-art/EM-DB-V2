@@ -213,18 +213,29 @@ async def list_users(current_user: CurrentUser) -> list[dict]:
 async def update_user(user_id: str, payload: UserUpdate, current_user: CurrentUser) -> dict:
     users = get_collection(COLLECTION)
     update_data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+    target = None
 
-    if "accessLevel" in update_data:
+    if "accessLevel" in update_data or "role" in update_data:
         target = await users.find_one({"_id": to_object_id(user_id)}, {"role": 1})
         if not target:
             raise NotFoundException("User not found")
-        if target.get("role") != UserRole.ADMIN.value:
+        if "accessLevel" in update_data and target.get("role") != UserRole.ADMIN.value:
             raise ForbiddenException("Access level can only be changed for admin users")
-        if current_user.role != "super_admin":
+        if "accessLevel" in update_data and current_user.role != "super_admin":
             raise ForbiddenException(
                 "Only super admins can change admin access levels"
             )
-        update_data["accessLevel"] = update_data["accessLevel"].value
+        if "accessLevel" in update_data:
+            update_data["accessLevel"] = update_data["accessLevel"].value
+        if "role" in update_data:
+            if current_user.role != "super_admin":
+                raise ForbiddenException("Only super admins can change user roles")
+            update_data["role"] = update_data["role"].value
+            if (
+                update_data["role"] == UserRole.ADMIN.value
+                and "accessLevel" not in update_data
+            ):
+                update_data["accessLevel"] = AdminAccessLevel.FULL.value
 
     if "phoneNumber" in update_data:
         update_data["phoneNumber"] = update_data["phoneNumber"].strip()
@@ -238,14 +249,42 @@ async def update_user(user_id: str, payload: UserUpdate, current_user: CurrentUs
     # Extract employee-specific fields
     assigned_to_admin = update_data.pop("assignedToAdmin", None)
     branch = update_data.get("branch", None)
+    if "role" in update_data and update_data["role"] != UserRole.EMPLOYEE.value:
+        assigned_to_admin = None
 
     if not update_data and assigned_to_admin is None:
         return await get_user_by_id(user_id)
 
     from datetime import datetime, timezone
 
+    now = datetime.now(timezone.utc)
+    if target and "role" in update_data and target.get("role") != update_data["role"]:
+        employees = get_collection("employees")
+        employee = await employees.find_one(
+            {"userId": str(target["_id"])}, {"_id": 1}
+        )
+        employee_id = employee.get("_id") if employee else None
+
+        # Remove subordinate links before an admin loses the admin role.
+        if (
+            target.get("role") == UserRole.ADMIN.value
+            and update_data["role"] != UserRole.ADMIN.value
+            and employee_id
+        ):
+            await employees.update_many(
+                {"assignedToAdmin": {"$in": [str(employee_id), employee_id]}},
+                {"$set": {"assignedToAdmin": None, "updatedAt": now}},
+            )
+
+        # A user promoted out of the employee role must not retain an admin assignment.
+        if update_data["role"] != UserRole.EMPLOYEE.value and employee_id:
+            await employees.update_one(
+                {"_id": employee_id},
+                {"$set": {"assignedToAdmin": None, "updatedAt": now}},
+            )
+
     if update_data:
-        update_data["updatedAt"] = datetime.now(timezone.utc)
+        update_data["updatedAt"] = now
         result = await users.find_one_and_update(
             {"_id": to_object_id(user_id)}, {"$set": update_data}, return_document=True
         )

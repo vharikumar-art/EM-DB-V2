@@ -464,9 +464,15 @@ async def _run(campaign_id: str) -> None:
 
                 # Push failure notification (throttled — only every 10 failures)
                 if total_failed % 10 == 1:
+                    campaign_name = campaign.get("campaignName") or "Unnamed campaign"
+                    profile_name = profile.get("profileName") or "Unnamed profile"
                     await create_notification(
                         employee_id=employee_id,
-                        message=f"Campaign: {total_failed} email(s) failed so far. Last error: {error_msg[:100]}",
+                        message=(
+                            f"Campaign: {campaign_name}. Profile: {profile_name}. "
+                            f"{total_failed} email(s) failed so far. "
+                            f"Last error: {error_msg[:100]}"
+                        ),
                         type=NotificationType.WARNING,
                     )
 

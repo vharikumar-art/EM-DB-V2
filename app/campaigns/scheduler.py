@@ -134,7 +134,7 @@ async def find_due_campaigns() -> list[dict]:
     campaigns = get_collection(COLLECTION)
     now = datetime.now(timezone.utc)
     
-    print(f"[SCHEDULER DEBUG] find_due_campaigns - current time: {now.isoformat()}")
+    #print(f"[SCHEDULER DEBUG] find_due_campaigns - current time: {now.isoformat()}")
     
     query = {
         "status": CampaignStatus.SCHEDULED.value,
@@ -142,9 +142,9 @@ async def find_due_campaigns() -> list[dict]:
     }
     
     due_campaigns = await campaigns.find(query).to_list(length=None)
-    print(f"[SCHEDULER DEBUG] Found {len(due_campaigns)} due campaigns")
-    for c in due_campaigns:
-        print(f"[SCHEDULER DEBUG] Campaign: {c.get('campaignName')} - scheduled for {c.get('scheduledFor')}")
+    #print(f"[SCHEDULER DEBUG] Found {len(due_campaigns)} due campaigns")
+    #for c in due_campaigns:
+    #    print(f"[SCHEDULER DEBUG] Campaign: {c.get('campaignName')} - scheduled for {c.get('scheduledFor')}")
     
     return due_campaigns
 
@@ -423,14 +423,14 @@ async def process_scheduled_campaigns() -> dict:
     result = SchedulerResult()
     
     try:
-        logger.info("Starting scheduled campaign processing")
+        logger.debug("Starting scheduled campaign processing")
         
         # Find all campaigns due for execution
         due_campaigns = await find_due_campaigns()
         result.total_checked = len(due_campaigns)
         
         if not due_campaigns:
-            logger.info("No campaigns due for execution")
+            logger.debug("No campaigns due for execution")
             result.execution_end = datetime.now(timezone.utc)
             return result.to_dict()
         
