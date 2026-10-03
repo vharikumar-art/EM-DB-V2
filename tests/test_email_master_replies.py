@@ -443,5 +443,38 @@ class EmailMasterReplyTests(unittest.TestCase):
                 )
             )
 
+    def test_delete_by_upload_date_range_includes_both_selected_dates(self):
+        class RangeCollection:
+            async def delete_many(self, query):
+                self.query = query
+                return type("DeleteResult", (), {"deleted_count": 3})()
+
+        collection = RangeCollection()
+        with patch.object(service, "get_collection", return_value=collection):
+            result = asyncio.run(
+                service.delete_emails_by_upload_date_range(
+                    start_date=date(2000, 1, 1),
+                    end_date=date(2002, 1, 1),
+                )
+            )
+
+        self.assertEqual(result["deletedCount"], 3)
+        self.assertEqual(
+            collection.query["uploadedDate"],
+            {
+                "$gte": datetime(2000, 1, 1, tzinfo=timezone.utc),
+                "$lt": datetime(2002, 1, 2, tzinfo=timezone.utc),
+            },
+        )
+
+    def test_delete_by_upload_date_range_rejects_reversed_range(self):
+        with self.assertRaises(BadRequestException):
+            asyncio.run(
+                service.delete_emails_by_upload_date_range(
+                    start_date=date(2002, 1, 1),
+                    end_date=date(2000, 1, 1),
+                )
+            )
+
 if __name__ == "__main__":
     unittest.main()

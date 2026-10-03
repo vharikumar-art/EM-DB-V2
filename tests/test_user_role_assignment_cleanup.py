@@ -104,6 +104,32 @@ def test_promoting_employee_to_admin_clears_its_admin_assignment(monkeypatch):
     assert employee_doc["assignedToAdmin"] is None
 
 
+def test_promoting_employee_to_admin_with_access_level(monkeypatch):
+    user_id = ObjectId()
+    employee_id = ObjectId()
+    user_doc = {"_id": user_id, "role": UserRole.EMPLOYEE.value}
+    employee_doc = {"_id": employee_id, "userId": str(user_id)}
+    users = FakeUsersCollection(user_doc)
+    employees = FakeEmployeesCollection([employee_doc])
+    monkeypatch.setattr(
+        service,
+        "get_collection",
+        lambda name: users if name == "users" else employees,
+    )
+    monkeypatch.setattr(service, "serialize_user_with_password", lambda doc: doc)
+
+    asyncio.run(
+        service.update_user(
+            str(user_id),
+            UserUpdate(role=UserRole.ADMIN, accessLevel="partial"),
+            CurrentUser("super-admin", "super_admin", "full"),
+        )
+    )
+
+    assert user_doc["role"] == UserRole.ADMIN.value
+    assert user_doc["accessLevel"] == "partial"
+
+
 def test_admin_cannot_change_user_role(monkeypatch):
     user_id = ObjectId()
     users = FakeUsersCollection({"_id": user_id, "role": UserRole.EMPLOYEE.value})

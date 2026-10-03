@@ -337,6 +337,18 @@ curl -X DELETE http://localhost:8000/email-master/64f1a2b3c4d5e6f7a8b9c0d1 \
 
 ---
 
+### DELETE /email-master/admin/delete-by-upload-date-range — Delete Leads by Date Range (Super Admin)
+
+The selected start and end dates are both included. Dates accept `DD-MM-YYYY` or `YYYY-MM-DD`.
+
+**cURL:**
+```bash
+curl -X DELETE "http://localhost:8000/email-master/admin/delete-by-upload-date-range?startDate=01-01-2000&endDate=01-01-2002" \
+  -H "Authorization: Bearer <super_admin_token>"
+```
+
+---
+
 ### POST /email-master/admin/clear-all — Delete ALL Leads (Admin)
 
 > ⚠️ IRREVERSIBLE — Deletes everything from Email Master

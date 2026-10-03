@@ -3,7 +3,7 @@ import io
 import logging
 import os
 import tempfile
-from datetime import date
+from datetime import date, datetime
 from typing import List, Literal
 import time
 
@@ -22,6 +22,15 @@ router = APIRouter(prefix="/email-master", tags=["Email Master"])
 logger = logging.getLogger(__name__)
 
 _ALLOWED_EXTENSIONS = (".csv", ".xlsx", ".xls")
+
+
+def _parse_date_range_param(value: str, field_name: str) -> date:
+    for date_format in ("%d-%m-%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, date_format).date()
+        except ValueError:
+            continue
+    raise BadRequestException(f"{field_name} must use DD-MM-YYYY or YYYY-MM-DD format")
 
 
 @router.post("/upload", response_model=ApiResponse[UploadResult])
@@ -291,6 +300,23 @@ async def delete_emails_by_upload_month_range(
         start_year=startYear,
         end_month=endMonth,
         end_year=endYear,
+    )
+    return ApiResponse(
+        message=f"Deleted {result['deletedCount']} email(s) from email master",
+        data=result,
+    )
+
+
+@router.delete("/admin/delete-by-upload-date-range", response_model=ApiResponse)
+async def delete_emails_by_upload_date_range(
+    startDate: str = Query(..., description="Start date (DD-MM-YYYY or YYYY-MM-DD)"),
+    endDate: str = Query(..., description="End date (DD-MM-YYYY or YYYY-MM-DD, inclusive)"),
+    current_user: CurrentUser = Depends(require_super_admin),
+):
+    """Delete email-master records uploaded within an inclusive date range."""
+    result = await service.delete_emails_by_upload_date_range(
+        start_date=_parse_date_range_param(startDate, "startDate"),
+        end_date=_parse_date_range_param(endDate, "endDate"),
     )
     return ApiResponse(
         message=f"Deleted {result['deletedCount']} email(s) from email master",

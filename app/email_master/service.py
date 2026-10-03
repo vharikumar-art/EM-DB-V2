@@ -761,6 +761,30 @@ async def delete_emails_by_upload_month_range(
     }
 
 
+async def delete_emails_by_upload_date_range(
+    start_date: date,
+    end_date: date,
+) -> dict:
+    """Delete email-master records uploaded during an inclusive date range."""
+    if start_date > end_date:
+        raise BadRequestException("Start date must not be after end date")
+    if end_date == date.max:
+        raise BadRequestException("End date is out of range")
+
+    start_datetime = datetime.combine(start_date, time.min, tzinfo=timezone.utc)
+    end_exclusive = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=timezone.utc)
+
+    master = get_collection(COLLECTION)
+    result = await master.delete_many({
+        "uploadedDate": {"$gte": start_datetime, "$lt": end_exclusive}
+    })
+    return {
+        "deletedCount": result.deleted_count,
+        "startDate": start_date.isoformat(),
+        "endDate": end_date.isoformat(),
+    }
+
+
 async def _update_dropdown_filters(docs_to_insert: list[dict], uploaded_by_id: str, uploaded_by_name: str) -> None:
     if not docs_to_insert:
         return

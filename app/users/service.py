@@ -219,7 +219,10 @@ async def update_user(user_id: str, payload: UserUpdate, current_user: CurrentUs
         target = await users.find_one({"_id": to_object_id(user_id)}, {"role": 1})
         if not target:
             raise NotFoundException("User not found")
-        if "accessLevel" in update_data and target.get("role") != UserRole.ADMIN.value:
+        requested_role = update_data.get("role", target.get("role"))
+        if isinstance(requested_role, UserRole):
+            requested_role = requested_role.value
+        if "accessLevel" in update_data and requested_role != UserRole.ADMIN.value:
             raise ForbiddenException("Access level can only be changed for admin users")
         if "accessLevel" in update_data and current_user.role != "super_admin":
             raise ForbiddenException(
