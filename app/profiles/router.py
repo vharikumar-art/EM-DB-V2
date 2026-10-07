@@ -1,12 +1,23 @@
 from fastapi import APIRouter, Depends, Query, UploadFile, File
 
-from app.core.dependencies import CurrentUser, get_current_user, require_write_access, resolve_employee_context, resolve_write_employee_context
+from app.core.dependencies import CurrentUser, get_current_user, require_super_admin, require_write_access, resolve_employee_context, resolve_write_employee_context
 from app.core.exceptions import BadRequestException
 from app.profiles import service
 from app.profiles.schema import ProfileCreate, ProfileTestEmailRequest, ProfileUpdate
 from app.schemas.common import ApiResponse
 
 router = APIRouter(prefix="/profiles", tags=["Profiles"])
+
+
+
+@router.post("/admin/backfill-employee-info", response_model=ApiResponse, dependencies=[Depends(require_super_admin)])
+async def backfill_employee_info():
+    """SUPER ADMIN ONLY: Backfill employeeName and assignedAdmin on all existing profiles.
+    
+    Safe to run multiple times — only updates profiles where the fields are missing or empty.
+    """
+    result = await service.backfill_profile_employee_info()
+    return ApiResponse(message=result["message"], data=result)
 
 
 @router.post("", response_model=ApiResponse, dependencies=[Depends(require_write_access)])

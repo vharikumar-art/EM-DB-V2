@@ -21,6 +21,7 @@ class EmailAccountUpdate(BaseModel):
     email: EmailStr | None = Field(default=None)
     appPassword: str | None = Field(default=None, min_length=1)
     displayName: str | None = Field(default=None, max_length=100)
+    accountType: AccountType | None = Field(default=AccountType.GMAIL_SMTP)
     smtpHost: str | None = None
     smtpPort: int | None = None
     useTls: bool | None = None

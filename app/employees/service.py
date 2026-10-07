@@ -140,6 +140,27 @@ async def update_employee(employee_id: str, payload: EmployeeUpdate, current_use
     )
     if not result:
         raise NotFoundException("Employee not found")
+
+    # If assignedToAdmin changed, cascade to all profiles for this employee
+    if "assignedToAdmin" in update_data:
+        new_admin_emp_id = str(update_data["assignedToAdmin"] or "")
+        # Resolve the admin's display name (employees._id → userId → users.name)
+        admin_name = ""
+        if new_admin_emp_id:
+            admin_emp = await get_collection("employees").find_one(
+                {"_id": to_object_id(new_admin_emp_id)}, {"userId": 1}
+            )
+            if admin_emp and admin_emp.get("userId"):
+                admin_user = await get_collection("users").find_one(
+                    {"_id": to_object_id(str(admin_emp["userId"]))}, {"name": 1, "email": 1}
+                )
+                admin_name = (admin_user or {}).get("name") or (admin_user or {}).get("email") or ""
+        profiles_col = get_collection("profiles")
+        await profiles_col.update_many(
+            {"employeeId": employee_id},
+            {"$set": {"assignedAdmin": admin_name, "updatedAt": datetime.now(timezone.utc)}},
+        )
+
     return await _attach_user_info(serialize_doc(result))
 
 

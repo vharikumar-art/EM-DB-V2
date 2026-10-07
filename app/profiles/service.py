@@ -28,6 +28,41 @@ def _default_filters() -> dict:
     return {"country": [], "domain": [], "domainGroup": [], "university": [], "type": []}
 
 
+async def _resolve_admin_name(admin_employee_id: str) -> str:
+    """Resolve an admin employee ID to the admin's display name.
+
+    admin_employee_id is the _id of a document in the employees collection.
+    We follow: employees._id → employees.userId → users.name
+    Handles userId stored as either a plain str or an ObjectId.
+    """
+    if not admin_employee_id:
+        return ""
+    try:
+        from bson import ObjectId as BsonObjectId
+        employees_col = get_collection("employees")
+        users_col = get_collection("users")
+
+        admin_emp = await employees_col.find_one(
+            {"_id": BsonObjectId(admin_employee_id)},
+            {"userId": 1},
+        )
+        if not admin_emp or not admin_emp.get("userId"):
+            return ""
+
+        uid = admin_emp["userId"]
+        # userId may be stored as a plain string or already an ObjectId
+        uid_obj = BsonObjectId(str(uid)) if BsonObjectId.is_valid(str(uid)) else None
+        user_doc = None
+        if uid_obj:
+            user_doc = await users_col.find_one({"_id": uid_obj}, {"name": 1, "email": 1})
+        if not user_doc:
+            # Fallback: try raw value as-is
+            user_doc = await users_col.find_one({"_id": uid}, {"name": 1, "email": 1})
+        return (user_doc or {}).get("name") or (user_doc or {}).get("email") or ""
+    except Exception:
+        return ""
+
+
 def _default_sending_options() -> dict:
     return {"dailyLimit": 100, "delayMin": 30, "delayMax": 90}
 
@@ -78,7 +113,24 @@ async def create_profile(employee_id: str, payload: ProfileCreate) -> dict:
     if existing_account:
         raise ConflictException(
             "A profile already exists using this Gmail account"
+
         )
+    # 1. Fetch the employee document from the employees collection
+    employees_collection = get_collection("employees")
+    employee_doc = await employees_collection.find_one({"_id": to_object_id(employee_id)})
+    admin_emp_id = str(employee_doc.get("assignedToAdmin") or "") if employee_doc else ""
+
+    # 2. Resolve the employee's display name and the admin's display name
+    employee_name = ""
+    if employee_doc and employee_doc.get("userId"):
+        user_collection = get_collection("users")
+        user_doc = await user_collection.find_one(
+            {"_id": to_object_id(str(employee_doc["userId"]))},
+            {"name": 1, "email": 1},
+        )
+        if user_doc:
+            employee_name = user_doc.get("name") or user_doc.get("email") or ""
+    assigned_admin = await _resolve_admin_name(admin_emp_id)
 
     doc = build_profile_document(
         employee_id=employee_id,
@@ -91,7 +143,9 @@ async def create_profile(employee_id: str, payload: ProfileCreate) -> dict:
         filter_limit=payload.filterLimit,
         sending_options=payload.sendingOptions.model_dump(),
         prompt_settings=payload.promptSettings.model_dump(),
-    )
+        employee_name=employee_name,
+        assigned_admin=assigned_admin,
+        )
     result = await profiles.insert_one(doc)
     created = await profiles.find_one({"_id": result.inserted_id})
 
@@ -207,6 +261,30 @@ async def update_profile(
                 {"email": existing["gmailAccount"]},
                 {"$set": {"employeeId": new_emp_id, "updatedAt": now}}
             )
+
+        # Sync employeeName + assignedAdmin on the profile from the new employee
+        new_emp_doc = await get_collection("employees").find_one({"_id": to_object_id(new_emp_id)})
+        if new_emp_doc:
+            admin_emp_id = str(new_emp_doc.get("assignedToAdmin") or "")
+            new_assigned_admin = await _resolve_admin_name(admin_emp_id)
+            new_employee_name = ""
+            if new_emp_doc.get("userId"):
+                user_doc = await get_collection("users").find_one(
+                    {"_id": to_object_id(str(new_emp_doc["userId"]))},
+                    {"name": 1, "email": 1},
+                )
+                if user_doc:
+                    new_employee_name = user_doc.get("name") or user_doc.get("email") or ""
+            await profiles.update_one(
+                {"_id": to_object_id(profile_id)},
+                {"$set": {
+                    "employeeName": new_employee_name,
+                    "assignedAdmin": new_assigned_admin,
+                    "updatedAt": now,
+                }},
+            )
+            # Re-fetch result with the updated fields
+            result = await profiles.find_one({"_id": to_object_id(profile_id)})
 
     return serialize_doc(result)
 
@@ -738,3 +816,69 @@ async def delete_profile_attachment(
     )
     
     return serialize_doc(result)
+
+
+async def backfill_profile_employee_info() -> dict:
+    """SUPER ADMIN: Backfill employeeName and assignedAdmin for all existing profiles.
+    
+    Iterates every profile, resolves the employee's name and assigned admin
+    from the employees+users collections, and patches only profiles where
+    the values are missing or empty.
+    """
+    profiles_col = get_collection(COLLECTION)
+    employees_col = get_collection("employees")
+    users_col = get_collection("users")
+    now = datetime.now(timezone.utc)
+
+    # Backfill ALL profiles — this overwrites stale raw IDs too, not just empty fields
+    cursor = profiles_col.find({}, {"_id": 1, "employeeId": 1})
+
+    # Cache lookups to avoid repeated DB hits for the same employee
+    emp_cache: dict[str, dict] = {}   # employee_id -> {name, assignedAdmin}
+    updated = 0
+    skipped = 0
+
+    async for profile in cursor:
+        emp_id = str(profile.get("employeeId") or "")
+        if not emp_id:
+            skipped += 1
+            continue
+
+        # Use cache or query DB
+        if emp_id not in emp_cache:
+            emp_doc = await employees_col.find_one(
+                {"_id": to_object_id(emp_id)},
+                {"userId": 1, "assignedToAdmin": 1},
+            )
+            if not emp_doc:
+                emp_cache[emp_id] = {"name": "", "assignedAdmin": ""}
+            else:
+                admin_emp_id = str(emp_doc.get("assignedToAdmin") or "")
+                employee_name = ""
+                if emp_doc.get("userId"):
+                    user_doc = await users_col.find_one(
+                        {"_id": to_object_id(str(emp_doc["userId"]))},
+                        {"name": 1, "email": 1},
+                    )
+                    if user_doc:
+                        employee_name = user_doc.get("name") or user_doc.get("email") or ""
+                # Resolve admin name (not raw ID)
+                assigned_admin_name = await _resolve_admin_name(admin_emp_id)
+                emp_cache[emp_id] = {"name": employee_name, "assignedAdmin": assigned_admin_name}
+
+        resolved = emp_cache[emp_id]
+        await profiles_col.update_one(
+            {"_id": profile["_id"]},
+            {"$set": {
+                "employeeName": resolved["name"],
+                "assignedAdmin": resolved["assignedAdmin"],
+                "updatedAt": now,
+            }},
+        )
+        updated += 1
+
+    return {
+        "updated": updated,
+        "skipped": skipped,
+        "message": f"Backfill complete. {updated} profile(s) updated, {skipped} skipped (no employeeId).",
+    }

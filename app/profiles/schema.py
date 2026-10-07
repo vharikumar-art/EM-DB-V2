@@ -57,6 +57,8 @@ class ProfileCreate(BaseModel):
     filterLimit: int = Field(default=0, ge=0, description="Maximum emails to fetch from filtered results (0 = no limit)")
     sendingOptions: ProfileSendingOptions = Field(default_factory=ProfileSendingOptions)
     promptSettings: PromptSettings = Field(default_factory=PromptSettings)
+    employee_name: str = Field(default="", description="Employee name")
+    assigned_admin: str = Field(default="", description="Assigned admin")
 
 
 class ProfileUpdate(BaseModel):

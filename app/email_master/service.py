@@ -1147,3 +1147,118 @@ async def clear_all_emails() -> dict:
         "deletedCount": result.deleted_count,
         "previousTotal": total_count,
     }
+
+
+async def _get_user_name_and_email(user_id: str) -> tuple[str, str | None]:
+    """Return (display_name, email) for a given user or employee ID."""
+    from bson import ObjectId
+
+    users = get_collection("users")
+    employees = get_collection("employees")
+    object_id = ObjectId(user_id) if ObjectId.is_valid(user_id) else None
+
+    # Try direct user lookup first
+    user = None
+    for q in ([{"_id": object_id}, {"id": user_id}] if object_id else [{"id": user_id}]):
+        user = await users.find_one(q, {"name": 1, "email": 1})
+        if user:
+            break
+
+    if user:
+        name = user.get("name") or user.get("email") or user_id
+        email = user.get("email")
+        return name, email
+
+    # Fall back: treat user_id as employee ID and resolve via employee → user link
+    employee = None
+    emp_queries = [{"userId": user_id}]
+    if object_id:
+        emp_queries.extend([{"userId": object_id}, {"_id": object_id}])
+    for q in emp_queries:
+        employee = await employees.find_one(q, {"userId": 1})
+        if employee:
+            break
+
+    employee_user_id = (employee or {}).get("userId")
+    if employee_user_id:
+        emp_user_q = (
+            {"_id": ObjectId(str(employee_user_id))}
+            if ObjectId.is_valid(str(employee_user_id))
+            else {"_id": employee_user_id}
+        )
+        user = await users.find_one(emp_user_q, {"name": 1, "email": 1})
+
+    name = (user or {}).get("name") or (user or {}).get("email") or user_id
+    email = (user or {}).get("email")
+    return name, email
+
+
+async def get_reply_stats(
+    user_id: str | None = None,
+    role: str | None = None,
+) -> dict:
+    """Get aggregated statistics for email replies, broken down by handler."""
+    master = get_collection(COLLECTION)
+    query: dict = {"hasReply": True}
+
+    if user_id and role:
+        marker_scope = await _get_reply_marker_scope(user_id, role)
+        if marker_scope is not None:
+            query["replyMarkedBy"] = {"$in": list(marker_scope)}
+
+    total_replies = await master.count_documents(query)
+    converted_count = await master.count_documents({**query, "replyReason": "converted"})
+    other_count = await master.count_documents({**query, "replyReason": "other"})
+
+    pipeline = [
+        {"$match": query},
+        {
+            "$group": {
+                "_id": {
+                    "markedBy": "$replyMarkedBy",
+                    "markedByName": "$replyMarkedByName"
+                },
+                "total": {"$sum": 1},
+                "converted": {
+                    "$sum": {"$cond": [{"$eq": ["$replyReason", "converted"]}, 1, 0]}
+                },
+                "other": {
+                    "$sum": {"$cond": [{"$eq": ["$replyReason", "other"]}, 1, 0]}
+                },
+            }
+        },
+        {"$sort": {"total": -1}}
+    ]
+
+    results = await master.aggregate(pipeline).to_list(None)
+
+    breakdown = []
+    for r in results:
+        marked_by_id = r["_id"]["markedBy"]
+        marked_by_name = r["_id"]["markedByName"]
+        handler_email: str | None = None
+
+        # Resolve name + email together when the stored name is missing/stale
+        if marked_by_id and (not marked_by_name or str(marked_by_name) == str(marked_by_id)):
+            marked_by_name, handler_email = await _get_user_name_and_email(str(marked_by_id))
+        elif marked_by_id:
+            # Name already stored — still fetch email
+            _, handler_email = await _get_user_name_and_email(str(marked_by_id))
+
+        breakdown.append({
+            "handlerId": marked_by_id,
+            "handlerName": marked_by_name or marked_by_id or "Unknown",
+            "handlerEmail": handler_email,
+            "totalReplies": r["total"],
+            "converted": r["converted"],
+            "other": r["other"],
+        })
+
+    return {
+        "summary": {
+            "totalReplies": total_replies,
+            "convertedCount": converted_count,
+            "otherCount": other_count,
+        },
+        "breakdown": breakdown
+    }

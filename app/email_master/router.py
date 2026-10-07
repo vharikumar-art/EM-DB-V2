@@ -224,6 +224,18 @@ async def count_filtered_emails(
     return ApiResponse(message="Filtered email count", data=result)
 
 
+@router.get("/stats/replies", response_model=ApiResponse)
+async def get_reply_stats(
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Get aggregated statistics for email replies."""
+    stats = await service.get_reply_stats(
+        user_id=current_user.user_id,
+        role=current_user.role,
+    )
+    return ApiResponse(message="Reply statistics fetched", data=stats)
+
+
 @router.post("/replies", response_model=ApiResponse)
 async def mark_email_reply(
     payload: MarkReplyRequest,

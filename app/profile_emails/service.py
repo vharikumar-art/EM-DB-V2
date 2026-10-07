@@ -474,3 +474,19 @@ async def mark_failed(profile_email_id: str, error: str) -> None:
             }
         },
     )
+
+
+async def mark_pending(profile_email_id: str) -> None:
+    """Revert a SENDING/FAILED row back to PENDING (e.g. on SMTP limits)."""
+    col = get_collection(COLLECTION)
+    now = datetime.now(timezone.utc)
+    await col.update_one(
+        {"_id": to_object_id(profile_email_id)},
+        {
+            "$set": {
+                "sendStatus": SendStatus.PENDING.value,
+                "errorMessage": None,
+                "updatedAt": now,
+            }
+        },
+    )

@@ -434,6 +434,46 @@ async def _run(campaign_id: str) -> None:
 
             else:
                 error_msg = result.error or "Unknown send error"
+
+                # Check for SMTP daily limit errors
+                is_daily_limit = any(keyword in error_msg.lower() for keyword in [
+                    "daily user sending quota exceeded",
+                    "rate limit",
+                    "too many messages",
+                    "limit exceeded",
+                    "quota exceeded",
+                    "450 4.2.1"
+                ])
+
+                if is_daily_limit:
+                    logger.warning(
+                        "Campaign %s reached SMTP daily limit on %s: %s",
+                        campaign_id, gmail_account, error_msg
+                    )
+                    # Revert to pending so it can be retried in next cycle
+                    await pe_service.mark_pending(pe_id)
+                    
+                    campaign_name = campaign.get("campaignName") or "Unnamed campaign"
+                    await create_notification(
+                        employee_id=employee_id,
+                        message=f"Campaign '{campaign_name}' reached SMTP daily limit for {gmail_account}. Pausing/rescheduling.",
+                        type=NotificationType.WARNING,
+                    )
+                    
+                    recurrence = campaign.get("recurrenceType", "once")
+                    if recurrence in ["daily", "weekly"]:
+                        logger.info("Recurring campaign %s stopping for this cycle due to SMTP limit.", campaign_id)
+                        return
+                    else:
+                        logger.info("One-time campaign %s pausing due to SMTP limit.", campaign_id)
+                        try:
+                            await campaign_service.set_status(
+                                campaign_id, CampaignStatus.PAUSED, employee_id, is_admin=True
+                            )
+                        except Exception:
+                            pass
+                        return
+
                 await pe_service.mark_failed(pe_id, error_msg)
                 await campaign_service.increment_counters(campaign_id, failed=1)
                 total_failed += 1
