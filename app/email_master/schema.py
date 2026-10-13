@@ -35,6 +35,7 @@ class EmailMasterOut(BaseModel):
     hasReply: bool = False
     replyReason: str | None = None
     replyCustomReason: str | None = None
+    phone_no: str | None = None
     replyMarkedAt: str | None = None
     replyMarkedBy: str | None = None
     replyMarkedByName: str | None = None
@@ -64,10 +65,31 @@ ReplyReason = Literal["replied", "converted", "other"]
 class MarkReplyRequest(BaseModel):
     email: EmailStr
     reason: ReplyReason
+    phone_no : str | None = None
     customReason: str | None = None
 
 
 class UpdateReplyRequest(BaseModel):
     hasReply: bool | None = None
     reason: ReplyReason | None = None
+    phone_no : str | None = None
     customReason: str | None = None
+
+
+class EmailMasterUpdate(BaseModel):
+    """Editable contact fields on an email_master record. Email address cannot be changed."""
+    fullName: str | None = None
+    university: str | None = None
+    website: str | None = None
+    country: str | None = None
+    state: str | None = None
+    city: str | None = None
+    domain: str | None = None
+    domain_group: list[str] | None = None
+    industry: str | None = None
+    designation: str | None = None
+    phone: str | None = None
+    linkedin: str | None = None
+    citation: str | None = None
+    mailSource: str | None = None
+

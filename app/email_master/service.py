@@ -1,3 +1,4 @@
+from pandas import date_range
 import uuid
 import re
 from datetime import date, datetime, time, timedelta, timezone
@@ -47,6 +48,30 @@ def _filter_values(value: Any) -> list[str]:
     ]
 
 
+def _apply_profile_email_domain_limits(
+    records: list[dict], requested_limit: int
+) -> list[dict]:
+    """Keep Gmail recipients unrestricted and cap other domains."""
+    if requested_limit <= 0:
+        domain_limit = None
+    else:
+        domain_limit = ((requested_limit - 1) // 100 + 1) * 5
+
+    domain_counts: dict[str, int] = {}
+    available: list[dict] = []
+    for record in records:
+        email = str(record.get("email") or "").strip()
+        domain = email.rpartition("@")[2].casefold()
+        if domain == "gmail.com" or not domain or domain_limit is None:
+            available.append(record)
+            continue
+        if domain_counts.get(domain, 0) >= domain_limit:
+            continue
+        domain_counts[domain] = domain_counts.get(domain, 0) + 1
+        available.append(record)
+    return available
+
+
 async def upload_file(
     uploaded_by_id: str,
     uploaded_by_name: str,
@@ -85,10 +110,13 @@ async def upload_file(
         {"email": {"$in": batch_emails}},
         {"email": 1, "_id": 1},
     )
-    existing_emails = {doc["email"]: str(doc["_id"]) async for doc in existing_cursor}
+    existing_emails = {
+        doc["email"]: doc["_id"] async for doc in existing_cursor
+    }
 
     docs_to_insert: list[dict] = []
     seen_in_batch: set[str] = set()
+    duplicate_existing_ids: set[Any] = set()
     unique_count = 0
     duplicate_count = 0
 
@@ -97,6 +125,8 @@ async def upload_file(
         is_dup = email_addr in existing_emails or email_addr in seen_in_batch
         if is_dup:
             duplicate_count += 1
+            if email_addr in existing_emails:
+                duplicate_existing_ids.add(existing_emails[email_addr])
             if not insert_duplicates:
                 continue
         else:
@@ -115,6 +145,17 @@ async def upload_file(
                 uploaded_by_name=uploaded_by_name,
                 row=row,
             )
+        )
+    if duplicate_existing_ids:
+        await master.update_many(
+            {"_id": {"$in": list(duplicate_existing_ids)}},
+            {
+                "$set": {
+                    "uploadedDate": datetime.now(timezone.utc),
+                    "uploadedBy": uploaded_by_id,
+                    "uploadedByName": uploaded_by_name,
+                }
+            },
         )
     if docs_to_insert:
         await master.insert_many(docs_to_insert)
@@ -168,11 +209,21 @@ async def list_emails(
     mail_source: list[str] | str | None = None,
     include_duplicates: bool = True,
     search: str | None = None,
+    # ── Date filter ───────────────────────────────────────────────────────────
+    date_filter: bool = False,
+    date_range: str | None = None,   # "last_30_days" | "last_3_months" | "custom"
+    start_date: date | None = None,  # used when date_range == "custom"
+    end_date: date | None = None,    # used when date_range == "custom"
 ) -> dict:
     """List emails from GLOBAL pool with optional filters.
     
     All filter params support multi-value lists — values are combined with OR logic.
     Comma-separated strings (e.g. 'India,USA') are also accepted and split automatically.
+    
+    Date filter:
+      date_filter=True + date_range='last_30_days'  → uploaded in last 30 days
+      date_filter=True + date_range='last_3_months' → uploaded in last 90 days
+      date_filter=True + date_range='custom'        → between start_date and end_date
     """
     master = get_collection(COLLECTION)
     query: dict = {}
@@ -183,38 +234,41 @@ async def list_emails(
     def _vals(v) -> list[str]:
         return _filter_values(v)
 
-    # ── country ──────────────────────────────────────────────────────────────
+    # ── country (case-insensitive exact match) ───────────────────────────────
     countries = _vals(country)
     if countries:
-        query["country"] = {"$in": countries} if len(countries) > 1 else countries[0]
+        country_rx = [re.compile(f"^{re.escape(c)}$", re.IGNORECASE) for c in countries]
+        query["country"] = {"$in": country_rx} if len(country_rx) > 1 else country_rx[0]
 
-    # ── state ────────────────────────────────────────────────────────────────
+    # ── state (case-insensitive exact match) ─────────────────────────────────
     states = _vals(state)
     if states:
-        query["state"] = {"$in": states} if len(states) > 1 else states[0]
+        state_rx = [re.compile(f"^{re.escape(s)}$", re.IGNORECASE) for s in states]
+        query["state"] = {"$in": state_rx} if len(state_rx) > 1 else state_rx[0]
 
-    # ── domain / domain_group (searches both fields) ──────────────────────────
+    # ── domain / domain_group (case-insensitive, searches both fields) ────────
     domains = _vals(domain)
     if domains:
-        if len(domains) == 1:
+        domain_rx = [re.compile(f"^{re.escape(d)}$", re.IGNORECASE) for d in domains]
+        if len(domain_rx) == 1:
             and_clauses.append({"$or": [
-                {"domain": domains[0]},
-                {"domain_group": domains[0]},
+                {"domain": domain_rx[0]},
+                {"domain_group": domain_rx[0]},
             ]})
         else:
             and_clauses.append({"$or": [
-                {"domain": {"$in": domains}},
-                {"domain_group": {"$in": domains}},
+                {"domain": {"$in": domain_rx}},
+                {"domain_group": {"$in": domain_rx}},
             ]})
 
-    # ── university (partial match, multi-value → OR of regex) ─────────────────
+    # ── university (case-insensitive partial match) ───────────────────────────
     universities = _vals(university)
     if universities:
         if len(universities) == 1:
-            query["university"] = {"$regex": universities[0], "$options": "i"}
+            query["university"] = {"$regex": re.escape(universities[0]), "$options": "i"}
         else:
             and_clauses.append({"$or": [
-                {"university": {"$regex": u, "$options": "i"}}
+                {"university": {"$regex": re.escape(u), "$options": "i"}}
                 for u in universities
             ]})
 
@@ -231,10 +285,11 @@ async def list_emails(
             {"usedByEmployeeIds": {"$in": used_emps}},
         ]})
 
-    # ── mailSource ────────────────────────────────────────────────────────────
+    # ── mailSource (case-insensitive exact match) ─────────────────────────────
     mail_sources = _vals(mail_source)
     if mail_sources:
-        query["mailSource"] = {"$in": mail_sources} if len(mail_sources) > 1 else mail_sources[0]
+        mail_rx = [re.compile(f"^{re.escape(m)}$", re.IGNORECASE) for m in mail_sources]
+        query["mailSource"] = {"$in": mail_rx} if len(mail_rx) > 1 else mail_rx[0]
 
     # ── includeDuplicates ─────────────────────────────────────────────────────
     if not include_duplicates:
@@ -250,6 +305,28 @@ async def list_emails(
             {"domain_group": {"$regex": search, "$options": "i"}},
             {"country": {"$regex": search, "$options": "i"}},
         ]})
+
+    # ── date filter ───────────────────────────────────────────────────────────
+    if date_filter and date_range:
+        now = datetime.now(timezone.utc)
+        if date_range == "last_30_days":
+            query["uploadedDate"] = {"$gte": now - timedelta(days=30)}
+        elif date_range == "last_3_months":
+            query["uploadedDate"] = {"$gte": now - timedelta(days=90)}
+        elif date_range == "custom":
+            date_query: dict = {}
+            if start_date:
+                date_query["$gte"] = datetime(
+                    start_date.year, start_date.month, start_date.day,
+                    0, 0, 0, tzinfo=timezone.utc
+                )
+            if end_date:
+                date_query["$lte"] = datetime(
+                    end_date.year, end_date.month, end_date.day,
+                    23, 59, 59, tzinfo=timezone.utc
+                )
+            if date_query:
+                query["uploadedDate"] = date_query
 
     if and_clauses:
         query["$and"] = and_clauses
@@ -383,6 +460,7 @@ async def mark_email_reply(
     custom_reason: str | None,
     marked_by: str,
     marked_by_name: str | None = None,
+    phone_no: str | None = None,
 ) -> dict:
     """Mark an address as replied and remove it from active profile email lists."""
     master = get_collection(COLLECTION)
@@ -392,6 +470,7 @@ async def mark_email_reply(
         "hasReply": True,
         "replyReason": reason,
         "replyCustomReason": custom_reason,
+        "phone_no":phone_no,
         "replyMarkedAt": now,
         "replyMarkedBy": marked_by,
         "replyMarkedByName": marked_by_name or marked_by,
@@ -401,9 +480,15 @@ async def mark_email_reply(
         {"email": {"$regex": f"^{normalized_email}$", "$options": "i"}},
         {"$set": update},
     )
-    if result.matched_count == 0:
+    verify_mail = await master.find_one({"email": {"$regex": f"^{normalized_email}$", "$options": "i"}})
+
+    if verify_mail is None:
         from app.core.exceptions import NotFoundException
         raise NotFoundException("Email record not found")
+
+    if verify_mail['hasReply'] == True:
+        from app.core.exceptions import AlreadyExistsException
+        raise AlreadyExistsException("Email already marked as replied")
 
     matched_cursor = master.find(
         {"email": {"$regex": f"^{normalized_email}$", "$options": "i"}},
@@ -470,14 +555,15 @@ async def _get_reply_marker_scope(user_id: str, role: str) -> set[str] | None:
         return None
 
     employees = get_collection("employees")
+    users = get_collection("users")
     scope: set[str] = {str(user_id)}
-    own_employee = await employees.find_one({"userId": user_id}, {"_id": 1})
+    own_employee = await employees.find_one({"userId": user_id})
     if not own_employee:
         from bson import ObjectId
 
         if ObjectId.is_valid(user_id):
             own_employee = await employees.find_one(
-                {"userId": ObjectId(user_id)}, {"_id": 1}
+                {"userId": ObjectId(user_id)}
             )
 
     own_employee_id = str(own_employee["_id"]) if own_employee else None
@@ -487,22 +573,45 @@ async def _get_reply_marker_scope(user_id: str, role: str) -> set[str] | None:
     if role != "admin" or not own_employee_id:
         return scope
 
-    assigned_queries = [{"assignedToAdmin": own_employee_id}]
-    from bson import ObjectId
+    # For admin, get all employees in the same branch
+    admin_branch = own_employee.get("branch") if own_employee else None
+    if not admin_branch:
+        from app.utils.response import to_object_id
+        admin_u = await users.find_one({"_id": to_object_id(user_id)}, {"branch": 1})
+        admin_branch = (admin_u or {}).get("branch")
 
-    if ObjectId.is_valid(own_employee_id):
-        assigned_queries.append({"assignedToAdmin": ObjectId(own_employee_id)})
-    seen_employee_ids: set[str] = set()
-    for assigned_query in assigned_queries:
-        assigned = employees.find(assigned_query, {"_id": 1, "userId": 1})
-        async for employee in assigned:
-            employee_id = str(employee["_id"])
-            if employee_id in seen_employee_ids:
-                continue
-            seen_employee_ids.add(employee_id)
-            scope.add(employee_id)
-            if employee.get("userId"):
-                scope.add(str(employee["userId"]))
+    if admin_branch:
+        import re
+        branch_regex = {"$regex": f"^{re.escape(str(admin_branch).strip())}$", "$options": "i"} 
+
+        # Only include branch users whose role is 'employee'
+        branch_users = [
+            u async for u in users.find(
+                {"branch": branch_regex, "role": "employee"},
+                {"_id": 1}
+            )
+        ]
+        for u in branch_users:
+            scope.add(str(u["_id"]))
+
+        branch_uids = [str(u["_id"]) for u in branch_users] + [u["_id"] for u in branch_users]
+        assigned = employees.find({
+            "userId": {"$in": branch_uids}
+        }, {"_id": 1, "userId": 1})
+    else:
+        assigned = employees.find({
+            "assignedToAdmin": {"$in": [own_employee_id, to_object_id(own_employee_id)]}
+        }, {"_id": 1, "userId": 1})
+
+    async for employee in assigned:
+        scope.add(str(employee["_id"]))
+        if employee.get("userId"):
+            scope.add(str(employee["userId"]))
+
+    # Always ensure admin's own IDs are included
+    scope.add(str(user_id))
+    if own_employee_id:
+        scope.add(own_employee_id)
 
     return scope
 
@@ -696,6 +805,7 @@ async def update_email_reply(
 
     has_reply = payload.get("hasReply", doc.get("hasReply", False))
     reason = payload.get("reason", doc.get("replyReason"))
+    phone_no = payload.get("phone_no", doc.get("phone_no"))
     custom_reason = payload.get("customReason", doc.get("replyCustomReason"))
     if has_reply and not reason:
         raise BadRequestException("reason is required when hasReply is true")
@@ -705,6 +815,7 @@ async def update_email_reply(
     update = {
         "hasReply": has_reply,
         "replyReason": reason if has_reply else None,
+        "phone_no": phone_no if has_reply else None,
         "replyCustomReason": custom_reason if has_reply else None,
         "replyMarkedAt": now if has_reply else None,
         "replyMarkedBy": marked_by if has_reply else None,
@@ -720,7 +831,7 @@ async def update_email_reply(
 
 
 async def delete_email(email_id: str) -> None:
-    """ADMIN ONLY: Delete email from global pool."""
+    """FULL ADMIN + SUPER ADMIN: Delete email from global pool."""
     master = get_collection(COLLECTION)
     result = await master.delete_one({"_id": to_object_id(email_id)})
     if result.deleted_count == 0:
@@ -728,60 +839,115 @@ async def delete_email(email_id: str) -> None:
         raise NotFoundException("Email record not found")
 
 
-async def delete_emails_by_upload_month_range(
-    start_month: int,
-    start_year: int,
-    end_month: int,
-    end_year: int,
+async def update_email(email_id: str, update_data: dict) -> dict:
+    """FULL ADMIN + SUPER ADMIN: Update editable contact fields on an email_master record.
+    Email address cannot be changed. Only provided fields are updated."""
+    # Safety: never allow email address to be changed
+    update_data.pop("email", None)
+
+    if not update_data:
+        from app.core.exceptions import BadRequestException
+        raise BadRequestException("No fields provided to update")
+
+    master = get_collection(COLLECTION)
+    now = datetime.now(timezone.utc)
+    update_data["updatedAt"] = now
+
+    updated = await master.find_one_and_update(
+        {"_id": to_object_id(email_id)},
+        {"$set": update_data},
+        return_document=True,
+    )
+    if not updated:
+        from app.core.exceptions import NotFoundException
+        raise NotFoundException("Email record not found")
+
+    # Invalidate dropdown cache so updated country/domain etc. appear immediately
+    invalidate_dropdown_cache()
+
+    # Replicate updated fields to all associated profile_emails working copies
+    profile_emails_col = get_collection("profile_emails")
+    # Only copy fields that exist in profile_emails schema/model
+    allowed_profile_fields = {
+        "fullName", "university", "website", "country", "state",
+        "city", "domain", "industry", "designation", "phone", "linkedin"
+    }
+    replicate_data = {k: v for k, v in update_data.items() if k in allowed_profile_fields}
+    if replicate_data:
+        replicate_data["updatedAt"] = now
+        await profile_emails_col.update_many(
+            {"masterEmailId": str(email_id)},
+            {"$set": replicate_data},
+        )
+
+    return serialize_doc(updated)
+
+
+
+
+async def delete_emails_filtered(
+    start_date: date | None = None,
+    end_date: date | None = None,
+    uploaded_by: str | None = None,
+    domains: str | None = None,
+    country: str | None = None,
 ) -> dict:
-    """Delete email-master records uploaded during an inclusive month range."""
-    try:
-        start_date = datetime(start_year, start_month, 1, tzinfo=timezone.utc)
-        end_date = datetime(end_year, end_month, 1, tzinfo=timezone.utc)
-    except ValueError as exc:
-        raise BadRequestException("Month and year values must be valid") from exc
+    """Delete email-master records based on optional filters."""
+    query = {}
+    
+    if start_date or end_date:
+        date_query = {}
+        if start_date:
+            start_datetime = datetime.combine(start_date, time.min, tzinfo=timezone.utc)
+            date_query["$gte"] = start_datetime
+        if end_date:
+            end_exclusive = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=timezone.utc)
+            date_query["$lt"] = end_exclusive
+        query["uploadedDate"] = date_query
+        
+    and_conditions = []
+    
+    if uploaded_by:
+        and_conditions.append({
+            "$or": [
+                {"uploadedBy": uploaded_by},
+                {"uploadedByName": {"$regex": f"^{re.escape(uploaded_by)}$", "$options": "i"}}
+            ]
+        })
+        
+    if domains:
+        domain_list = _filter_values(domains)
+        if domain_list:
+            and_conditions.append({
+                "$or": [
+                    {"domain": {"$in": domain_list}},
+                    {"domain_group": {"$in": domain_list}}
+                ]
+            })
+            
+    if country:
+        country_list = _filter_values(country)
+        if country_list:
+            query["country"] = {"$in": country_list}
 
-    if start_date > end_date:
-        raise BadRequestException("Start month must not be after end month")
+    if and_conditions:
+        query["$and"] = and_conditions
 
-    if end_month == 12:
-        end_exclusive = datetime(end_year + 1, 1, 1, tzinfo=timezone.utc)
-    else:
-        end_exclusive = datetime(end_year, end_month + 1, 1, tzinfo=timezone.utc)
+    if not query:
+        raise BadRequestException("At least one filter must be provided to prevent accidental full deletion.")
 
-    query = {"uploadedDate": {"$gte": start_date, "$lt": end_exclusive}}
     master = get_collection(COLLECTION)
     result = await master.delete_many(query)
+    
     return {
         "deletedCount": result.deleted_count,
-        "startMonth": start_month,
-        "startYear": start_year,
-        "endMonth": end_month,
-        "endYear": end_year,
-    }
-
-
-async def delete_emails_by_upload_date_range(
-    start_date: date,
-    end_date: date,
-) -> dict:
-    """Delete email-master records uploaded during an inclusive date range."""
-    if start_date > end_date:
-        raise BadRequestException("Start date must not be after end date")
-    if end_date == date.max:
-        raise BadRequestException("End date is out of range")
-
-    start_datetime = datetime.combine(start_date, time.min, tzinfo=timezone.utc)
-    end_exclusive = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=timezone.utc)
-
-    master = get_collection(COLLECTION)
-    result = await master.delete_many({
-        "uploadedDate": {"$gte": start_datetime, "$lt": end_exclusive}
-    })
-    return {
-        "deletedCount": result.deleted_count,
-        "startDate": start_date.isoformat(),
-        "endDate": end_date.isoformat(),
+        "filtersApplied": {
+            "startDate": start_date.isoformat() if start_date else None,
+            "endDate": end_date.isoformat() if end_date else None,
+            "uploadedBy": uploaded_by,
+            "domains": domains,
+            "country": country,
+        }
     }
 
 
@@ -789,21 +955,18 @@ async def _update_dropdown_filters(docs_to_insert: list[dict], uploaded_by_id: s
     if not docs_to_insert:
         return
 
-    def values_for(field: str, flatten: bool = False) -> set[str]:
+    def values_for(field: str) -> set[str]:
         values: set[str] = set()
         for doc in docs_to_insert:
             raw_value = doc.get(field)
-            raw_values = raw_value if flatten and isinstance(raw_value, list) else [raw_value]
-            for value in raw_values:
-                if value is not None and str(value).strip():
-                    values.add(str(value).strip())
+            if raw_value is not None and str(raw_value).strip():
+                values.add(str(raw_value).strip())
         return values
 
-    unified_domains = values_for("domain") | values_for("domain_group", flatten=True)
     update_data = {
         field: {"$each": sorted(values)}
         for field, values in {
-            "domains": unified_domains,
+            "domains": values_for("domain"),
             "countries": values_for("country"),
             "states": values_for("state"),
             "universities": values_for("university"),
@@ -827,6 +990,82 @@ async def _update_dropdown_filters(docs_to_insert: list[dict], uploaded_by_id: s
             upsert=True
         )
         invalidate_dropdown_cache()
+
+
+async def rebuild_dropdown_filters() -> dict:
+    """SUPER ADMIN ONLY: Rebuild filter_dropdowns from scratch by scanning
+    the current email_master collection. Call after bulk deletions to remove
+    stale country/domain/state options."""
+    master = get_collection(COLLECTION)
+    filter_col = get_collection(FILTER_DROPDOWN_COLLECTION)
+
+    pipeline = [
+        {
+            "$group": {
+                "_id": None,
+                "countries":      {"$addToSet": "$country"},
+                "states":         {"$addToSet": "$state"},
+                "universities":   {"$addToSet": "$university"},
+                "designations":   {"$addToSet": "$designation"},
+                "mailSources":    {"$addToSet": "$mailSource"},
+                "domains":        {"$addToSet": "$domain"},
+            }
+        }
+    ]
+
+    result = await master.aggregate(pipeline).to_list(1)
+
+    def _clean(values: list) -> list:
+        return sorted({str(v).strip() for v in (values or []) if v and str(v).strip()})
+
+    if result:
+        row = result[0]
+        all_domains = _clean(row.get("domains"))
+        countries    = _clean(row.get("countries"))
+        states       = _clean(row.get("states"))
+        universities = _clean(row.get("universities"))
+        designations = _clean(row.get("designations"))
+        mail_sources = _clean(row.get("mailSources"))
+    else:
+        all_domains = countries = states = universities = designations = mail_sources = []
+
+    # Rebuild unique uploader list
+    uploaders: list[dict] = []
+    seen_ids: set[str] = set()
+    async for doc in master.find({}, {"uploadedBy": 1, "uploadedByName": 1}):
+        uid = str(doc.get("uploadedBy") or "").strip()
+        uname = str(doc.get("uploadedByName") or "").strip()
+        if uid and uid not in seen_ids:
+            seen_ids.add(uid)
+            uploaders.append({"id": uid, "name": uname or uid})
+
+    new_doc = {
+        "_id":             FILTER_DROPDOWN_ID,
+        "countries":       countries,
+        "states":          states,
+        "universities":    universities,
+        "designations":    designations,
+        "mailSources":     mail_sources,
+        "domains":         all_domains,
+        "uploaders":       uploaders,
+        "usedByEmployees": [],
+        "lastUpdated":     datetime.now(timezone.utc),
+    }
+
+    # Full replace — removes any values no longer in email_master
+    await filter_col.replace_one({"_id": FILTER_DROPDOWN_ID}, new_doc, upsert=True)
+    invalidate_dropdown_cache()
+
+    return {
+        "countries":    len(countries),
+        "states":       len(states),
+        "universities": len(universities),
+        "designations": len(designations),
+        "mailSources":  len(mail_sources),
+        "domains":      len(all_domains),
+        "uploaders":    len(uploaders),
+    }
+
 
 async def get_dropdown_options() -> dict:
     """Returns dropdown options from the pre-computed filter_dropdowns collection."""
@@ -921,25 +1160,77 @@ async def count_filtered_emails(filters: dict) -> dict:
     type_values = _filter_values(filters.get("type"))
 
     if country_values:
-        query["country"] = {"$in": country_values}
+        country_rx = [re.compile(f"^{re.escape(v)}$", re.IGNORECASE) for v in country_values]
+        query["country"] = {"$in": country_rx}
     if state_values:
-        query["state"] = {"$in": state_values}
+        state_rx = [re.compile(f"^{re.escape(v)}$", re.IGNORECASE) for v in state_values]
+        query["state"] = {"$in": state_rx}
     if domain_values:
-        query["$or"] = [
-            {"domain": {"$in": domain_values}},
-            {"domain_group": {"$in": domain_values}},
-        ]
-    if university_values:
-        query["university"] = {"$in": university_values}
-    if mail_source_values:
-        query["mailSource"] = {"$in": mail_source_values}
-    if type_values:
-        query.setdefault("$and", []).append({
+        domain_rx = [re.compile(f"^{re.escape(v)}$", re.IGNORECASE) for v in domain_values]
+        domain_condition = {
             "$or": [
-                {"industry": {"$in": type_values}},
-                {"designation": {"$in": type_values}},
+                {"domain": {"$in": domain_rx}},
+                {"domain_group": {"$in": domain_rx}},
             ]
-        })
+        }
+        query.setdefault("$and", []).append(domain_condition)
+    if university_values:
+        if len(university_values) == 1:
+            query["university"] = {"$regex": re.escape(university_values[0]), "$options": "i"}
+        else:
+            uni_or = {"$or": [{"university": {"$regex": re.escape(u), "$options": "i"}} for u in university_values]}
+            query.setdefault("$and", []).append(uni_or)
+    if mail_source_values:
+        mail_rx = [re.compile(f"^{re.escape(v)}$", re.IGNORECASE) for v in mail_source_values]
+        query["mailSource"] = {"$in": mail_rx}
+    if type_values:
+        # Case-insensitive match on industry and designation
+        type_rx = [re.compile(f"^{re.escape(v)}$", re.IGNORECASE) for v in type_values]
+        type_or = {"$or": [
+            {"industry": {"$in": type_rx}},
+            {"designation": {"$in": type_rx}},
+        ]}
+        if "$and" in query:
+            query["$and"].append(type_or)
+        else:
+            query["$or"] = type_or["$or"]
+
+    # ── date filter (from profile filters) ───────────────────────────────────
+    if filters.get("date_filter") and filters.get("date_range"):
+        now = datetime.now(timezone.utc)
+        date_range = filters["date_range"]
+        if date_range == "last_30_days":
+            query["uploadedDate"] = {"$gte": now - timedelta(days=30)}
+        elif date_range == "last_3_months":
+            query["uploadedDate"] = {"$gte": now - timedelta(days=90)}
+        elif date_range == "custom":
+            date_q: dict = {}
+            raw_start = filters.get("start_date")
+            raw_end = filters.get("end_date")
+            if raw_start:
+                try:
+                    from datetime import date as _date
+                    parts = raw_start.split("-")
+                    # Support YYYY-MM-DD and DD-MM-YYYY
+                    if len(parts[0]) == 4:
+                        y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
+                    else:
+                        d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
+                    date_q["$gte"] = datetime(y, m, d, 0, 0, 0, tzinfo=timezone.utc)
+                except Exception:
+                    pass
+            if raw_end:
+                try:
+                    parts = raw_end.split("-")
+                    if len(parts[0]) == 4:
+                        y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
+                    else:
+                        d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
+                    date_q["$lte"] = datetime(y, m, d, 23, 59, 59, tzinfo=timezone.utc)
+                except Exception:
+                    pass
+            if date_q:
+                query["uploadedDate"] = date_q
 
     total_count = await master.count_documents(query)
     return {"totalMatching": total_count}
@@ -982,31 +1273,77 @@ async def query_for_profile(
     type_values = _filter_values(filters.get("type"))
 
     if country_values:
-        query["country"] = {"$in": country_values}
+        country_rx = [re.compile(f"^{re.escape(v)}$", re.IGNORECASE) for v in country_values]
+        query["country"] = {"$in": country_rx}
     if state_values:
-        query["state"] = {"$in": state_values}
+        state_rx = [re.compile(f"^{re.escape(v)}$", re.IGNORECASE) for v in state_values]
+        query["state"] = {"$in": state_rx}
     if domain_values:
+        domain_rx = [re.compile(f"^{re.escape(v)}$", re.IGNORECASE) for v in domain_values]
         domain_condition = {
             "$or": [
-                {"domain": {"$in": domain_values}},
-                {"domain_group": {"$in": domain_values}},
+                {"domain": {"$in": domain_rx}},
+                {"domain_group": {"$in": domain_rx}},
             ]
         }
         query.setdefault("$and", []).append(domain_condition)
     if university_values:
-        query["university"] = {"$in": university_values}
+        if len(university_values) == 1:
+            query["university"] = {"$regex": re.escape(university_values[0]), "$options": "i"}
+        else:
+            uni_or = {"$or": [{"university": {"$regex": re.escape(u), "$options": "i"}} for u in university_values]}
+            query.setdefault("$and", []).append(uni_or)
     if mail_source_values:
-        query["mailSource"] = {"$in": mail_source_values}
+        mail_rx = [re.compile(f"^{re.escape(v)}$", re.IGNORECASE) for v in mail_source_values]
+        query["mailSource"] = {"$in": mail_rx}
     if type_values:
-        # Append to $and if it exists, otherwise use $or directly
+        # Case-insensitive match on industry and designation
+        type_rx = [re.compile(f"^{re.escape(v)}$", re.IGNORECASE) for v in type_values]
         type_or = {"$or": [
-            {"industry": {"$in": type_values}},
-            {"designation": {"$in": type_values}},
+            {"industry": {"$in": type_rx}},
+            {"designation": {"$in": type_rx}},
         ]}
         if "$and" in query:
             query["$and"].append(type_or)
         else:
             query["$or"] = type_or["$or"]
+
+    # ── date filter (from profile filters) ───────────────────────────────────
+    if filters.get("date_filter") and filters.get("date_range"):
+        now = datetime.now(timezone.utc)
+        date_range = filters["date_range"]
+        if date_range == "last_30_days":
+            query["uploadedDate"] = {"$gte": now - timedelta(days=30)}
+        elif date_range == "last_3_months":
+            query["uploadedDate"] = {"$gte": now - timedelta(days=90)}
+        elif date_range == "custom":
+            date_q: dict = {}
+            raw_start = filters.get("start_date")
+            raw_end = filters.get("end_date")
+            if raw_start:
+                try:
+                    from datetime import date as _date
+                    parts = raw_start.split("-")
+                    # Support YYYY-MM-DD and DD-MM-YYYY
+                    if len(parts[0]) == 4:
+                        y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
+                    else:
+                        d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
+                    date_q["$gte"] = datetime(y, m, d, 0, 0, 0, tzinfo=timezone.utc)
+                except Exception:
+                    pass
+            if raw_end:
+                try:
+                    parts = raw_end.split("-")
+                    if len(parts[0]) == 4:
+                        y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
+                    else:
+                        d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
+                    date_q["$lte"] = datetime(y, m, d, 23, 59, 59, tzinfo=timezone.utc)
+                except Exception:
+                    pass
+            if date_q:
+                query["uploadedDate"] = date_q
 
     # A positive filter limit caps the result; zero or missing means no limit.
     fetch_limit = filter_limit if filter_limit > 0 else None
@@ -1014,29 +1351,30 @@ async def query_for_profile(
     if fetch_limit is None:
         cursor = master.find(query)
         all_results = serialize_list([d async for d in cursor])
-    elif not filters.get("mailSource"):
-        # Fetch random sample when mailSource is empty
-        pipeline = [
-            {"$match": query},
-            {"$sample": {"size": fetch_limit * 2}}
-        ]
-        cursor = master.aggregate(pipeline)
-        all_results = serialize_list([d async for d in cursor])
-    else:
-        # Fetch sequentially when mailSource is specified
-        cursor = master.find(query).limit(fetch_limit * 2)  # Fetch extra to account for skipped
-        all_results = serialize_list([d async for d in cursor])
-    
-    # Filter in application code: we no longer skip based on used_by_id since we check inProfileEmails
-    # and we want to allow sharing. But just to be safe if there's legacy data, we just append all.
-    available_results = []
-    for email_record in all_results:
-        # All fetched records are valid because we filtered out inProfileEmails = True
-        # and usageCount > 0 (if allowUsed was false) at the DB level.
-        available_results.append(email_record)
-    
-    # Return only the requested limit
-    return available_results if fetch_limit is None else available_results[:fetch_limit]
+        return _apply_profile_email_domain_limits(all_results, 0)
+
+    matching_count = await master.count_documents(query)
+    if matching_count == 0:
+        return []
+
+    sample_size = min(matching_count, max(fetch_limit * 2, fetch_limit + 100))
+    while True:
+        if filters.get("mailSource"):
+            cursor = master.find(query).limit(sample_size)
+        else:
+            cursor = master.aggregate([
+                {"$match": query},
+                {"$sample": {"size": sample_size}},
+            ])
+        candidates = serialize_list([doc async for doc in cursor])
+        # Apply Gmail exclusion and per-domain limits only after the profile
+        # filters have selected the candidate records.
+        available_results = _apply_profile_email_domain_limits(
+            candidates, fetch_limit
+        )
+        if len(available_results) >= fetch_limit or sample_size >= matching_count:
+            return available_results[:fetch_limit]
+        sample_size = min(matching_count, sample_size * 2)
 
 
 async def mark_used_in_profile(master_ids: list[str], profile_id: str, employee_id: str) -> None:

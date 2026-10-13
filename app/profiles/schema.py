@@ -12,6 +12,11 @@ class ProfileFilters(BaseModel):
     type: list[str] = Field(default_factory=list)  # maps to designation / industry
     mailSource: list[str] = Field(default_factory=list)  # Google Scholar, University, Other
     allowUsed: bool = Field(default=False, description="If True, allow reusing emails that have been used before (usageCount > 0) but are currently unlocked")
+    # ── Date filter ────────────────────────────────────────────────────────────
+    date_filter: bool = Field(default=False, description="Enable upload-date filtering when generating the email list")
+    date_range: str | None = Field(default=None, description="last_30_days | last_3_months | custom")
+    start_date: str | None = Field(default=None, description="Custom start date (YYYY-MM-DD), used when date_range='custom'")
+    end_date: str | None = Field(default=None, description="Custom end date (YYYY-MM-DD), used when date_range='custom'")
 
 
 class ProfileSendingOptions(BaseModel):

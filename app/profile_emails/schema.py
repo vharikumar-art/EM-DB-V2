@@ -47,7 +47,6 @@ class GenerateListRequest(BaseModel):
     If omitted, profile's stored filters are used.
     """
     overrideFilters: dict | None = None
-    limitOverride: int | None = Field(default=None, ge=1, le=50000)
     allowUsed: bool = Field(
         default=False,
         description="If True, allow fetching emails that have been previously used (usageCount > 0) but are not currently locked in a profile"

@@ -11,10 +11,10 @@ from fastapi import APIRouter, Depends, File, Query, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
-from app.core.dependencies import CurrentUser, get_current_user, require_admin, require_super_admin, require_write_access
+from app.core.dependencies import CurrentUser, get_current_user, require_admin, require_full_admin, require_super_admin, require_write_access
 from app.core.exceptions import BadRequestException
 from app.email_master import service
-from app.email_master.schema import MarkReplyRequest, UpdateReplyRequest, UploadResult
+from app.email_master.schema import EmailMasterUpdate, MarkReplyRequest, UpdateReplyRequest, UploadResult
 from app.schemas.common import ApiResponse, PaginationParams
 from app.utils.pagination import pagination_params
 
@@ -246,7 +246,8 @@ async def mark_email_reply(
         email=str(payload.email),
         reason=payload.reason,
         custom_reason=payload.customReason,
-        marked_by=current_user.user_id,
+        phone_no=payload.phone_no,
+        marked_by=current_user.user_id, 
         marked_by_name=await service.get_user_display_name(current_user.user_id),
     )
     return ApiResponse(message="Email reply marked", data=record)
@@ -298,37 +299,25 @@ async def update_email_reply(
     return ApiResponse(message="Email reply updated", data=record)
 
 
-@router.delete("/admin/delete-by-upload-month-range", response_model=ApiResponse)
-async def delete_emails_by_upload_month_range(
-    startMonth: int = Query(..., ge=1, le=12),
-    startYear: int = Query(..., ge=1, le=9998),
-    endMonth: int = Query(..., ge=1, le=12),
-    endYear: int = Query(..., ge=1, le=9998),
-    current_user: CurrentUser = Depends(require_super_admin),
+@router.delete("/admin/delete-filtered", response_model=ApiResponse)
+async def delete_emails_filtered(
+    startDate: str = Query(None, description="Start date (DD-MM-YYYY or YYYY-MM-DD)"),
+    endDate: str = Query(None, description="End date (DD-MM-YYYY or YYYY-MM-DD, inclusive)"),
+    uploadedBy: str = Query(None, description="Uploaded By (name or ID)"),
+    domains: str = Query(None, description="Comma-separated domains"),
+    country: str = Query(None, description="Comma-separated countries"),
+    current_user: CurrentUser = Depends(require_full_admin),
 ):
-    """Delete email-master records uploaded within an inclusive month range."""
-    result = await service.delete_emails_by_upload_month_range(
-        start_month=startMonth,
-        start_year=startYear,
-        end_month=endMonth,
-        end_year=endYear,
-    )
-    return ApiResponse(
-        message=f"Deleted {result['deletedCount']} email(s) from email master",
-        data=result,
-    )
+    """FULL ADMIN + SUPER ADMIN: Delete email-master records based on optional filters: date range, uploadedBy, domains, country."""
+    start_dt = _parse_date_range_param(startDate, "startDate") if startDate else None
+    end_dt = _parse_date_range_param(endDate, "endDate") if endDate else None
 
-
-@router.delete("/admin/delete-by-upload-date-range", response_model=ApiResponse)
-async def delete_emails_by_upload_date_range(
-    startDate: str = Query(..., description="Start date (DD-MM-YYYY or YYYY-MM-DD)"),
-    endDate: str = Query(..., description="End date (DD-MM-YYYY or YYYY-MM-DD, inclusive)"),
-    current_user: CurrentUser = Depends(require_super_admin),
-):
-    """Delete email-master records uploaded within an inclusive date range."""
-    result = await service.delete_emails_by_upload_date_range(
-        start_date=_parse_date_range_param(startDate, "startDate"),
-        end_date=_parse_date_range_param(endDate, "endDate"),
+    result = await service.delete_emails_filtered(
+        start_date=start_dt,
+        end_date=end_dt,
+        uploaded_by=uploadedBy,
+        domains=domains,
+        country=country,
     )
     return ApiResponse(
         message=f"Deleted {result['deletedCount']} email(s) from email master",
@@ -346,12 +335,25 @@ async def get_email(
     return ApiResponse(message="Email record fetched", data=record)
 
 
+@router.patch("/{email_id}", response_model=ApiResponse)
+async def update_email(
+    email_id: str,
+    payload: EmailMasterUpdate,
+    current_user: CurrentUser = Depends(require_full_admin),
+):
+    """FULL ADMIN + SUPER ADMIN: Update editable contact fields of an email master record.
+    Email address cannot be changed."""
+    update_data = payload.model_dump(exclude_unset=True)
+    record = await service.update_email(email_id, update_data)
+    return ApiResponse(message="Email record updated", data=record)
+
+
 @router.delete("/{email_id}", response_model=ApiResponse)
 async def delete_email(
     email_id: str,
-    current_user: CurrentUser = Depends(require_super_admin),
+    current_user: CurrentUser = Depends(require_full_admin),
 ):
-    """SUPER ADMIN ONLY: Delete email from GLOBAL pool."""
+    """FULL ADMIN + SUPER ADMIN: Delete a single email from GLOBAL pool."""
     await service.delete_email(email_id)
     return ApiResponse(message="Email deleted")
 
@@ -365,6 +367,20 @@ async def clear_all_emails(
     return ApiResponse(message="Email master cleared", data=result)
 
 
+@router.post("/admin/rebuild-dropdowns", response_model=ApiResponse)
+async def rebuild_dropdowns(
+    current_user: CurrentUser = Depends(require_super_admin),
+):
+    """SUPER ADMIN ONLY: Rebuild filter_dropdowns from scratch based on current
+    email_master data. Use after bulk deletions to remove stale country/domain/state options."""
+    result = await service.rebuild_dropdown_filters()
+    return ApiResponse(
+        message="Filter dropdowns rebuilt successfully from current email_master data",
+        data=result,
+    )
+
+
+
 @router.get("", response_model=ApiResponse)
 async def list_emails(
     country: List[str] = Query(default=[]),
@@ -376,6 +392,14 @@ async def list_emails(
     mailSource: List[str] = Query(default=[]),
     search: str | None = Query(default=None),
     includeDuplicates: bool = Query(default=True),
+    # ── Date filter ─────────────────────────────────────────────────────────
+    dateFilter: bool = Query(default=False, description="Enable upload-date filtering"),
+    dateRange: str | None = Query(
+        default=None,
+        description="last_30_days | last_3_months | custom",
+    ),
+    startDate: str | None = Query(default=None, description="Custom start date: YYYY-MM-DD or DD-MM-YYYY"),
+    endDate: str | None = Query(default=None, description="Custom end date: YYYY-MM-DD or DD-MM-YYYY"),
     params: PaginationParams = Depends(pagination_params),
     current_user: CurrentUser = Depends(get_current_user),
 ):
@@ -385,7 +409,21 @@ async def list_emails(
     - Repeat the param:  ?country=India&country=USA
     - Or comma-separate: ?country=India,USA
     Both formats work and are combined with OR logic (match any selected value).
+
+    Date filter examples:
+    - ?dateFilter=true&dateRange=last_30_days
+    - ?dateFilter=true&dateRange=last_3_months
+    - ?dateFilter=true&dateRange=custom&startDate=2026-01-01&endDate=2026-03-31
     """
+    # Parse custom date strings if provided
+    parsed_start: date | None = None
+    parsed_end: date | None = None
+    if dateFilter and dateRange == "custom":
+        if startDate:
+            parsed_start = _parse_date_range_param(startDate, "startDate")
+        if endDate:
+            parsed_end = _parse_date_range_param(endDate, "endDate")
+
     result = await service.list_emails(
         params,
         country=country or None,
@@ -397,6 +435,10 @@ async def list_emails(
         mail_source=mailSource or None,
         include_duplicates=includeDuplicates,
         search=search,
+        date_filter=dateFilter,
+        date_range=dateRange,
+        start_date=parsed_start,
+        end_date=parsed_end,
     )
     
     return ApiResponse(

@@ -40,9 +40,22 @@ class FakeEmployeesCollection:
 
     async def update_one(self, query, update):
         for doc in self.docs:
-            if doc.get("_id") == query.get("_id"):
+            if (
+                doc.get("_id") == query.get("_id")
+                or doc.get("userId") == query.get("userId")
+            ):
                 doc.update(update["$set"])
                 return
+
+
+class FakeProfilesCollection:
+    def __init__(self, docs):
+        self.docs = docs
+
+    async def update_many(self, query, update):
+        for doc in self.docs:
+            if doc.get("employeeId") == query.get("employeeId"):
+                doc.update(update["$set"])
 
 
 def test_demoting_admin_unassigns_subordinate_employees(monkeypatch):
@@ -143,3 +156,47 @@ def test_admin_cannot_change_user_role(monkeypatch):
                 CurrentUser("admin", "admin", "full"),
             )
         )
+
+
+def test_changing_employee_admin_refreshes_profile_admin_name(monkeypatch):
+    user_id = ObjectId()
+    employee_id = ObjectId()
+    admin_employee_id = str(ObjectId())
+    user_doc = {"_id": user_id, "role": UserRole.EMPLOYEE.value}
+    employee_doc = {
+        "_id": employee_id,
+        "userId": str(user_id),
+        "assignedToAdmin": None,
+    }
+    profile_doc = {"employeeId": str(employee_id), "assignedAdmin": "Previous Admin"}
+    users = FakeUsersCollection(user_doc)
+    employees = FakeEmployeesCollection([employee_doc])
+    profiles = FakeProfilesCollection([profile_doc])
+    monkeypatch.setattr(
+        service,
+        "get_collection",
+        lambda name: {
+            "users": users,
+            "employees": employees,
+            "profiles": profiles,
+        }[name],
+    )
+    monkeypatch.setattr(service, "serialize_user_with_password", lambda doc: doc)
+
+    async def resolve_admin_name(admin_id):
+        assert admin_id == admin_employee_id
+        return "Updated Admin"
+
+    from app.profiles import service as profiles_service
+    monkeypatch.setattr(profiles_service, "_resolve_admin_name", resolve_admin_name)
+
+    asyncio.run(
+        service.update_user(
+            str(user_id),
+            UserUpdate(assignedToAdmin=admin_employee_id),
+            CurrentUser("super-admin", "super_admin", "full"),
+        )
+    )
+
+    assert employee_doc["assignedToAdmin"] == admin_employee_id
+    assert profile_doc["assignedAdmin"] == "Updated Admin"

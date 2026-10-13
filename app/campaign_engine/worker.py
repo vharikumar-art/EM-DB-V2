@@ -48,6 +48,7 @@ logger = logging.getLogger("campaign_engine.worker")
 
 # How many profile_emails to load per iteration (keeps memory bounded)
 BATCH_SIZE = 50
+DOMAIN_DAILY_SEND_LIMIT = 5
 
 # How many consecutive auth failures before aborting
 MAX_AUTH_FAILURES = 3
@@ -252,6 +253,12 @@ async def _run(campaign_id: str) -> None:
     total_sent = 0
     total_failed = 0
     daily_limit: int = campaign.get("dailyLimit", 100)  # Get from campaign
+    sent_domain_counts = await pe_service.get_sent_domain_counts_today(profile_id)
+    excluded_domains = {
+        domain
+        for domain, sent_count in sent_domain_counts.items()
+        if domain != "gmail.com" and sent_count >= DOMAIN_DAILY_SEND_LIMIT
+    }
 
     while True:
         # Check if daily limit reached. For recurring campaigns, hitting the full
@@ -302,8 +309,34 @@ async def _run(campaign_id: str) -> None:
             return
 
         # Fetch next batch of PENDING emails
-        batch = await pe_service.get_pending_batch(profile_id, BATCH_SIZE)
+        if excluded_domains:
+            batch = await pe_service.get_pending_batch(
+                profile_id,
+                BATCH_SIZE,
+                excluded_domains=excluded_domains,
+            )
+        else:
+            batch = await pe_service.get_pending_batch(profile_id, BATCH_SIZE)
         if not batch:
+            if excluded_domains:
+                pending_batch = await pe_service.get_pending_batch(profile_id, 1)
+                if pending_batch:
+                    recurrence = campaign.get("recurrenceType", "once")
+                    if recurrence in ["daily", "weekly"]:
+                        logger.info(
+                            "Campaign %s has pending recipients, but all remaining domains reached today's limit.",
+                            campaign_id,
+                        )
+                        return
+                    logger.info(
+                        "Campaign %s has pending recipients for domains at today's limit; pausing until they can be retried.",
+                        campaign_id,
+                    )
+                    await campaign_service.set_status(
+                        campaign_id, CampaignStatus.PAUSED, employee_id, is_admin=True
+                    )
+                    return
+
             recurrence = campaign.get("recurrenceType", "once")
             if recurrence in ["daily", "weekly"]:
                 # For recurring campaigns, no pending emails this cycle is
@@ -342,6 +375,15 @@ async def _run(campaign_id: str) -> None:
 
             pe_id: str = pe["id"]
             lead_email: str = pe["email"]
+            recipient_domain = lead_email.rpartition("@")[2].casefold()
+            if (
+                recipient_domain
+                and recipient_domain != "gmail.com"
+                and sent_domain_counts.get(recipient_domain, 0)
+                >= DOMAIN_DAILY_SEND_LIMIT
+            ):
+                excluded_domains.add(recipient_domain)
+                continue
 
             # Mark as SENDING
             claimed = await pe_service.mark_sending(pe_id)
@@ -421,6 +463,15 @@ async def _run(campaign_id: str) -> None:
                 await record_sent(employee_id, count=1)
                 total_sent += 1
                 auth_failure_count = 0  # reset on success
+                if recipient_domain and recipient_domain != "gmail.com":
+                    sent_domain_counts[recipient_domain] = (
+                        sent_domain_counts.get(recipient_domain, 0) + 1
+                    )
+                    if (
+                        sent_domain_counts[recipient_domain]
+                        >= DOMAIN_DAILY_SEND_LIMIT
+                    ):
+                        excluded_domains.add(recipient_domain)
 
                 # Live progress push via WebSocket
                 await _push_progress(

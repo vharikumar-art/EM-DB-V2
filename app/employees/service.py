@@ -20,7 +20,9 @@ async def create_employee(payload: EmployeeCreate, current_user: CurrentUser) ->
     assigned_to_admin = payload.assignedToAdmin
     if current_user.role == "admin":
         admin_employee = await get_employee_by_user_id(current_user.user_id)
-        assigned_to_admin = admin_employee["id"]
+        # Override branch to admin's branch if not provided or to ensure they are created in the same branch
+        if not payload.branch:
+            payload.branch = admin_employee.get("branch")
 
     # Create the underlying auth user first.
     user = await create_user(
@@ -55,6 +57,8 @@ async def _attach_user_info(employee_doc: dict, include_password: bool = False) 
     employee_doc["name"] = user["name"] if user else None
     employee_doc["email"] = user["email"] if user else None
     employee_doc["userStatus"] = user["status"] if user else None
+    if not employee_doc.get("branch") and user and user.get("branch"):
+        employee_doc["branch"] = user["branch"]
     if include_password and user and user.get("passwordEncrypted"):
         employee_doc["password"] = decrypt_password(user["passwordEncrypted"])
     return employee_doc
@@ -70,12 +74,37 @@ async def list_employees(current_user: CurrentUser | None = None) -> list[dict]:
         try:
             admin_emp = await get_employee_by_user_id(current_user.user_id)
             admin_emp_id = str(admin_emp.get("id"))
-            query = {
-                "$or": [
-                    {"assignedToAdmin": admin_emp_id},
-                    {"_id": to_object_id(admin_emp_id)}
+            admin_branch = admin_emp.get("branch")
+
+            # Branch may only be on the users doc — fall back if not on employee doc
+            if not admin_branch:
+                users_col = get_collection("users")
+                admin_user_doc = await users_col.find_one(
+                    {"_id": to_object_id(current_user.user_id)}, {"branch": 1}
+                )
+                admin_branch = (admin_user_doc or {}).get("branch")
+            
+            if admin_branch:
+                import re
+                branch_regex = {"$regex": f"^{re.escape(str(admin_branch).strip())}$", "$options": "i"}
+                # Only include users whose role is 'employee' in this branch
+                users_col = get_collection("users")
+                branch_users = [
+                    u async for u in users_col.find(
+                        {"branch": branch_regex, "role": "employee"},
+                        {"_id": 1}
+                    )
                 ]
-            }
+                branch_user_ids = [str(u["_id"]) for u in branch_users] + [u["_id"] for u in branch_users]
+
+                query = {
+                    "$or": [
+                        {"_id": to_object_id(admin_emp_id)},
+                        {"userId": {"$in": branch_user_ids}},
+                    ]
+                }
+            else:
+                query = {"_id": to_object_id(admin_emp_id)}
         except Exception:
             # If admin has no employee profile, they should see NO employees, not ALL employees
             query = {"_id": "none"}
@@ -97,7 +126,33 @@ async def get_employee(employee_id: str, current_user: CurrentUser | None = None
         try:
             admin_emp = await get_employee_by_user_id(current_user.user_id)
             admin_emp_id = str(admin_emp.get("id"))
-            if str(doc["_id"]) != admin_emp_id and str(doc.get("assignedToAdmin")) != admin_emp_id:
+            admin_branch = admin_emp.get("branch")
+
+            # Fall back to users doc if branch not on employee doc
+            if not admin_branch:
+                users_col = get_collection("users")
+                admin_user_doc = await users_col.find_one(
+                    {"_id": to_object_id(current_user.user_id)}, {"branch": 1}
+                )
+                admin_branch = (admin_user_doc or {}).get("branch")
+
+            # Target branch: check employee doc, fall back to target user doc
+            target_branch = doc.get("branch")
+            if not target_branch:
+                t_user_id = str(doc.get("userId") or "")
+                if t_user_id:
+                    users_col = get_collection("users")
+                    t_user = await users_col.find_one(
+                        {"_id": to_object_id(t_user_id)}, {"branch": 1}
+                    )
+                    target_branch = (t_user or {}).get("branch")
+            
+            is_self = str(doc["_id"]) == admin_emp_id
+            is_same_branch = bool(
+                admin_branch and target_branch and str(admin_branch).strip().casefold() == str(target_branch).strip().casefold()
+            )
+            
+            if not is_self and not is_same_branch:
                 raise ForbiddenException("You don't have access to this employee")
         except NotFoundException:
             pass
@@ -166,8 +221,20 @@ async def update_employee(employee_id: str, payload: EmployeeUpdate, current_use
 
 async def delete_employee(employee_id: str, current_user: CurrentUser | None = None) -> None:
     employees = get_collection(COLLECTION)
-    # Check access
-    await get_employee(employee_id, current_user)
+    # Check access (ensures employee exists and matches branch)
+    emp_doc = await get_employee(employee_id, current_user)
+
+    if current_user and current_user.role == "admin":
+        from app.employees.service import get_employee_by_user_id
+        admin_emp = await get_employee_by_user_id(current_user.user_id)
+        is_self = str(admin_emp.get("id")) == str(employee_id)
+        
+        # Check target user role
+        if not is_self:
+            users = get_collection("users")
+            target_u = await users.find_one({"_id": to_object_id(str(emp_doc.get("userId")))})
+            if target_u and target_u.get("role") in {"admin", "super_admin"}:
+                raise ForbiddenException("Admins cannot delete other admins or super admins")
     
     result = await employees.delete_one({"_id": to_object_id(employee_id)})
     if result.deleted_count == 0:

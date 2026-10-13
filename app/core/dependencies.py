@@ -97,20 +97,68 @@ async def resolve_employee_context(
         
     if current_user.role == "admin":
         employees_col = get_collection("employees")
+
+        async def _get_admin_branch() -> str | None:
+            """Branch from employee doc, falling back to users doc."""
+            branch = employee.get("branch")
+            if not branch:
+                users_col = get_collection("users")
+                user_doc = await users_col.find_one(
+                    {"_id": to_object_id(current_user.user_id)}, {"branch": 1}
+                )
+                branch = (user_doc or {}).get("branch")
+            return branch
+
         if employee_id_param:
             if employee_id_param == employee_id:
                 return employee_id, True
             try:
                 target_emp = await employees_col.find_one({"_id": to_object_id(employee_id_param)})
-                if target_emp and str(target_emp.get("assignedToAdmin")) == employee_id:
-                    return employee_id_param, True
+                if target_emp:
+                    if current_user.access_level == "partial" and str(target_emp.get("assignedToAdmin")) == employee_id:
+                        return employee_id_param, True
+                    if current_user.access_level == "full":
+                        admin_branch = await _get_admin_branch()
+                        # Target branch: check employee doc first, fall back to user doc
+                        target_branch = target_emp.get("branch")
+                        if not target_branch:
+                            t_user_id = str(target_emp.get("userId") or "")
+                            if t_user_id:
+                                users_col = get_collection("users")
+                                t_user = await users_col.find_one(
+                                    {"_id": to_object_id(t_user_id)}, {"branch": 1}
+                                )
+                                target_branch = (t_user or {}).get("branch")
+                        if admin_branch and target_branch and str(admin_branch).strip().casefold() == str(target_branch).strip().casefold():
+                            return employee_id_param, True
             except Exception:
                 pass
             raise ForbiddenException("You do not have access to this employee's data")
         else:
-            # Return list of their own ID + subordinates
-            subordinates = await employees_col.find({"assignedToAdmin": employee_id}).to_list(None)
-            allowed_ids = [employee_id] + [str(sub["_id"]) for sub in subordinates]
+            if current_user.access_level == "partial":
+                subordinates = await employees_col.find({"assignedToAdmin": employee_id}).to_list(None)
+            else:
+                admin_branch = await _get_admin_branch()
+                if admin_branch:
+                    import re
+                    branch_regex = {"$regex": f"^{re.escape(str(admin_branch).strip())}$", "$options": "i"}
+                    users_col = get_collection("users")
+                    # Only include branch users whose role is 'employee'
+                    branch_users = [
+                        u async for u in users_col.find(
+                            {"branch": branch_regex, "role": "employee"},
+                            {"_id": 1}
+                        )
+                    ]
+                    branch_user_ids = [str(u["_id"]) for u in branch_users] + [u["_id"] for u in branch_users]
+
+                    subordinates = await employees_col.find({
+                        "userId": {"$in": branch_user_ids}
+                    }).to_list(None)
+                else:
+                    subordinates = []
+                    
+            allowed_ids = [employee_id] + [str(sub["_id"]) for sub in subordinates if str(sub["_id"]) != employee_id]
             return allowed_ids, True
             
     return employee_id, False

@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import re
 from typing import Any
 
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
@@ -15,34 +16,6 @@ from app.utils.response import serialize_doc, serialize_list, to_object_id
 COLLECTION = "profile_emails"
 
 
-def _normalize_daily_limit(value: int | None) -> int:
-    """Treat blank/zero values as the default daily cap of 100."""
-    if value in (None, "", 0):
-        return 100
-    return int(value)
-
-
-def _get_effective_generation_limit(daily_limit: int | None, filter_limit: int | None, is_admin: bool) -> int:
-    """Return the effective batch limit for profile-email generation.
-
-    No fixed hard cap is enforced. If the user sets a filter limit it wins;
-    otherwise we use the daily limit, with blank/zero values defaulting to 100.
-    """
-    daily_limit = _normalize_daily_limit(daily_limit)
-    if filter_limit in (None, "", 0):
-        filter_limit = 0
-    else:
-        filter_limit = int(filter_limit)
-
-    if is_admin:
-        return daily_limit
-
-    requested_limit = filter_limit or daily_limit or 0
-    if requested_limit <= 0:
-        return 100
-    return requested_limit
-
-
 # ---------------------------------------------------------------------------
 # Generate list
 # ---------------------------------------------------------------------------
@@ -52,7 +25,6 @@ async def generate_list(
     employee_id: str,
     is_admin: bool,
     override_filters: dict | None = None,
-    limit_override: int | None = None,
     allow_used: bool = False,
 ) -> dict:
     """
@@ -65,16 +37,8 @@ async def generate_list(
     filters: dict = override_filters or profile.get("filters", {})
     # Inject the allow_used flag: request value takes priority, else fall back to profile's stored setting
     filters["allowUsed"] = allow_used or filters.get("allowUsed", False)
-    sending_opts: dict = profile.get("sendingOptions", {})
-    daily_limit: int = limit_override or sending_opts.get("dailyLimit", 100)
-    filter_limit: int = profile.get("filterLimit", 0)
-
+    generation_limit = int(profile.get("filterLimit") or 0)
     profile_emails_col = get_collection(COLLECTION)
-    effective_daily_limit = _get_effective_generation_limit(
-        daily_limit=daily_limit,
-        filter_limit=filter_limit,
-        is_admin=is_admin,
-    )
     
     # CHECK: Profile email generation LOCK
     # If profile already has emails generated, cannot generate again
@@ -96,8 +60,8 @@ async def generate_list(
     # Pass employee_id so query skips emails assigned to OTHER employees
     master_records = await query_for_profile(
         filters=filters,
-        daily_limit=effective_daily_limit,
-        filter_limit=effective_daily_limit,
+        daily_limit=0,
+        filter_limit=generation_limit,
         employee_id=profile["employeeId"],  # Pass employee ID
     )
 
@@ -413,16 +377,57 @@ async def bulk_delete(
 # ---------------------------------------------------------------------------
 
 async def get_pending_batch(
-    profile_id: str, batch_size: int
+    profile_id: str,
+    batch_size: int,
+    excluded_domains: set[str] | None = None,
 ) -> list[dict]:
     """Fetch the next batch of PENDING rows for a campaign run."""
     col = get_collection(COLLECTION)
+    query: dict = {
+        "profileId": profile_id,
+        "sendStatus": SendStatus.PENDING.value,
+    }
+    if excluded_domains:
+        query["$and"] = [
+            {
+                "email": {
+                    "$not": {
+                        "$regex": f"@{re.escape(domain)}$",
+                        "$options": "i",
+                    }
+                }
+            }
+            for domain in excluded_domains
+        ]
     cursor = (
-        col.find({"profileId": profile_id, "sendStatus": SendStatus.PENDING.value})
+        col.find(query)
         .sort("createdAt", 1)
         .limit(batch_size)
     )
     return serialize_list([d async for d in cursor])
+
+
+async def get_sent_domain_counts_today(profile_id: str) -> dict[str, int]:
+    """Count this profile's successfully sent recipients per domain today (UTC)."""
+    col = get_collection(COLLECTION)
+    now = datetime.now(timezone.utc)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    cursor = col.find(
+        {
+            "profileId": profile_id,
+            "sendStatus": SendStatus.SENT.value,
+            "sentDate": {"$gte": day_start},
+        },
+        {"email": 1},
+    )
+
+    counts: dict[str, int] = {}
+    async for doc in cursor:
+        domain = str(doc.get("email") or "").rsplit("@", 1)
+        if len(domain) == 2 and domain[1]:
+            key = domain[1].casefold()
+            counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
 async def mark_sending(profile_email_id: str) -> bool:

@@ -8,6 +8,7 @@ from app.campaign_engine import worker
 
 
 def test_worker_stops_recurring_campaign_at_daily_limit(monkeypatch):
+    monkeypatch.setattr(worker.asyncio, "sleep", AsyncMock())
     campaign_id = str(ObjectId())
     profile_id = str(ObjectId())
     employee_id = str(ObjectId())
@@ -46,8 +47,16 @@ def test_worker_stops_recurring_campaign_at_daily_limit(monkeypatch):
         async def find_one(self, query, *args, **kwargs):
             return profile_doc if query.get("_id") == ObjectId(profile_id) else None
 
-    async def fake_get_pending_batch(profile_id_arg, batch_size):
-        return [lead] if campaign_doc["pending"] > 0 else []
+    async def fake_get_pending_batch(
+        profile_id_arg, batch_size, excluded_domains=None
+    ):
+        if campaign_doc["pending"] <= 0:
+            return []
+        sent_count = campaign_doc["sent"]
+        return [{
+            **lead,
+            "email": f"lead{sent_count}@domain{sent_count}.example",
+        }]
 
     async def fake_set_status(campaign_id_arg, new_status, employee_id_arg, is_admin):
         campaign_doc["status"] = new_status
@@ -78,6 +87,11 @@ def test_worker_stops_recurring_campaign_at_daily_limit(monkeypatch):
     monkeypatch.setattr(worker, "get_collection", lambda name: FakeCampaignsCollection() if name == "campaigns" else FakeProfilesCollection())
     monkeypatch.setattr(worker, "get_credentials_for_send", fake_get_credentials_for_send)
     monkeypatch.setattr(worker, "send_email", fake_send_email)
+    monkeypatch.setattr(
+        worker.pe_service,
+        "get_sent_domain_counts_today",
+        AsyncMock(return_value={}),
+    )
     monkeypatch.setattr(worker.pe_service, "get_pending_batch", fake_get_pending_batch)
     monkeypatch.setattr(worker.pe_service, "mark_sending", fake_mark_sending)
     monkeypatch.setattr(worker.pe_service, "mark_sent", fake_mark_sent)
@@ -94,6 +108,7 @@ def test_worker_stops_recurring_campaign_at_daily_limit(monkeypatch):
 
     assert campaign_doc["pending"] == 400
     assert campaign_doc["status"] == "running"
+    monkeypatch.setattr(worker.asyncio, "sleep", AsyncMock())
     campaign_id = str(ObjectId())
     profile_id = str(ObjectId())
     employee_id = str(ObjectId())
@@ -142,7 +157,9 @@ def test_worker_stops_recurring_campaign_at_daily_limit(monkeypatch):
                 return profile_doc
             return None
 
-    async def fake_get_pending_batch(profile_id_arg, batch_size):
+    async def fake_get_pending_batch(
+        profile_id_arg, batch_size, excluded_domains=None
+    ):
         if not hasattr(fake_get_pending_batch, "calls"):
             fake_get_pending_batch.calls = 0
         fake_get_pending_batch.calls += 1
@@ -203,6 +220,11 @@ def test_worker_stops_recurring_campaign_at_daily_limit(monkeypatch):
     monkeypatch.setattr(worker, "get_collection", lambda name: FakeCampaignsCollection() if name == "campaigns" else FakeProfilesCollection())
     monkeypatch.setattr(worker, "get_credentials_for_send", fake_get_credentials_for_send)
     monkeypatch.setattr(worker, "send_email", fake_send_email)
+    monkeypatch.setattr(
+        worker.pe_service,
+        "get_sent_domain_counts_today",
+        AsyncMock(return_value={}),
+    )
     monkeypatch.setattr(worker.pe_service, "get_pending_batch", fake_get_pending_batch)
     monkeypatch.setattr(worker.pe_service, "mark_sending", fake_mark_sending)
     monkeypatch.setattr(worker.pe_service, "mark_sent", fake_mark_sent)

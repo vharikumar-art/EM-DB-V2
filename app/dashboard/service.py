@@ -58,6 +58,11 @@ async def _resolve_dashboard_scope(role: str | None, user_id: str | None) -> dic
         employees = get_collection("employees")
         admin_emp = await employees.find_one({"userId": user_id}) if user_id else None
         admin_emp_id = str(admin_emp["_id"]) if admin_emp else None
+        admin_branch = admin_emp.get("branch") if admin_emp else None
+        if not admin_branch and user_id:
+            users_col = get_collection("users")
+            admin_u = await users_col.find_one({"_id": _safe_oid(user_id)}, {"branch": 1})
+            admin_branch = (admin_u or {}).get("branch")
 
         if not admin_emp_id:
             return {
@@ -66,7 +71,29 @@ async def _resolve_dashboard_scope(role: str | None, user_id: str | None) -> dic
                 "scope_user_ids": [user_id] if user_id else [],
             }
 
-        assigned_employees = await employees.find({"assignedToAdmin": admin_emp_id}).to_list(None)
+        # Check admin access level
+        users_col = get_collection("users")
+        admin_u = await users_col.find_one({"_id": _safe_oid(user_id)}, {"accessLevel": 1}) if user_id else None
+        admin_access_level = (admin_u or {}).get("accessLevel", "full")
+
+        if admin_access_level == "full" and admin_branch:
+            import re
+            branch_regex = {"$regex": f"^{re.escape(str(admin_branch).strip())}$", "$options": "i"}
+            # Only include branch users whose role is 'employee'
+            branch_users = [
+                u async for u in users_col.find(
+                    {"branch": branch_regex, "role": "employee"},
+                    {"_id": 1}
+                )
+            ]
+            branch_uids = [str(u["_id"]) for u in branch_users] + [u["_id"] for u in branch_users]
+
+            assigned_employees = await employees.find({
+                "userId": {"$in": branch_uids}
+            }).to_list(None)
+        else:
+            assigned_employees = await employees.find({"assignedToAdmin": admin_emp_id}).to_list(None)
+            
         assigned_emp_ids = [str(e["_id"]) for e in assigned_employees]
         assigned_user_ids = [str(e["userId"]) for e in assigned_employees if e.get("userId")]
 
@@ -248,11 +275,32 @@ async def get_admin_scoped_dashboard(admin_user_id: str, query: DashboardQuery) 
             
         }
 
-    # ── Find all employees assigned to this admin ─────────────────────────────
-    # Note: assignedToAdmin stores the employee._id (ObjectId as string), not user_id
-    assigned_employees = await employees.find(
-        {"assignedToAdmin": admin_emp_id}
-    ).to_list(None)
+    # ── Find all employees in the same branch as this admin ──────────────────
+    admin_branch = admin_emp.get("branch") if admin_emp else None
+    if not admin_branch:
+        users_col = get_collection("users")
+        admin_u = await users_col.find_one({"_id": _safe_oid(admin_user_id)}, {"branch": 1})
+        admin_branch = (admin_u or {}).get("branch")
+
+    if admin_branch:
+        import re
+        branch_regex = {"$regex": f"^{re.escape(str(admin_branch).strip())}$", "$options": "i"}
+        users_col = get_collection("users")
+        # Only include branch users whose role is 'employee'
+        branch_users = [
+            u async for u in users_col.find(
+                {"branch": branch_regex, "role": "employee"},
+                {"_id": 1}
+            )
+        ]
+        branch_uids = [str(u["_id"]) for u in branch_users] + [u["_id"] for u in branch_users]
+
+        assigned_employees = await employees.find({
+            "userId": {"$in": branch_uids}
+        }).to_list(None)
+    else:
+        # Fallback: if admin has no branch, only see themselves
+        assigned_employees = [admin_emp] if admin_emp else []
     assigned_emp_ids = [str(e["_id"]) for e in assigned_employees]
     assigned_user_ids = [str(e["userId"]) for e in assigned_employees if e.get("userId")]
 

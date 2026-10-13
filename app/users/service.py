@@ -15,6 +15,10 @@ async def create_user(payload: UserCreate, current_user: CurrentUser | None = No
     if existing:
         raise ConflictException("A user with this email already exists")
 
+    if payload.role == UserRole.ADMIN and current_user and current_user.role != "super_admin":
+        # Only super_admin can create another admin
+        raise ForbiddenException("Only super admins can create admin users")
+
     assigned_to_admin = payload.assignedToAdmin
     if current_user and current_user.role == "admin":
         from app.employees.service import get_employee_by_user_id
@@ -24,8 +28,17 @@ async def create_user(payload: UserCreate, current_user: CurrentUser | None = No
     access_level = payload.accessLevel.value
     if payload.role != UserRole.ADMIN:
         access_level = AdminAccessLevel.FULL.value
-    elif current_user and current_user.role != "super_admin":
-        access_level = AdminAccessLevel.FULL.value
+
+    if current_user and current_user.role == "admin":
+        from app.employees.service import get_employee_by_user_id
+        admin_employee = await get_employee_by_user_id(current_user.user_id)
+        admin_branch = admin_employee.get("branch")
+        if not admin_branch:
+            admin_u = await users.find_one({"_id": to_object_id(current_user.user_id)}, {"branch": 1})
+            admin_branch = (admin_u or {}).get("branch")
+        # Force the created user into the admin's branch
+        if admin_branch:
+            payload.branch = admin_branch
 
     doc = build_user_document(
         name=payload.name,
@@ -119,13 +132,36 @@ async def list_users(current_user: CurrentUser) -> list[dict]:
         try:
             admin_emp = await get_employee_by_user_id(current_user.user_id)
             admin_emp_id = str(admin_emp.get("id"))
-            
-            # Find employees assigned to this admin
-            assigned_emps = [e async for e in employees_col.find({"assignedToAdmin": admin_emp_id})]
-            allowed_user_ids = [e["userId"] for e in assigned_emps]
-            # Also allow admin to see themselves
+
+            if current_user.access_level == "partial":
+                # Partial admin: find employees assigned to this admin
+                assigned_emps = [e async for e in employees_col.find({"assignedToAdmin": admin_emp_id})]
+            else:
+                # Full admin: find all employees and users in the same branch.
+                # Branch may be on the employee doc or only on the user doc — check both.
+                admin_branch = admin_emp.get("branch")
+                if not admin_branch:
+                    admin_user_doc = await users_col.find_one(
+                        {"_id": to_object_id(current_user.user_id)}, {"branch": 1}
+                    )
+                    admin_branch = (admin_user_doc or {}).get("branch")
+                if admin_branch:
+                    import re
+                    branch_regex = {"$regex": f"^{re.escape(str(admin_branch).strip())}$", "$options": "i"}
+                    # Only include users whose role is 'employee' in this branch
+                    branch_user_docs = [
+                        u async for u in users_col.find(
+                            {"branch": branch_regex, "role": "employee"},
+                            {"_id": 1}
+                        )
+                    ]
+                    allowed_user_ids = [str(u["_id"]) for u in branch_user_docs]
+                else:
+                    allowed_user_ids = []
+
+            # Always allow admin to see themselves
             allowed_user_ids.append(current_user.user_id)
-            
+
             query = {"_id": {"$in": [to_object_id(uid) for uid in set(allowed_user_ids)]}}
         except Exception:
             # If admin has no employee document or error, they only see themselves
@@ -243,11 +279,37 @@ async def update_user(user_id: str, payload: UserUpdate, current_user: CurrentUs
     if "phoneNumber" in update_data:
         update_data["phoneNumber"] = update_data["phoneNumber"].strip()
 
-    if current_user.role == "admin" and current_user.access_level == "partial":
-        if user_id != current_user.user_id:
-            raise ForbiddenException(
-                "Partial-access admins cannot modify assigned employee data"
-            )
+    if current_user.role == "admin":
+        if current_user.access_level == "partial":
+            if user_id != current_user.user_id:
+                raise ForbiddenException(
+                    "Partial-access admins cannot modify assigned employee data"
+                )
+        else:
+            # Full admin: check target user
+            target_user = await users.find_one({"_id": to_object_id(user_id)})
+            if not target_user:
+                raise NotFoundException("User not found")
+            # Cannot modify other admins or super admins
+            if user_id != current_user.user_id and target_user.get("role") in {"admin", "super_admin"}:
+                raise ForbiddenException("Admins cannot modify other admins or super admins")
+            # Must belong to same branch
+            from app.employees.service import get_employee_by_user_id
+            admin_emp = await get_employee_by_user_id(current_user.user_id)
+            admin_branch = admin_emp.get("branch")
+            if not admin_branch:
+                admin_u = await users.find_one({"_id": to_object_id(current_user.user_id)}, {"branch": 1})
+                admin_branch = (admin_u or {}).get("branch")
+            target_branch = target_user.get("branch")
+            if (
+                admin_branch
+                and target_branch
+                and str(admin_branch).strip().casefold() != str(target_branch).strip().casefold()
+            ):
+                raise ForbiddenException("You cannot modify users outside your branch")
+            # Prevent changing branch to something else
+            if "branch" in update_data and admin_branch:
+                update_data["branch"] = admin_branch
     
     # Extract employee-specific fields
     assigned_to_admin = update_data.pop("assignedToAdmin", None)
@@ -311,6 +373,20 @@ async def update_user(user_id: str, payload: UserUpdate, current_user: CurrentUs
             {"$set": emp_update}
         )
 
+        if assigned_to_admin is not None:
+            employee = await employees.find_one(
+                {"userId": str(result["_id"])}, {"_id": 1}
+            )
+            if employee:
+                from app.profiles.service import _resolve_admin_name
+
+                profiles = get_collection("profiles")
+                admin_name = await _resolve_admin_name(assigned_to_admin or "")
+                await profiles.update_many(
+                    {"employeeId": str(employee["_id"])},
+                    {"$set": {"assignedAdmin": admin_name}},
+                )
+
     return serialize_user_with_password(result)
 
 
@@ -322,10 +398,31 @@ async def delete_user(
     users = get_collection(COLLECTION)
     employees = get_collection("employees")
     user = await users.find_one(
-        {"_id": to_object_id(user_id)}, {"name": 1, "email": 1, "role": 1}
+        {"_id": to_object_id(user_id)}, {"name": 1, "email": 1, "role": 1, "branch": 1}
     )
     if not user:
         raise NotFoundException("User not found")
+
+    if actor_role == "admin":
+        is_self = actor_id and str(user["_id"]) == actor_id
+        if not is_self and user.get("role") in {"admin", "super_admin"}:
+            raise ForbiddenException("Admins cannot delete other admins or super admins")
+        
+        # Ensure target is in same branch
+        if not is_self and actor_id:
+            from app.employees.service import get_employee_by_user_id
+            admin_emp = await get_employee_by_user_id(actor_id)
+            admin_branch = admin_emp.get("branch")
+            if not admin_branch:
+                admin_u = await users.find_one({"_id": to_object_id(actor_id)}, {"branch": 1})
+                admin_branch = (admin_u or {}).get("branch")
+            target_branch = user.get("branch")
+            if (
+                admin_branch
+                and target_branch
+                and str(admin_branch).strip().casefold() != str(target_branch).strip().casefold()
+            ):
+                raise ForbiddenException("You cannot delete users outside your branch")
 
     employee = await employees.find_one(
         {"userId": user_id}, {"_id": 1, "userId": 1}

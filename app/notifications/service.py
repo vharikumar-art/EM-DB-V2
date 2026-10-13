@@ -95,7 +95,7 @@ async def create_notification(employee_id: str, message: str, type: Notification
         if admin_user_id == employee_id:
             continue
         # Check if this employee is assigned to this admin
-        if await _is_employee_assigned_to_admin(employee_id, admin_user_id):
+        if await _is_employee_in_admin_scope(employee_id, admin_user_id):
             admin_doc = build_notification_document(admin_user_id, message, type)
             result = await notifications.insert_one(admin_doc)
             admin_notification = await notifications.find_one({"_id": result.inserted_id})
@@ -105,24 +105,65 @@ async def create_notification(employee_id: str, message: str, type: Notification
     return notification
 
 
-async def _is_employee_assigned_to_admin(employee_id: str, admin_user_id: str) -> bool:
-    """Check if an employee is assigned to an admin.
+async def _is_employee_in_admin_scope(employee_id: str, admin_user_id: str) -> bool:
+    """Check if an employee is within an admin's scope (branch-based for full access admins).
     
-    This checks both direct assignment and admin's own employee record.
+    For full access admins: checks if the employee is in the same branch.
+    For partial access admins: checks if the employee is directly assigned to this admin.
+    Also always returns True if the admin's own employee record matches.
     """
     try:
         employees = get_collection("employees")
-        # Check if employee is assigned to this admin
-        employee = await employees.find_one({"_id": to_object_id(employee_id)})
-        if employee and str(employee.get("assignedToAdmin")) == admin_user_id:
-            return True
-        # Also check if admin's own employee record matches
+        users = get_collection("users")
+        
+        # Get the admin user to check their access level
+        admin_user = await users.find_one({"_id": to_object_id(admin_user_id)}, {"accessLevel": 1})
+        admin_access_level = (admin_user or {}).get("accessLevel", "full")
+        
+        # Get admin's own employee record
         admin_employee = await employees.find_one({"userId": admin_user_id})
-        if admin_employee and str(admin_employee.get("_id")) == employee_id:
+        if not admin_employee:
+            return False
+        
+        admin_emp_id = str(admin_employee.get("_id"))
+        
+        # Always allow admin to be notified for their own actions
+        if admin_emp_id == employee_id:
             return True
-        return False
+        
+        # Get the target employee
+        employee = await employees.find_one({"_id": to_object_id(employee_id)})
+        if not employee:
+            return False
+        
+        if admin_access_level == "partial":
+            # Partial admin: check direct assignment
+            return str(employee.get("assignedToAdmin")) == admin_emp_id
+        else:
+            # Full admin: check same branch
+            admin_branch = admin_employee.get("branch")
+            if not admin_branch:
+                admin_u = await users.find_one({"_id": to_object_id(admin_user_id)}, {"branch": 1})
+                admin_branch = (admin_u or {}).get("branch")
+
+            if not admin_branch:
+                return False
+
+            employee_branch = employee.get("branch")
+            if not employee_branch and employee.get("userId"):
+                emp_u = await users.find_one({"_id": to_object_id(str(employee["userId"]))}, {"branch": 1})
+                employee_branch = (emp_u or {}).get("branch")
+
+            return bool(
+                employee_branch
+                and str(admin_branch).strip().casefold() == str(employee_branch).strip().casefold()
+            )
     except Exception:
         return False
+
+
+# Backwards compatibility alias
+_is_employee_assigned_to_admin = _is_employee_in_admin_scope
 
 
 

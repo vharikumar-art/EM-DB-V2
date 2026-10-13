@@ -38,6 +38,11 @@ class DashboardScopeTests(unittest.TestCase):
         def fake_get_collection(collection_name):
             if collection_name == "employees":
                 return FakeEmployeesCollection([admin_emp, assigned_emp])
+            if collection_name == "users":
+                from unittest.mock import AsyncMock, MagicMock
+                users_mock = MagicMock()
+                users_mock.find_one = AsyncMock(return_value={"accessLevel": "partial"})
+                return users_mock
             raise AssertionError(f"Unexpected collection: {collection_name}")
 
         with patch.object(service, "get_collection", side_effect=fake_get_collection):

@@ -59,6 +59,7 @@ async def test_smtp_daily_limit_handling(mock_collections):
         
         # Mock pe_service
         with patch("app.campaign_engine.worker.pe_service") as mock_pe:
+            mock_pe.get_sent_domain_counts_today = AsyncMock(return_value={})
             # Return 1 pending email
             mock_pe.get_pending_batch = AsyncMock(side_effect=[
                 [{"id": "pe1", "email": "lead@test.com", "masterEmailId": "m1"}], 
