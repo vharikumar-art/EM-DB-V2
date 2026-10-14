@@ -28,6 +28,7 @@ class EmailMasterOut(BaseModel):
     usedByEmployeeIds: list[str] = Field(default_factory=list)
     usedByEmployeeNames: list[str] = Field(default_factory=list)
     inProfileEmails: bool = False
+    profileNames: list[str] = Field(default_factory=list)
     usageCount: int = 0
     lastUsedAt: str | None = None
     assignedDate: str | None = None
@@ -92,4 +93,3 @@ class EmailMasterUpdate(BaseModel):
     linkedin: str | None = None
     citation: str | None = None
     mailSource: str | None = None
-

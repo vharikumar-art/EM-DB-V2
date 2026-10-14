@@ -345,10 +345,66 @@ async def list_emails(
     )
     docs = serialize_list([d async for d in cursor])
     
+    docs = await _enrich_emails_with_profile_names(docs)
     # Enrich with employee names (batch lookups — no N+1)
     docs = await _enrich_emails_with_employee_names(docs)
     
     return build_paginated_response(docs, total, params)
+
+
+async def _enrich_emails_with_profile_names(docs: list[dict]) -> list[dict]:
+    """Add names of profiles that currently contain each email-master record."""
+    if not docs:
+        return docs
+
+    from bson import ObjectId
+
+    master_ids = [str(doc.get("id") or doc.get("_id")) for doc in docs]
+    profile_emails = get_collection("profile_emails")
+    profile_ids_by_master: dict[str, set[str]] = {}
+    async for profile_email in profile_emails.find(
+        {"masterEmailId": {"$in": master_ids}},
+        {"masterEmailId": 1, "profileId": 1},
+    ):
+        master_id = str(profile_email.get("masterEmailId") or "")
+        profile_id = str(profile_email.get("profileId") or "")
+        if master_id and profile_id:
+            profile_ids_by_master.setdefault(master_id, set()).add(profile_id)
+
+    profile_ids = {
+        profile_id
+        for ids in profile_ids_by_master.values()
+        for profile_id in ids
+    }
+    valid_profile_object_ids = [
+        ObjectId(profile_id)
+        for profile_id in profile_ids
+        if ObjectId.is_valid(profile_id)
+    ]
+    profiles_by_id: dict[str, str] = {}
+    active_profile_ids: set[str] = set()
+    if valid_profile_object_ids:
+        profiles = get_collection("profiles")
+        async for profile in profiles.find(
+            {"_id": {"$in": valid_profile_object_ids}},
+            {"_id": 1, "profileName": 1},
+        ):
+            profile_id = str(profile["_id"])
+            active_profile_ids.add(profile_id)
+            profiles_by_id[profile_id] = profile.get("profileName") or ""
+
+    for doc, master_id in zip(docs, master_ids):
+        profile_names = sorted({
+            profiles_by_id[profile_id]
+            for profile_id in profile_ids_by_master.get(master_id, set())
+            if profiles_by_id.get(profile_id)
+        })
+        doc["profileNames"] = profile_names
+        doc["inProfileEmails"] = bool(
+            profile_ids_by_master.get(master_id, set()) & active_profile_ids
+        )
+
+    return docs
 
 
 async def _enrich_emails_with_employee_names(docs: list[dict]) -> list[dict]:
@@ -449,6 +505,7 @@ async def get_email(email_id: str) -> dict:
     
     doc = serialize_doc(doc)
     
+    doc = (await _enrich_emails_with_profile_names([doc]))[0]
     # Enrich with employee name
     docs = await _enrich_emails_with_employee_names([doc])
     return docs[0] if docs else doc
