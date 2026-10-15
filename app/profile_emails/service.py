@@ -132,6 +132,7 @@ async def generate_list(
             master_ids=master_ids_to_mark,
             profile_id=profile_id,
             employee_id=profile["employeeId"],
+            profile_name=profile["profileName"],
         )
         
         # Also mark emails as assigned to this employee (claim them)

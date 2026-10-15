@@ -45,6 +45,7 @@ def build_email_master_document(
         # Profile usage tracking
         # List of { profileId, employeeId, usedDate }
         "usedInProfiles": [],
+        "profileNames": [],
         
         # Employee assignment tracking (NEW FIELDS)
         "inProfileEmails": False,        # YES/NO - Is it currently locked in a profile?

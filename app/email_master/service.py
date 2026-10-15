@@ -394,12 +394,17 @@ async def _enrich_emails_with_profile_names(docs: list[dict]) -> list[dict]:
             profiles_by_id[profile_id] = profile.get("profileName") or ""
 
     for doc, master_id in zip(docs, master_ids):
-        profile_names = sorted({
+        stored_names = {
+            str(name).strip()
+            for name in doc.get("profileNames", [])
+            if name and str(name).strip()
+        }
+        current_names = {
             profiles_by_id[profile_id]
             for profile_id in profile_ids_by_master.get(master_id, set())
             if profiles_by_id.get(profile_id)
-        })
-        doc["profileNames"] = profile_names
+        }
+        doc["profileNames"] = sorted(stored_names | current_names)
         doc["inProfileEmails"] = bool(
             profile_ids_by_master.get(master_id, set()) & active_profile_ids
         )
@@ -991,7 +996,7 @@ async def delete_emails_filtered(
         query["$and"] = and_conditions
 
     if not query:
-        raise BadRequestException("At least one filter must be provided to prevent accidental full deletion.")
+        raise BadRequestException(" At least one filter must be provided to prevent accidental full deletion.")
 
     master = get_collection(COLLECTION)
     result = await master.delete_many(query)
@@ -1434,8 +1439,13 @@ async def query_for_profile(
         sample_size = min(matching_count, sample_size * 2)
 
 
-async def mark_used_in_profile(master_ids: list[str], profile_id: str, employee_id: str) -> None:
-    """Record that these email_master records were added to a profile's list."""
+async def mark_used_in_profile(
+    master_ids: list[str],
+    profile_id: str,
+    employee_id: str,
+    profile_name: str,
+) -> None:
+    """Record profile usage and permanently retain each profile name."""
     from datetime import datetime, timezone
     master = get_collection(COLLECTION)
     from bson import ObjectId
@@ -1451,7 +1461,8 @@ async def mark_used_in_profile(master_ids: list[str], profile_id: str, employee_
                     "profileId": profile_id,
                     "employeeId": employee_id,
                     "usedDate": now,
-                }
+                },
+                "profileNames": profile_name,
             },
             "$set": {"updatedAt": now},
         },
