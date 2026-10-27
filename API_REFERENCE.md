@@ -383,6 +383,18 @@ curl -X POST http://localhost:8000/profiles \
         "weight": 100
       }
     ],
+    "reminderTemplates": [
+      {
+        "name": "Friendly follow-up",
+        "body": "Hello [name], just following up on my previous email.",
+        "weight": 2
+      },
+      {
+        "name": "Short follow-up",
+        "body": "Hello [name], checking whether you had a chance to review my email.",
+        "weight": 1
+      }
+    ],
     "filters": {
       "country": ["India"],
       "domain": [],
@@ -431,6 +443,47 @@ curl -X PATCH "http://localhost:8000/profiles/64f1a2b3c4d5e6f7a8b9c0d1" \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"sendingOptions": {"dailyLimit": 200, "delayMin": 60, "delayMax": 120}}'
+```
+
+To configure reminder bodies, update the profile with a `reminderTemplates`
+array. Each reminder template has `name`, `body`, and optional `weight`; it has
+no subject field because reminder campaigns use the exact original draft
+subject:
+
+```json
+{
+  "reminderTemplates": [
+    {
+      "name": "Friendly follow-up",
+      "body": "Hello [name], just following up on my previous email.",
+      "weight": 2
+    },
+    {
+      "name": "Short follow-up",
+      "body": "Hello [name], checking whether you had a chance to review my email.",
+      "weight": 1
+    }
+  ]
+}
+```
+
+---
+
+### POST /profiles/{profile_id}/test-email — Send a Test Email
+
+Sends a real test email to `toEmail`. Set `mailType` to `draft` or `reminder`;
+it defaults to `draft`. `templateId` selects a template from the matching list
+(persisted ID or array index). If omitted, a template is selected randomly.
+Reminder templates contain only a body, so the test uses the first configured
+draft subject (or `Test reminder` if none is set). The profile signature and
+attachments are included.
+
+```json
+{
+  "toEmail": "you@example.com",
+  "mailType": "reminder",
+  "templateId": "reminder-template-id"
+}
 ```
 
 ---
@@ -531,7 +584,7 @@ curl "http://localhost:8000/profile-emails/64f1a2b3c4d5e6f7a8b9c0d1?sendStatus=p
   -H "Authorization: Bearer <token>"
 ```
 
-**Query Parameters:** `sendStatus` (pending/sent/failed/skipped), `search`, `country`, `domain`, `page`, `pageSize`
+**Query Parameters:** `mailType` (draft/reminder), `sendStatus` (pending/sent/failed/skipped), `search`, `country`, `domain`, `page`, `pageSize`
 
 ---
 
@@ -552,7 +605,36 @@ curl http://localhost:8000/profile-emails/64f1a2b3c4d5e6f7a8b9c0d1/stats \
     "sending": 0,
     "sent": 150,
     "failed": 50,
-    "skipped": 0
+    "skipped": 0,
+    "byType": {
+      "draft": {"total": 320, "pending": 0, "sending": 0, "sent": 300, "failed": 20, "skipped": 0},
+      "reminder": {"total": 180, "pending": 100, "sending": 0, "sent": 70, "failed": 10, "skipped": 0}
+    }
+  }
+}
+```
+
+---
+
+### POST /profile-emails/{profile_id}/convert-to-reminders — Queue Sent Drafts
+
+Moves successfully sent drafts into the reminder queue. This endpoint does not
+send email. Only rows with a saved original subject and Message-ID can be
+converted; the response reports rows skipped because those fields are missing.
+
+**cURL:**
+```bash
+curl -X POST http://localhost:8000/profile-emails/64f1a2b3c4d5e6f7a8b9c0d1/convert-to-reminders \
+  -H "Authorization: Bearer <access_token>"
+```
+
+**Response:**
+```json
+{
+  "data": {
+    "profileId": "64f1a2b3c4d5e6f7a8b9c0d1",
+    "convertedCount": 12,
+    "skippedMissingThreadData": 2
   }
 }
 ```
@@ -570,6 +652,11 @@ curl -X POST http://localhost:8000/profile-emails/64f1a2b3c4d5e6f7a8b9c0d1/retry
 ---
 
 ### DELETE /profile-emails/{profile_id}/clear — Clear Entire Working List
+
+Deletes draft and reminder rows and releases their email locks. Usage counts
+are reversed only for pending, unsent draft rows; sent drafts and pending
+reminders keep their usage counts. The response includes `deletedCount` and
+`usageCountReversed`.
 
 **cURL:**
 ```bash
@@ -601,6 +688,7 @@ curl -X POST http://localhost:8000/campaigns/start \
   -d '{
     "profileId": "64f1a2b3c4d5e6f7a8b9c0d1",
     "campaignName": "Q3 India Outreach",
+    "mailType": "draft",
     "dailyLimit": 100
   }'
 ```
@@ -609,8 +697,16 @@ curl -X POST http://localhost:8000/campaigns/start \
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `profileId` | string | ✅ | Profile to run |
+| `mailType` | string | ❌ | `draft` (default) or `reminder` |
 | `campaignName` | string | ❌ | Auto-generated if empty |
 | `dailyLimit` | int | ❌ | Overrides profile default |
+
+Only one active campaign of each type is allowed per profile. A draft and a
+reminder campaign can run concurrently. Reminder campaigns use the original
+draft's exact subject and SMTP reply headers to keep the message in the thread.
+Their body is selected randomly, using template weights, from the profile's
+`reminderTemplates` list. Configure body-only reminder templates through
+`PATCH /profiles/{profile_id}`; at least one non-empty template is required.
 
 ---
 
@@ -624,6 +720,7 @@ curl -X POST http://localhost:8000/campaigns/schedule \
   -d '{
     "profileId": "64f1a2b3c4d5e6f7a8b9c0d1",
     "campaignName": "Scheduled Outreach",
+    "mailType": "draft",
     "recurrenceType": "once",
     "scheduledTimeLocal": "10:00",
     "scheduledDateLocal": "2026-08-01",
@@ -671,6 +768,8 @@ curl -X POST http://localhost:8000/campaigns/schedule \
 
 ### POST /campaigns/{campaign_id}/pause — Pause Campaign
 
+Pausing stops the worker before it starts another email; an email already handed to the SMTP server may still complete. Daily campaign, SMTP-provider, and recipient-domain limit errors mark the campaign as `failed` and save the reason in `errorMessage`. Failed scheduled runs are not automatically retried.
+
 **cURL:**
 ```bash
 curl -X POST http://localhost:8000/campaigns/64f1a2b3c4d5e6f7a8b9c0d1/pause \
@@ -680,6 +779,8 @@ curl -X POST http://localhost:8000/campaigns/64f1a2b3c4d5e6f7a8b9c0d1/pause \
 ---
 
 ### POST /campaigns/{campaign_id}/resume — Resume Campaign
+
+Resuming an active scheduled execution continues the same run with its existing progress and per-run send count, then uses the existing scheduler logic to complete or schedule the next occurrence.
 
 **cURL:**
 ```bash
@@ -697,7 +798,7 @@ curl "http://localhost:8000/campaigns?status=running&page=1&pageSize=20" \
   -H "Authorization: Bearer <token>"
 ```
 
-**Query Parameters:** `status` (running/paused/completed/scheduled/failed), `profileId`, `employeeId` (admin only), `page`, `pageSize`
+**Query Parameters:** `status` (`all` or one of `pending`, `running`, `paused`, `completed`, `failed`, `waiting_for_mails`, `scheduled`, `processing`), `profileId`, `employeeId` (admin only), `page`, `pageSize`. The frontend's `status=1` value is also treated as `all`.
 
 ---
 
@@ -917,6 +1018,13 @@ curl "http://localhost:8000/logs?action=UPLOAD&page=1&pageSize=50" \
 Used by the frontend to populate dropdown selects.
 
 ### GET /options/employees — Employee List for Dropdown (Admin)
+
+Returns employee and admin options visible to the caller. Super admins also
+receive super-admin user options. Since super-admin accounts normally have no
+employee record, their `id` falls back to their user ID; `userId` is also
+included. Partial admins see employees assigned to them; full admins see
+employees in their branch; super admins see all employees and super-admin
+accounts. Regular admins do not receive super-admin options.
 
 **cURL:**
 ```bash

@@ -95,6 +95,9 @@ async def create_indexes() -> None:
     await db["profile_emails"].create_index(
         [("profileId", 1), ("sendStatus", 1), ("createdAt", 1)]
     )
+    await db["profile_emails"].create_index(
+        [("profileId", 1), ("mailType", 1), ("sendStatus", 1), ("createdAt", 1)]
+    )
 
     # ── campaigns ────────────────────────────────────────────────────────────
     await db["campaigns"].create_index("profileId")
@@ -103,6 +106,9 @@ async def create_indexes() -> None:
     await db["campaigns"].create_index("createdAt")
     await db["campaigns"].create_index(
         [("profileId", 1), ("status", 1)]
+    )
+    await db["campaigns"].create_index(
+        [("profileId", 1), ("mailType", 1), ("status", 1)]
     )
     # Scheduling indexes - for Linux Cron scheduler to find due campaigns
     await db["campaigns"].create_index(

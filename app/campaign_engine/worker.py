@@ -80,7 +80,7 @@ def select_template_weighted(templates: list[dict]) -> dict:
     return selected
 
 
-async def run_campaign(campaign_id: str) -> None:
+async def run_campaign(campaign_id: str) -> bool:
     """
     Entry point called by the campaigns router via BackgroundTasks.
     All exceptions are caught here so they never crash the FastAPI process.
@@ -88,7 +88,7 @@ async def run_campaign(campaign_id: str) -> None:
     worker_token = uuid.uuid4().hex
     if not await campaign_service.claim_campaign_worker(campaign_id, worker_token):
         logger.info("Campaign %s is already being processed by another worker", campaign_id)
-        return
+        return False
 
     try:
         await _run(campaign_id)
@@ -97,6 +97,7 @@ async def run_campaign(campaign_id: str) -> None:
         await campaign_service.abort_campaign(campaign_id, str(exc)[:300])
     finally:
         await campaign_service.release_campaign_worker(campaign_id, worker_token)
+    return True
 
 
 async def _run(campaign_id: str) -> None:
@@ -120,6 +121,7 @@ async def _run(campaign_id: str) -> None:
 
     profile_id: str = campaign["profileId"]
     employee_id: str = campaign["employeeId"]
+    mail_type: str = campaign.get("mailType", "draft")
 
     # Load live profile (subject/body/signature/sendingOptions/promptSettings)
     profiles_col = get_collection("profiles")
@@ -156,13 +158,14 @@ async def _run(campaign_id: str) -> None:
     # ------------------------------------------------------------------
     # 3. Transition to RUNNING
     # ------------------------------------------------------------------
-    try:
-        await campaign_service.set_status(
-            campaign_id, CampaignStatus.RUNNING, employee_id, is_admin=True
-        )
-    except Exception:
-        # Already running (resume path) — that's fine
-        pass
+    current_status = campaign.get("status")
+    if current_status != CampaignStatus.RUNNING.value:
+        if not await campaign_service.start_campaign_worker(campaign_id):
+            logger.info("Campaign %s stopped before worker startup", campaign_id)
+            return
+    if not await campaign_service.is_worker_active(campaign_id):
+        logger.info("Campaign %s is no longer active; worker will not send", campaign_id)
+        return
 
     logger.info(
         "Campaign %s started | profile=%s | account=%s",
@@ -175,12 +178,23 @@ async def _run(campaign_id: str) -> None:
     if campaign.get("recurrenceType") in ["daily", "weekly"]:
         from app.profile_emails.model import SendStatus
         profile_emails_col = get_collection("profile_emails")
+        pending_type_query = (
+            {
+                "$or": [
+                    {"mailType": "draft"},
+                    {"mailType": {"$exists": False}},
+                ]
+            }
+            if mail_type == "draft"
+            else {"mailType": mail_type}
+        )
         try:
             update_result = await profile_emails_col.update_many(
                 {
                     "profileId": profile_id, 
                     "sendStatus": SendStatus.PENDING.value,
-                    "campaignId": {"$exists": False}
+                    "campaignId": {"$exists": False},
+                    **pending_type_query,
                 },
                 {
                     "$set": {
@@ -202,12 +216,28 @@ async def _run(campaign_id: str) -> None:
     # ------------------------------------------------------------------
     # 3.6. Resolve templates ONCE before the send loop
     # ------------------------------------------------------------------
-    templates = profile.get("templates", [])
+    if mail_type == "reminder":
+        templates = profile.get("reminderTemplates", [])
+        templates = [t for t in templates if t.get("body", "").strip()]
+        if not templates:
+            templates = (campaign.get("profileSnapshot") or {}).get(
+                "reminderTemplates", []
+            )
+            templates = [t for t in templates if t.get("body", "").strip()]
+        if not templates:
+            await campaign_service.abort_campaign(
+                campaign_id,
+                "Profile has no reminder templates. Add at least one reminder body template.",
+            )
+            return
+    else:
+        templates = profile.get("templates", [])
+        templates = [
+            t for t in templates
+            if t.get("subject", "").strip() or t.get("body", "").strip()
+        ]
 
-    # Filter out templates that have no content (empty subject or body)
-    templates = [t for t in templates if t.get("subject", "").strip() or t.get("body", "").strip()]
-
-    if not templates:
+    if mail_type != "reminder" and not templates:
         # Fallback 1: legacy top-level subject/body fields
         legacy_subject = profile.get("subject", "").strip()
         legacy_body = profile.get("body", "").strip()
@@ -250,7 +280,7 @@ async def _run(campaign_id: str) -> None:
     # 4. Send loop
     # ------------------------------------------------------------------
     auth_failure_count = 0
-    total_sent = 0
+    total_sent = max(int(campaign.get("executionSent") or 0), 0)
     total_failed = 0
     daily_limit: int = campaign.get("dailyLimit", 100)  # Get from campaign
     sent_domain_counts = await pe_service.get_sent_domain_counts_today(profile_id)
@@ -261,52 +291,28 @@ async def _run(campaign_id: str) -> None:
     }
 
     while True:
-        # Check if daily limit reached. For recurring campaigns, hitting the full
-        # quota means this cycle is complete; for one-time campaigns, pause only if
-        # more work remains.
+        if not await campaign_service.is_worker_active(campaign_id):
+            logger.info("Campaign %s is paused, deleted, or terminal; exiting worker", campaign_id)
+            return
+
+        # A recurring campaign's daily limit marks the end of this scheduled run.
         if total_sent >= daily_limit:
             recurrence = campaign.get("recurrenceType", "once")
-            if recurrence in ["daily", "weekly"]:
-                logger.info(
-                    "Campaign %s reached daily limit (%d/%d) for this cycle. Stopping until the next scheduled run.",
-                    campaign_id,
-                    total_sent,
-                    daily_limit,
-                )
-                return
-            else:
-                remaining_batch = await pe_service.get_pending_batch(profile_id, 1)
-                if not remaining_batch:
+            if await pe_service.get_pending_batch(profile_id, 1, mail_type=mail_type):
+                if recurrence in ["daily", "weekly"]:
                     logger.info(
-                        "Campaign %s reached daily limit (%d sent) but no pending emails remain. Finalizing as completed.",
+                        "Campaign %s reached its per-run send limit (%d); scheduler will queue its next run.",
                         campaign_id,
-                        total_sent,
+                        daily_limit,
                     )
-                    break
-
-                logger.info(
-                    "Campaign %s reached daily limit (%d sent). Pausing.",
-                    campaign_id, total_sent,
-                )
-                try:
-                    await campaign_service.set_status(
-                        campaign_id, CampaignStatus.PAUSED, employee_id, is_admin=True
-                    )
-                except Exception:
-                    pass
-                return
-
-        # Respect pause, but do not leave a fully-finished campaign stuck as paused.
-        if await campaign_service.is_paused(campaign_id):
-            remaining_batch = await pe_service.get_pending_batch(profile_id, 1)
-            if not remaining_batch:
-                logger.info(
-                    "Campaign %s is paused but has no pending emails left. Finalizing as completed.",
+                    return
+                await campaign_service.abort_campaign(
                     campaign_id,
+                    f"Campaign daily send limit reached ({daily_limit}); remaining recipients were not sent.",
                 )
-                break
-            logger.info("Campaign %s paused — exiting worker", campaign_id)
-            return
+                return
+            logger.info("Campaign %s reached its limit with no recipients remaining.", campaign_id)
+            break
 
         # Fetch next batch of PENDING emails
         if excluded_domains:
@@ -314,37 +320,28 @@ async def _run(campaign_id: str) -> None:
                 profile_id,
                 BATCH_SIZE,
                 excluded_domains=excluded_domains,
+                mail_type=mail_type,
             )
         else:
-            batch = await pe_service.get_pending_batch(profile_id, BATCH_SIZE)
+            batch = await pe_service.get_pending_batch(
+                profile_id, BATCH_SIZE, mail_type=mail_type
+            )
         if not batch:
             if excluded_domains:
-                pending_batch = await pe_service.get_pending_batch(profile_id, 1)
+                pending_batch = await pe_service.get_pending_batch(
+                    profile_id, 1, mail_type=mail_type
+                )
                 if pending_batch:
-                    recurrence = campaign.get("recurrenceType", "once")
-                    if recurrence in ["daily", "weekly"]:
-                        logger.info(
-                            "Campaign %s has pending recipients, but all remaining domains reached today's limit.",
-                            campaign_id,
-                        )
-                        return
-                    logger.info(
-                        "Campaign %s has pending recipients for domains at today's limit; pausing until they can be retried.",
+                    await campaign_service.abort_campaign(
                         campaign_id,
-                    )
-                    await campaign_service.set_status(
-                        campaign_id, CampaignStatus.PAUSED, employee_id, is_admin=True
+                        f"All remaining recipient domains reached the daily limit of {DOMAIN_DAILY_SEND_LIMIT} sends.",
                     )
                     return
 
             recurrence = campaign.get("recurrenceType", "once")
             if recurrence in ["daily", "weekly"]:
-                # For recurring campaigns, no pending emails this cycle is
-                # normal — exit cleanly so the scheduler reschedules the
-                # next occurrence without marking the campaign COMPLETED.
                 logger.info(
-                    "Campaign %s (%s) — no pending emails this cycle. "
-                    "Exiting cleanly for scheduler to reschedule.",
+                    "Campaign %s (%s) has no pending emails this cycle.",
                     campaign_id, recurrence,
                 )
                 return
@@ -354,23 +351,27 @@ async def _run(campaign_id: str) -> None:
             break
 
         for pe in batch:
+            if not await campaign_service.is_worker_active(campaign_id):
+                logger.info("Campaign %s is paused, deleted, or terminal; exiting worker", campaign_id)
+                return
+
             # Check if daily limit reached before processing each email
             if total_sent >= daily_limit:
-                logger.info(
-                    "Campaign %s reached daily limit (%d sent). Stopping.",
-                    campaign_id, total_sent,
-                )
-                # Pause the campaign
-                try:
-                    await campaign_service.set_status(
-                        campaign_id, CampaignStatus.PAUSED, employee_id, is_admin=True
+                recurrence = campaign.get("recurrenceType", "once")
+                if recurrence in ["daily", "weekly"]:
+                    logger.info(
+                        "Campaign %s reached its per-run send limit (%d); stopping this scheduled run.",
+                        campaign_id,
+                        daily_limit,
                     )
-                except:
-                    pass
+                    return
+                await campaign_service.abort_campaign(
+                    campaign_id,
+                    f"Campaign daily send limit reached ({daily_limit}); remaining recipients were not sent.",
+                )
                 return
-            # Re-check pause between individual sends
-            if await campaign_service.is_paused(campaign_id):
-                logger.info("Campaign %s paused mid-batch — exiting worker", campaign_id)
+            if not await campaign_service.is_worker_active(campaign_id):
+                logger.info("Campaign %s is paused, deleted, or terminal; exiting worker", campaign_id)
                 return
 
             pe_id: str = pe["id"]
@@ -394,6 +395,10 @@ async def _run(campaign_id: str) -> None:
                     lead_email,
                 )
                 continue
+            if not await campaign_service.is_worker_active(campaign_id):
+                await pe_service.mark_pending(pe_id)
+                logger.info("Campaign %s stopped before sending %s", campaign_id, lead_email)
+                return
 
             # ----------------------------------------------------------
             # Select random template (A/B testing) - using weighted selection
@@ -433,6 +438,13 @@ async def _run(campaign_id: str) -> None:
                     "html": body_text.replace("\n", "<br>"),
                 }
 
+            original_message_id = None
+            references = None
+            if mail_type == "reminder":
+                payload["subject"] = pe["draftSubject"]
+                original_message_id = pe.get("draftMessageId") or pe.get("messageId")
+                references = original_message_id
+
             # ----------------------------------------------------------
             # Send
             # ----------------------------------------------------------
@@ -444,17 +456,31 @@ async def _run(campaign_id: str) -> None:
             if attachments_to_send:
                 logger.info(f"Campaign {campaign_id}: Sending with {len(attachments_to_send)} attachment(s): {[a['filename'] for a in attachments_to_send]}")
             
+            if not await campaign_service.is_worker_active(campaign_id):
+                await pe_service.mark_pending(pe_id)
+                logger.info("Campaign %s stopped before sending %s", campaign_id, lead_email)
+                return
+
             result = await send_email(
                 credentials=credentials,
                 to=payload["to"],
                 subject=payload["subject"],
                 body_plain=payload["body"],
                 body_html=payload["html"],
-                attachments=attachments_to_send
+                attachments=attachments_to_send,
+                in_reply_to=original_message_id,
+                references=references,
             )
 
             if result.success:
-                await pe_service.mark_sent(pe_id, result.thread_id, result.message_id, template_id=selected_template.get("id"))
+                await pe_service.mark_sent(
+                    pe_id,
+                    result.thread_id,
+                    result.message_id,
+                    template_id=selected_template.get("id"),
+                    mail_type=mail_type,
+                    subject=payload["subject"],
+                )
                 if pe.get("masterEmailId"):
                     await mark_email_sent(pe["masterEmailId"])
                 await campaign_service.increment_counters(campaign_id, sent=1)
@@ -504,26 +530,11 @@ async def _run(campaign_id: str) -> None:
                     # Revert to pending so it can be retried in next cycle
                     await pe_service.mark_pending(pe_id)
                     
-                    campaign_name = campaign.get("campaignName") or "Unnamed campaign"
-                    await create_notification(
-                        employee_id=employee_id,
-                        message=f"Campaign '{campaign_name}' reached SMTP daily limit for {gmail_account}. Pausing/rescheduling.",
-                        type=NotificationType.WARNING,
+                    await campaign_service.abort_campaign(
+                        campaign_id,
+                        f"SMTP daily sending limit reached for {gmail_account}: {error_msg}",
                     )
-                    
-                    recurrence = campaign.get("recurrenceType", "once")
-                    if recurrence in ["daily", "weekly"]:
-                        logger.info("Recurring campaign %s stopping for this cycle due to SMTP limit.", campaign_id)
-                        return
-                    else:
-                        logger.info("One-time campaign %s pausing due to SMTP limit.", campaign_id)
-                        try:
-                            await campaign_service.set_status(
-                                campaign_id, CampaignStatus.PAUSED, employee_id, is_admin=True
-                            )
-                        except Exception:
-                            pass
-                        return
+                    return
 
                 await pe_service.mark_failed(pe_id, error_msg)
                 await campaign_service.increment_counters(campaign_id, failed=1)

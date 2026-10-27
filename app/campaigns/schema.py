@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 from app.campaigns.model import CampaignStatus
@@ -6,6 +7,10 @@ from app.campaigns.model import CampaignStatus
 
 class CampaignStartRequest(BaseModel):
     profileId: str
+    mailType: Literal["draft", "reminder"] = Field(
+        default="draft",
+        description="Send pending draft emails or queued reminder emails",
+    )
     campaignName: str = Field(default="", max_length=200)
     dailyLimit: int | None = Field(default=None, ge=1, le=10000, description="Daily email limit for this campaign (required, not optional)")
     limitOverride: int | None = Field(default=None, ge=1, le=10000, description="[DEPRECATED] Use dailyLimit instead")
@@ -14,6 +19,10 @@ class CampaignStartRequest(BaseModel):
 class CampaignScheduleRequest(BaseModel):
     """Request to create a scheduled campaign"""
     profileId: str
+    mailType: Literal["draft", "reminder"] = Field(
+        default="draft",
+        description="Send pending draft emails or queued reminder emails",
+    )
     campaignName: str = Field(default="", max_length=200)
     scheduledDateLocal: str | None = Field(default=None, description="Local date string (YYYY-MM-DD), required for 'once'")
     scheduledTimeLocal: str = Field(description="Local time string (HH:MM)")
@@ -51,6 +60,7 @@ class CampaignOut(BaseModel):
     id: str
     campaignName: str
     profileId: str
+    mailType: Literal["draft", "reminder"] = "draft"
     employeeId: str
     status: CampaignStatus
     totalEmails: int

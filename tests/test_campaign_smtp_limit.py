@@ -79,30 +79,23 @@ async def test_smtp_daily_limit_handling(mock_collections):
                 with patch("app.campaign_engine.worker.campaign_service") as mock_camp:
                     mock_camp.claim_campaign_worker = AsyncMock(return_value=True)
                     mock_camp.release_campaign_worker = AsyncMock()
-                    mock_camp.is_paused = AsyncMock(return_value=False)
-                    mock_camp.set_status = AsyncMock()
+                    mock_camp.is_worker_active = AsyncMock(return_value=True)
+                    mock_camp.start_campaign_worker = AsyncMock(return_value=True)
                     mock_camp.increment_counters = AsyncMock()
                     mock_camp.finalize_campaign = AsyncMock()
+                    mock_camp.abort_campaign = AsyncMock()
                     
-                    with patch("app.campaign_engine.worker.create_notification") as mock_notif:
-                        
-                        # Run worker logic directly
-                        await _run("507f1f77bcf86cd799439011")
-                        
-                        # Assertions
-                        # 1. Should call mark_pending since it's a daily limit error
-                        mock_pe.mark_pending.assert_called_once_with("pe1")
-                        
-                        # 2. Should NOT call mark_failed
-                        mock_pe.mark_failed.assert_not_called()
-                        
-                        # 3. Should pause the campaign because recurrenceType = once
-                        mock_camp.set_status.assert_any_call("507f1f77bcf86cd799439011", CampaignStatus.PAUSED, "emp1", is_admin=True)
-                        
-                        # 4. Should send a warning notification
-                        mock_notif.assert_called_once()
-                        args, kwargs = mock_notif.call_args
-                        assert "reached SMTP daily limit" in kwargs["message"]
+                    await _run("507f1f77bcf86cd799439011")
+
+                    mock_pe.mark_pending.assert_called_once_with("pe1")
+                    mock_pe.mark_failed.assert_not_called()
+                    mock_camp.abort_campaign.assert_awaited_once()
+                    assert "SMTP daily sending limit reached" in (
+                        mock_camp.abort_campaign.await_args.args[1]
+                    )
+                    mock_camp.start_campaign_worker.assert_awaited_once_with(
+                        "507f1f77bcf86cd799439011"
+                    )
 
 if __name__ == "__main__":
     asyncio.run(test_smtp_daily_limit_handling())

@@ -26,8 +26,9 @@ async def get_employees_options(
     current_user: CurrentUser = Depends(require_admin),
 ):
     """
-    Get list of employees for dropdown (admin only).
-    Admin sees only their assigned employees, Super Admin sees all.
+    Get role-scoped employee options.
+    Partial admins see assigned employees, full admins see their branch,
+    and super admins see the system-wide employee list plus super-admin users.
     Returns: List of {id, name, email, branch} where id is the EMPLOYEE ID
     """
     from app.employees.service import list_employees
@@ -56,6 +57,30 @@ async def get_employees_options(
             "email": emp.get("email") or "",
             "branch": emp.get("branch") or "",
         })
+
+    # Super-admin accounts do not normally have employee documents, so they
+    # must be added from users for the super-admin employee selector.
+    if current_user.role == "super_admin":
+        users_col = get_collection("users")
+        employees_col = get_collection("employees")
+        async for user in users_col.find({"role": "super_admin"}):
+            user_id = str(user["_id"])
+            if user_id in seen_user_ids:
+                continue
+
+            employee_doc = await employees_col.find_one(
+                {"userId": user_id},
+                {"_id": 1},
+            )
+            options.append({
+                "id": str(employee_doc["_id"]) if employee_doc else user_id,
+                "userId": user_id,
+                "name": user.get("name") or "Unknown",
+                "email": user.get("email") or "",
+                "branch": user.get("branch") or "",
+                "role": "super_admin",
+            })
+            seen_user_ids.add(user_id)
 
     return ApiResponse(message="Employees fetched", data=options)
 

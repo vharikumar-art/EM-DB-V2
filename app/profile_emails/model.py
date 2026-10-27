@@ -11,6 +11,11 @@ class SendStatus(str, Enum):
     SKIPPED = "skipped"
 
 
+class ProfileEmailType(str, Enum):
+    DRAFT = "draft"
+    REMINDER = "reminder"
+
+
 def build_profile_email_document(
     profile_id: str,
     employee_id: str,
@@ -27,6 +32,7 @@ def build_profile_email_document(
         "profileId": profile_id,
         "employeeId": employee_id,
         "campaignId": campaign_id,
+        "mailType": ProfileEmailType.DRAFT.value,
         "masterEmailId": master_email_id,
         # Denormalized contact fields (snapshot at generation time)
         "fullName": record.get("fullName", ""),
@@ -45,6 +51,12 @@ def build_profile_email_document(
         "sendStatus": SendStatus.PENDING.value,
         "threadId": None,
         "messageId": None,
+        "draftSubject": None,
+        "draftMessageId": None,
+        "draftSentDate": None,
+        "reminderSubject": None,
+        "reminderMessageId": None,
+        "reminderSentDate": None,
         "sentDate": None,
         "errorMessage": None,
         "notes": "",

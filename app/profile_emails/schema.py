@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 
-from app.profile_emails.model import SendStatus
+from app.profile_emails.model import ProfileEmailType, SendStatus
 
 
 class ProfileEmailOut(BaseModel):
@@ -8,6 +8,7 @@ class ProfileEmailOut(BaseModel):
     profileId: str
     employeeId: str
     campaignId: str | None = None
+    mailType: ProfileEmailType = ProfileEmailType.DRAFT
     masterEmailId: str
     fullName: str = ""
     email: str
@@ -24,6 +25,12 @@ class ProfileEmailOut(BaseModel):
     sendStatus: SendStatus = SendStatus.PENDING
     threadId: str | None = None
     messageId: str | None = None
+    draftSubject: str | None = None
+    draftMessageId: str | None = None
+    draftSentDate: str | None = None
+    reminderSubject: str | None = None
+    reminderMessageId: str | None = None
+    reminderSentDate: str | None = None
     sentDate: str | None = None
     errorMessage: str | None = None
     notes: str = ""
@@ -53,10 +60,14 @@ class GenerateListRequest(BaseModel):
     )
 
 
-class ProfileEmailStats(BaseModel):
+class ProfileEmailTypeStats(BaseModel):
     total: int
     pending: int
+    sending: int
     sent: int
     failed: int
     skipped: int
-    sending: int
+
+
+class ProfileEmailStats(ProfileEmailTypeStats):
+    byType: dict[ProfileEmailType, ProfileEmailTypeStats]

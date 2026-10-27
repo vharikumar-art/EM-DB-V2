@@ -7,7 +7,7 @@ from bson import ObjectId
 from app.campaign_engine import worker
 
 
-def test_worker_stops_recurring_campaign_at_daily_limit(monkeypatch):
+def test_resumed_recurring_campaign_preserves_daily_limit_progress(monkeypatch):
     monkeypatch.setattr(worker.asyncio, "sleep", AsyncMock())
     campaign_id = str(ObjectId())
     profile_id = str(ObjectId())
@@ -21,6 +21,7 @@ def test_worker_stops_recurring_campaign_at_daily_limit(monkeypatch):
         "dailyLimit": 100,
         "recurrenceType": "daily",
         "status": "running",
+        "executionSent": 50,
         "totalEmails": 600,
         "sent": 100,
         "failed": 0,
@@ -48,7 +49,7 @@ def test_worker_stops_recurring_campaign_at_daily_limit(monkeypatch):
             return profile_doc if query.get("_id") == ObjectId(profile_id) else None
 
     async def fake_get_pending_batch(
-        profile_id_arg, batch_size, excluded_domains=None
+        profile_id_arg, batch_size, excluded_domains=None, mail_type="draft"
     ):
         if campaign_doc["pending"] <= 0:
             return []
@@ -65,17 +66,24 @@ def test_worker_stops_recurring_campaign_at_daily_limit(monkeypatch):
         campaign_doc["status"] = "completed"
         campaign_doc["pending"] = 0
 
+    async def fake_abort_campaign(campaign_id_arg, reason):
+        campaign_doc["status"] = "failed"
+        campaign_doc["errorMessage"] = reason
+
     async def fake_send_email(*args, **kwargs):
         return SimpleNamespace(success=True, thread_id=None, message_id="msg-1", error=None)
 
     async def fake_mark_sending(pe_id):
         return True
 
-    async def fake_mark_sent(pe_id, thread_id, message_id, template_id=None):
+    async def fake_mark_sent(
+        pe_id, thread_id, message_id, template_id=None, mail_type="draft", subject=None
+    ):
         return None
 
     async def fake_increment_counters(campaign_id_arg, sent=0, failed=0, skipped=0):
         campaign_doc["sent"] += sent
+        campaign_doc["executionSent"] += sent
         campaign_doc["pending"] = max(0, campaign_doc["pending"] - sent)
 
     async def fake_get_credentials_for_send(gmail_account):
@@ -96,9 +104,11 @@ def test_worker_stops_recurring_campaign_at_daily_limit(monkeypatch):
     monkeypatch.setattr(worker.pe_service, "mark_sending", fake_mark_sending)
     monkeypatch.setattr(worker.pe_service, "mark_sent", fake_mark_sent)
     monkeypatch.setattr(worker.campaign_service, "set_status", fake_set_status)
-    monkeypatch.setattr(worker.campaign_service, "is_paused", AsyncMock(return_value=False))
+    monkeypatch.setattr(worker.campaign_service, "is_worker_active", AsyncMock(return_value=True))
     monkeypatch.setattr(worker.campaign_service, "increment_counters", fake_increment_counters)
     monkeypatch.setattr(worker.campaign_service, "finalize_campaign", fake_finalize_campaign)
+    abort_campaign = AsyncMock(side_effect=fake_abort_campaign)
+    monkeypatch.setattr(worker.campaign_service, "abort_campaign", abort_campaign)
     monkeypatch.setattr(worker, "_push_progress", AsyncMock())
     monkeypatch.setattr(worker, "record_send", AsyncMock())
     monkeypatch.setattr(worker, "record_sent", AsyncMock())
@@ -106,8 +116,11 @@ def test_worker_stops_recurring_campaign_at_daily_limit(monkeypatch):
 
     asyncio.run(worker._run(campaign_id))
 
-    assert campaign_doc["pending"] == 400
+    assert campaign_doc["pending"] == 450
+    assert campaign_doc["sent"] == 150
+    assert campaign_doc["executionSent"] == 100
     assert campaign_doc["status"] == "running"
+    abort_campaign.assert_not_awaited()
     monkeypatch.setattr(worker.asyncio, "sleep", AsyncMock())
     campaign_id = str(ObjectId())
     profile_id = str(ObjectId())
@@ -158,7 +171,7 @@ def test_worker_stops_recurring_campaign_at_daily_limit(monkeypatch):
             return None
 
     async def fake_get_pending_batch(
-        profile_id_arg, batch_size, excluded_domains=None
+        profile_id_arg, batch_size, excluded_domains=None, mail_type="draft"
     ):
         if not hasattr(fake_get_pending_batch, "calls"):
             fake_get_pending_batch.calls = 0
@@ -189,7 +202,9 @@ def test_worker_stops_recurring_campaign_at_daily_limit(monkeypatch):
     async def fake_mark_sending(pe_id):
         return True
 
-    async def fake_mark_sent(pe_id, thread_id, message_id, template_id=None):
+    async def fake_mark_sent(
+        pe_id, thread_id, message_id, template_id=None, mail_type="draft", subject=None
+    ):
         return None
 
     async def fake_increment_counters(campaign_id_arg, sent=0, failed=0, skipped=0):
@@ -229,7 +244,7 @@ def test_worker_stops_recurring_campaign_at_daily_limit(monkeypatch):
     monkeypatch.setattr(worker.pe_service, "mark_sending", fake_mark_sending)
     monkeypatch.setattr(worker.pe_service, "mark_sent", fake_mark_sent)
     monkeypatch.setattr(worker.campaign_service, "set_status", fake_set_status)
-    monkeypatch.setattr(worker.campaign_service, "is_paused", AsyncMock(return_value=False))
+    monkeypatch.setattr(worker.campaign_service, "is_worker_active", AsyncMock(return_value=True))
     monkeypatch.setattr(worker.campaign_service, "increment_counters", fake_increment_counters)
     monkeypatch.setattr(worker.campaign_service, "finalize_campaign", fake_finalize_campaign)
     monkeypatch.setattr(worker, "_push_progress", fake_push_progress)

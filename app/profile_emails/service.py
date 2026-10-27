@@ -4,10 +4,16 @@ from typing import Any
 
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
 from app.database.mongodb import get_collection
-from app.email_master.service import mark_used_in_profile, mark_emails_assigned_to_employee, query_for_profile, release_email_locks
+from app.email_master.service import (
+    decrement_email_usage,
+    mark_used_in_profile,
+    mark_emails_assigned_to_employee,
+    query_for_profile,
+    release_email_locks,
+)
 from app.notifications.schema import NotificationType
 from app.notifications.service import create_notification
-from app.profile_emails.model import SendStatus, build_profile_email_document
+from app.profile_emails.model import ProfileEmailType, SendStatus, build_profile_email_document
 from app.profiles.service import get_profile
 from app.schemas.common import PaginationParams
 from app.utils.pagination import build_paginated_response
@@ -180,6 +186,7 @@ async def list_profile_emails(
     employee_id: str,
     is_admin: bool,
     params: PaginationParams,
+    mail_type: str | None = None,
     send_status: str | None = None,
     search: str | None = None,
     country: str | None = None,
@@ -190,7 +197,19 @@ async def list_profile_emails(
 
     col = get_collection(COLLECTION)
     query: dict = {"profileId": profile_id}
+    or_filters: list[dict] = []
 
+    if mail_type == ProfileEmailType.DRAFT.value:
+        or_filters.append(
+            {
+                "$or": [
+                    {"mailType": ProfileEmailType.DRAFT.value},
+                    {"mailType": {"$exists": False}},
+                ]
+            }
+        )
+    elif mail_type:
+        query["mailType"] = mail_type
     if send_status:
         query["sendStatus"] = send_status
     if country:
@@ -198,11 +217,17 @@ async def list_profile_emails(
     if domain:
         query["domain"] = domain
     if search:
-        query["$or"] = [
-            {"email": {"$regex": search, "$options": "i"}},
-            {"fullName": {"$regex": search, "$options": "i"}},
-            {"university": {"$regex": search, "$options": "i"}},
-        ]
+        or_filters.append(
+            {
+                "$or": [
+                    {"email": {"$regex": search, "$options": "i"}},
+                    {"fullName": {"$regex": search, "$options": "i"}},
+                    {"university": {"$regex": search, "$options": "i"}},
+                ]
+            }
+        )
+    if or_filters:
+        query["$and"] = or_filters
 
     total = await col.count_documents(query)
     cursor = (
@@ -221,12 +246,38 @@ async def get_stats(profile_id: str, employee_id: str, is_admin: bool) -> dict:
 
     pipeline = [
         {"$match": {"profileId": profile_id}},
-        {"$group": {"_id": "$sendStatus", "count": {"$sum": 1}}},
+        {
+            "$group": {
+                "_id": {
+                    "mailType": {"$ifNull": ["$mailType", ProfileEmailType.DRAFT.value]},
+                    "sendStatus": "$sendStatus",
+                },
+                "count": {"$sum": 1},
+            }
+        },
     ]
     rows = col.aggregate(pipeline)
     counts: dict[str, int] = {}
+    by_type = {
+        mail_type.value: {
+            "total": 0,
+            "pending": 0,
+            "sending": 0,
+            "sent": 0,
+            "failed": 0,
+            "skipped": 0,
+        }
+        for mail_type in ProfileEmailType
+    }
     async for row in rows:
-        counts[row["_id"]] = row["count"]
+        mail_type = row["_id"]["mailType"]
+        send_status = row["_id"]["sendStatus"]
+        count = row["count"]
+        counts[send_status] = counts.get(send_status, 0) + count
+        if mail_type in by_type:
+            by_type[mail_type]["total"] += count
+            if send_status in by_type[mail_type]:
+                by_type[mail_type][send_status] += count
 
     total = sum(counts.values())
     return {
@@ -236,6 +287,64 @@ async def get_stats(profile_id: str, employee_id: str, is_admin: bool) -> dict:
         "sent": counts.get(SendStatus.SENT.value, 0),
         "failed": counts.get(SendStatus.FAILED.value, 0),
         "skipped": counts.get(SendStatus.SKIPPED.value, 0),
+        "byType": by_type,
+    }
+
+
+async def convert_sent_drafts_to_reminders(
+    profile_id: str,
+    employee_id: str,
+    is_admin: bool,
+) -> dict:
+    """Queue sent drafts with saved subject and Message-ID for reminder campaigns."""
+    await get_profile(profile_id, employee_id, is_admin)
+    col = get_collection(COLLECTION)
+    cursor = col.find(
+        {
+            "profileId": profile_id,
+            "sendStatus": SendStatus.SENT.value,
+            "$or": [
+                {"mailType": ProfileEmailType.DRAFT.value},
+                {"mailType": {"$exists": False}},
+            ],
+        }
+    )
+    converted_count = 0
+    skipped_missing_thread_data = 0
+    now = datetime.now(timezone.utc)
+
+    async for doc in cursor:
+        original_subject = doc.get("draftSubject")
+        original_message_id = doc.get("draftMessageId") or doc.get("messageId")
+        if not original_subject or not original_message_id:
+            skipped_missing_thread_data += 1
+            continue
+
+        result = await col.update_one(
+            {
+                "_id": doc["_id"],
+                "sendStatus": SendStatus.SENT.value,
+                "$or": [
+                    {"mailType": ProfileEmailType.DRAFT.value},
+                    {"mailType": {"$exists": False}},
+                ],
+            },
+            {
+                "$set": {
+                    "mailType": ProfileEmailType.REMINDER.value,
+                    "sendStatus": SendStatus.PENDING.value,
+                    "draftSubject": original_subject,
+                    "draftMessageId": original_message_id,
+                    "updatedAt": now,
+                }
+            },
+        )
+        converted_count += result.modified_count
+
+    return {
+        "profileId": profile_id,
+        "convertedCount": converted_count,
+        "skippedMissingThreadData": skipped_missing_thread_data,
     }
 
 
@@ -336,14 +445,35 @@ async def clear_profile_list(profile_id: str, employee_id: str, is_admin: bool) 
     await get_profile(profile_id, employee_id, is_admin)
     col = get_collection(COLLECTION)
     
-    # Get all masterEmailIds before deleting
-    cursor = col.find({"profileId": profile_id}, {"masterEmailId": 1})
-    master_ids = [doc["masterEmailId"] async for doc in cursor if doc.get("masterEmailId")]
+    cursor = col.find(
+        {"profileId": profile_id},
+        {"masterEmailId": 1, "sendStatus": 1, "mailType": 1},
+    )
+    master_ids: list[str] = []
+    unused_master_ids: list[str] = []
+    async for doc in cursor:
+        master_id = doc.get("masterEmailId")
+        if not master_id:
+            continue
+        master_ids.append(master_id)
+        # Reminder rows are pending after their original draft was sent, so
+        # they must retain their usage count. Missing mailType means legacy draft.
+        if (
+            doc.get("sendStatus") == SendStatus.PENDING.value
+            and doc.get("mailType", ProfileEmailType.DRAFT.value)
+            == ProfileEmailType.DRAFT.value
+        ):
+            unused_master_ids.append(master_id)
+
     if master_ids:
         await release_email_locks(master_ids)
         
     result = await col.delete_many({"profileId": profile_id})
-    return {"deletedCount": result.deleted_count}
+    usage_reversed = await decrement_email_usage(unused_master_ids)
+    return {
+        "deletedCount": result.deleted_count,
+        "usageCountReversed": usage_reversed,
+    }
 
 
 async def bulk_delete(
@@ -381,6 +511,7 @@ async def get_pending_batch(
     profile_id: str,
     batch_size: int,
     excluded_domains: set[str] | None = None,
+    mail_type: str = ProfileEmailType.DRAFT.value,
 ) -> list[dict]:
     """Fetch the next batch of PENDING rows for a campaign run."""
     col = get_collection(COLLECTION)
@@ -388,6 +519,13 @@ async def get_pending_batch(
         "profileId": profile_id,
         "sendStatus": SendStatus.PENDING.value,
     }
+    if mail_type == ProfileEmailType.DRAFT.value:
+        query["$or"] = [
+            {"mailType": ProfileEmailType.DRAFT.value},
+            {"mailType": {"$exists": False}},
+        ]
+    else:
+        query["mailType"] = mail_type
     if excluded_domains:
         query["$and"] = [
             {
@@ -400,11 +538,12 @@ async def get_pending_batch(
             }
             for domain in excluded_domains
         ]
-    cursor = (
-        col.find(query)
-        .sort("createdAt", 1)
-        .limit(batch_size)
+    sort_fields = (
+        [("sentDate", 1), ("createdAt", 1)]
+        if mail_type == ProfileEmailType.REMINDER.value
+        else [("createdAt", 1)]
     )
+    cursor = col.find(query).sort(sort_fields).limit(batch_size)
     return serialize_list([d async for d in cursor])
 
 
@@ -448,22 +587,39 @@ async def mark_sent(
     thread_id: str | None,
     message_id: str | None,
     template_id: str | None = None,
+    mail_type: str = ProfileEmailType.DRAFT.value,
+    subject: str | None = None,
 ) -> None:
     col = get_collection(COLLECTION)
     now = datetime.now(timezone.utc)
+    update_fields = {
+        "sendStatus": SendStatus.SENT.value,
+        "threadId": thread_id,
+        "messageId": message_id,
+        "sentDate": now,
+        "errorMessage": None,
+        "templateId": template_id or "default",
+        "updatedAt": now,
+    }
+    if mail_type == ProfileEmailType.DRAFT.value:
+        update_fields.update(
+            {
+                "draftSubject": subject,
+                "draftMessageId": message_id,
+                "draftSentDate": now,
+            }
+        )
+    else:
+        update_fields.update(
+            {
+                "reminderSubject": subject,
+                "reminderMessageId": message_id,
+                "reminderSentDate": now,
+            }
+        )
     await col.update_one(
         {"_id": to_object_id(profile_email_id)},
-        {
-            "$set": {
-                "sendStatus": SendStatus.SENT.value,
-                "threadId": thread_id,
-                "messageId": message_id,
-                "sentDate": now,
-                "errorMessage": None,
-                "templateId": template_id or "default",  # Track which template was used
-                "updatedAt": now,
-            }
-        },
+        {"$set": update_fields},
     )
 
 

@@ -13,6 +13,24 @@ from app.utils.pagination import build_paginated_response
 from app.utils.response import serialize_doc, serialize_list, to_object_id
 
 COLLECTION = "campaigns"
+ACTIVE_CAMPAIGN_STATUSES = [
+    CampaignStatus.PENDING.value,
+    CampaignStatus.RUNNING.value,
+    CampaignStatus.PAUSED.value,
+    CampaignStatus.SCHEDULED.value,
+    CampaignStatus.PROCESSING.value,
+]
+
+
+def _profile_email_type_filter(mail_type: str) -> dict:
+    if mail_type == "draft":
+        return {
+            "$or": [
+                {"mailType": "draft"},
+                {"mailType": {"$exists": False}},
+            ]
+        }
+    return {"mailType": mail_type}
 
 
 def _add_campaign_progress(doc: dict) -> dict:
@@ -92,37 +110,40 @@ async def create_campaign(
             "Profile is not active. Activate it before starting a campaign."
         )
 
-    # Count how many PENDING rows exist in profile_emails for this profile
+    # Count pending rows of the selected mail type.
     profile_emails_col = get_collection("profile_emails")
-    pending_count = await profile_emails_col.count_documents(
-        {"profileId": payload.profileId, "sendStatus": SendStatus.PENDING.value}
-    )
+    pending_query = {
+        "profileId": payload.profileId,
+        "sendStatus": SendStatus.PENDING.value,
+        **_profile_email_type_filter(payload.mailType),
+    }
+    pending_count = await profile_emails_col.count_documents(pending_query)
 
     if pending_count == 0:
         raise BadRequestException(
-            "No pending emails in this profile's list. "
-            "Generate the list first or retry failed emails."
+            f"No pending {payload.mailType} emails in this profile's list. "
+            + (
+                "Generate the list first or retry failed emails."
+                if payload.mailType == "draft"
+                else "Convert sent drafts to reminders first."
+            )
         )
 
-    # Block if there's already an active/paused campaign for this profile
+    # Draft and reminder campaigns may run in parallel, but not two of the same type.
     campaigns = get_collection(COLLECTION)
     active_campaign = await campaigns.find_one(
         {
-            "profileId": payload.profileId, 
-            "status": {"$in": [
-                CampaignStatus.RUNNING.value,
-                CampaignStatus.PAUSED.value,
-            ]}
+            "profileId": payload.profileId,
+            **_profile_email_type_filter(payload.mailType),
+            "status": {"$in": ACTIVE_CAMPAIGN_STATUSES},
         }
     )
     if active_campaign:
         raise BadRequestException(
-            f"❌ Cannot create new campaign. This profile already has an active campaign: '{active_campaign.get('campaignName')}'\n"
+            f"Cannot create {payload.mailType} campaign. This profile already has an active "
+            f"{payload.mailType} campaign: '{active_campaign.get('campaignName')}'\n"
             f"Status: {active_campaign.get('status')}\n"
-            f"Options:\n"
-            f"(1) Pause the active campaign → then create new one\n"
-            f"(2) Wait for campaign to complete → then create new one\n"
-            f"(3) Delete the active campaign → then create new one"
+            "Wait for it to complete, or pause/delete it first."
         )
 
     # Use dailyLimit from request, default to profile's dailyLimit if not provided
@@ -138,6 +159,7 @@ async def create_campaign(
         employee_id=profile["employeeId"],
         campaign_name=campaign_name,
         total_emails=pending_count,
+        mail_type=payload.mailType,
     )
     # Snapshot relevant profile fields for audit trail
     doc["profileSnapshot"] = {
@@ -145,6 +167,7 @@ async def create_campaign(
         "gmailAccount": profile.get("gmailAccount"),
         "subject": profile.get("subject"),
         "templates": profile.get("templates", []),
+        "reminderTemplates": profile.get("reminderTemplates", []),
         "sendingOptions": profile.get("sendingOptions"),
         "promptSettings": profile.get("promptSettings"),
     }
@@ -159,7 +182,7 @@ async def create_campaign(
 
     # Tag all PENDING profile_emails with this campaign_id
     await profile_emails_col.update_many(
-        {"profileId": payload.profileId, "sendStatus": SendStatus.PENDING.value},
+        pending_query,
         {
             "$set": {
                 "campaignId": str(result.inserted_id),
@@ -197,35 +220,38 @@ async def create_scheduled_campaign(
             "Profile is not active. Activate it before scheduling a campaign."
         )
 
-    # Count how many PENDING rows exist in profile_emails for this profile
+    # Count pending rows of the selected mail type.
     profile_emails_col = get_collection("profile_emails")
-    pending_count = await profile_emails_col.count_documents(
-        {"profileId": payload.profileId, "sendStatus": SendStatus.PENDING.value}
-    )
+    pending_query = {
+        "profileId": payload.profileId,
+        "sendStatus": SendStatus.PENDING.value,
+        **_profile_email_type_filter(payload.mailType),
+    }
+    pending_count = await profile_emails_col.count_documents(pending_query)
 
     if pending_count == 0:
         raise BadRequestException(
-            "No pending emails in this profile's list. "
-            "Generate the list first or retry failed emails."
+            f"No pending {payload.mailType} emails in this profile's list. "
+            + (
+                "Generate the list first or retry failed emails."
+                if payload.mailType == "draft"
+                else "Convert sent drafts to reminders first."
+            )
         )
 
-    # Block if there's already a pending/scheduled campaign for this profile
+    # Block only another active campaign of the same type.
     campaigns = get_collection(COLLECTION)
     conflicting_campaign = await campaigns.find_one(
         {
-            "profileId": payload.profileId, 
-            "status": {"$in": [
-                CampaignStatus.PENDING.value,
-                CampaignStatus.RUNNING.value,
-                CampaignStatus.PAUSED.value,
-                CampaignStatus.SCHEDULED.value,
-                CampaignStatus.PROCESSING.value,
-            ]}
+            "profileId": payload.profileId,
+            **_profile_email_type_filter(payload.mailType),
+            "status": {"$in": ACTIVE_CAMPAIGN_STATUSES},
         }
     )
     if conflicting_campaign:
         raise BadRequestException(
-            f"Cannot schedule campaign. This profile has an existing campaign: '{conflicting_campaign.get('campaignName')}'\n"
+            f"Cannot schedule {payload.mailType} campaign. This profile has an existing "
+            f"{payload.mailType} campaign: '{conflicting_campaign.get('campaignName')}'\n"
             f"Status: {conflicting_campaign.get('status')}\n"
             f"Please wait for it to complete or delete it first."
         )
@@ -262,6 +288,7 @@ async def create_scheduled_campaign(
         campaign_name=campaign_name,
         total_emails=pending_count,
         scheduled_for=utc_dt,  # This sets status to SCHEDULED
+        mail_type=payload.mailType,
     )
     
     # Snapshot relevant profile fields for audit trail
@@ -270,6 +297,7 @@ async def create_scheduled_campaign(
         "gmailAccount": profile.get("gmailAccount"),
         "subject": profile.get("subject"),
         "templates": profile.get("templates", []),
+        "reminderTemplates": profile.get("reminderTemplates", []),
         "sendingOptions": profile.get("sendingOptions"),
         "promptSettings": profile.get("promptSettings"),
     }
@@ -294,7 +322,7 @@ async def create_scheduled_campaign(
 
     # Tag all PENDING profile_emails with this campaign_id
     await profile_emails_col.update_many(
-        {"profileId": payload.profileId, "sendStatus": SendStatus.PENDING.value},
+        pending_query,
         {
             "$set": {
                 "campaignId": str(result.inserted_id),
@@ -342,9 +370,9 @@ async def set_status(
 
     # Allowed transitions
     allowed: dict[str, set] = {
-        CampaignStatus.PENDING.value: {CampaignStatus.RUNNING, CampaignStatus.FAILED},
-        CampaignStatus.SCHEDULED.value: {CampaignStatus.PROCESSING, CampaignStatus.PAUSED, CampaignStatus.FAILED},
-        CampaignStatus.PROCESSING.value: {CampaignStatus.RUNNING, CampaignStatus.FAILED},
+        CampaignStatus.PENDING.value: {CampaignStatus.RUNNING, CampaignStatus.PAUSED, CampaignStatus.FAILED},
+        CampaignStatus.SCHEDULED.value: {CampaignStatus.PROCESSING, CampaignStatus.FAILED},
+        CampaignStatus.PROCESSING.value: {CampaignStatus.RUNNING, CampaignStatus.PAUSED, CampaignStatus.FAILED},
         CampaignStatus.RUNNING.value: {CampaignStatus.PAUSED, CampaignStatus.COMPLETED, CampaignStatus.FAILED, CampaignStatus.SCHEDULED},
         CampaignStatus.PAUSED.value: {CampaignStatus.RUNNING, CampaignStatus.FAILED, CampaignStatus.SCHEDULED},
         CampaignStatus.COMPLETED.value: set(),
@@ -364,16 +392,97 @@ async def set_status(
             update["startedAt"] = now
     elif new_status == CampaignStatus.PAUSED:
         update["pausedAt"] = now
+        update["pausedFromStatus"] = current
     elif new_status in (CampaignStatus.COMPLETED, CampaignStatus.FAILED):
         update["completedAt"] = now
 
     campaigns = get_collection(COLLECTION)
+    update_operation = {"$set": update}
+    if new_status in (CampaignStatus.RUNNING, CampaignStatus.SCHEDULED):
+        update_operation["$unset"] = {"pausedFromStatus": ""}
     result = await campaigns.find_one_and_update(
-        {"_id": to_object_id(campaign_id)},
+        {"_id": to_object_id(campaign_id), "status": current},
+        update_operation,
+        return_document=True,
+    )
+    if result is None:
+        raise BadRequestException("Campaign status changed while updating. Please try again.")
+    return serialize_doc(result)
+
+
+async def resume_campaign(
+    campaign_id: str,
+    employee_id: str,
+    is_admin: bool,
+) -> tuple[dict, bool, bool]:
+    """Resume a paused execution and indicate whether it came from the scheduler."""
+    doc = await _get_campaign_owned(campaign_id, employee_id, is_admin)
+    if doc.get("status") != CampaignStatus.PAUSED.value:
+        raise BadRequestException(
+            f"Cannot resume campaign with status '{doc.get('status')}'"
+        )
+
+    scheduled_execution = (
+        doc.get("processingStartedAt") is not None
+        and doc.get("scheduledFor") is not None
+    )
+    new_status = (
+        CampaignStatus.PROCESSING if scheduled_execution else CampaignStatus.RUNNING
+    )
+    now = datetime.now(timezone.utc)
+    update: dict = {"status": new_status.value, "updatedAt": now}
+    if new_status == CampaignStatus.RUNNING and not doc.get("startedAt"):
+        update["startedAt"] = now
+
+    campaigns = get_collection(COLLECTION)
+    result = await campaigns.find_one_and_update(
+        {
+            "_id": to_object_id(campaign_id),
+            "status": CampaignStatus.PAUSED.value,
+        },
+        {
+            "$set": update,
+            "$inc": {"executionGeneration": 1},
+            "$unset": {"pausedFromStatus": ""},
+        },
+        return_document=True,
+    )
+    if result is None:
+        raise BadRequestException("Campaign status changed while resuming. Please try again.")
+    return serialize_doc(result), True, scheduled_execution
+
+
+async def start_campaign_worker(campaign_id: str) -> bool:
+    """Atomically start a worker only if the campaign is not paused or terminal."""
+    campaigns = get_collection(COLLECTION)
+    campaign_oid = to_object_id(campaign_id)
+    doc = await campaigns.find_one(
+        {"_id": campaign_oid},
+        {"status": 1, "startedAt": 1},
+    )
+    if not doc:
+        return False
+
+    current = doc.get("status")
+    if current == CampaignStatus.RUNNING.value:
+        return True
+    if current not in {
+        CampaignStatus.PENDING.value,
+        CampaignStatus.PROCESSING.value,
+    }:
+        return False
+
+    now = datetime.now(timezone.utc)
+    update: dict = {"status": CampaignStatus.RUNNING.value, "updatedAt": now}
+    if not doc.get("startedAt"):
+        update["startedAt"] = now
+
+    result = await campaigns.find_one_and_update(
+        {"_id": campaign_oid, "status": current},
         {"$set": update},
         return_document=True,
     )
-    return serialize_doc(result)
+    return result is not None
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +500,7 @@ async def increment_counters(
     inc: dict = {}
     if sent:
         inc["sent"] = sent
+        inc["executionSent"] = sent
     if failed:
         inc["failed"] = failed
     if skipped:
@@ -414,8 +524,16 @@ async def finalize_campaign(campaign_id: str) -> None:
         return
 
     now = datetime.now(timezone.utc)
-    await campaigns.update_one(
-        {"_id": to_object_id(campaign_id)},
+    update_result = await campaigns.update_one(
+        {
+            "_id": to_object_id(campaign_id),
+            "status": {
+                "$in": [
+                    CampaignStatus.RUNNING.value,
+                    CampaignStatus.PROCESSING.value,
+                ]
+            },
+        },
         {
             "$set": {
                 "status": CampaignStatus.COMPLETED.value,
@@ -425,6 +543,8 @@ async def finalize_campaign(campaign_id: str) -> None:
             }
         },
     )
+    if update_result.modified_count == 0:
+        return
 
     # Also log completion
     from app.logs.model import LogAction, build_log_document
@@ -477,13 +597,16 @@ async def abort_campaign(campaign_id: str, reason: str = "") -> None:
     )
 
 
-async def is_paused(campaign_id: str) -> bool:
-    """Quick check used by the engine send loop to respect pause requests."""
+async def is_worker_active(campaign_id: str) -> bool:
+    """Return whether a worker may continue sending for this campaign."""
     campaigns = get_collection(COLLECTION)
     doc = await campaigns.find_one(
         {"_id": to_object_id(campaign_id)}, {"status": 1}
     )
-    return doc is not None and doc.get("status") == CampaignStatus.PAUSED.value
+    return doc is not None and doc.get("status") in {
+        CampaignStatus.RUNNING.value,
+        CampaignStatus.PROCESSING.value,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -504,8 +627,9 @@ async def list_campaigns(
             query["employeeId"] = {"$in": employee_id}
         else:
             query["employeeId"] = employee_id
-    if status_filter:
-        query["status"] = status_filter
+    normalized_status = status_filter.strip().lower() if status_filter else ""
+    if normalized_status and normalized_status not in {"all", "1"}:
+        query["status"] = normalized_status
     if profile_id:
         query["profileId"] = profile_id
 
@@ -591,10 +715,13 @@ async def delete_campaign(
     """
     doc = await _get_campaign_owned(campaign_id, employee_id, is_admin)
     
-    # Don't allow deletion of running campaigns
-    if doc.get("status") == CampaignStatus.RUNNING.value:
+    # Processing campaigns may already have a scheduled worker in flight.
+    if doc.get("status") in {
+        CampaignStatus.RUNNING.value,
+        CampaignStatus.PROCESSING.value,
+    }:
         raise BadRequestException(
-            "Cannot delete a running campaign. Pause it first."
+            "Cannot delete an active campaign. Pause it first."
         )
     
     campaigns = get_collection(COLLECTION)
@@ -610,4 +737,3 @@ async def delete_campaign(
         message=f"Campaign '{doc['campaignName']}' has been deleted.",
         type=NotificationType.INFO,
     )
-

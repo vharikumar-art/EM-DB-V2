@@ -55,13 +55,27 @@ async def resume_campaign(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
-    campaign = await service.set_status(
-        campaign_id, CampaignStatus.RUNNING, employee_id, is_admin
+    campaign, should_start_worker, is_scheduled_execution = await service.resume_campaign(
+        campaign_id, employee_id, is_admin
     )
 
-    from app.campaign_engine.worker import run_campaign
-    background_tasks.add_task(run_campaign, campaign["id"])
-    return ApiResponse(message="Campaign resumed", data=campaign)
+    if should_start_worker:
+        if is_scheduled_execution:
+            from app.campaigns.scheduler import _execute_and_finalize
+            background_tasks.add_task(
+                _execute_and_finalize,
+                campaign["id"],
+                campaign.get("campaignName", "Campaign"),
+                campaign.get("executionGeneration"),
+            )
+            message = "Scheduled campaign execution resumed"
+        else:
+            from app.campaign_engine.worker import run_campaign
+            background_tasks.add_task(run_campaign, campaign["id"])
+            message = "Campaign resumed"
+    else:
+        message = "Scheduled campaign resumed"
+    return ApiResponse(message=message, data=campaign)
 
 @router.get("", response_model=ApiResponse)
 async def list_campaigns(

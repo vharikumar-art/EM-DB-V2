@@ -123,7 +123,7 @@ async def download_emails(
     fields = [
         "fullName", "email", "university", "website", "country", "state",
         "city", "domain", "domain_group", "industry", "designation", "phone",
-        "linkedin", "citation", "mailSource", "uploadBatch", "isDuplicate",
+        "linkedin", "citation", "mailSource",
         "uploadedByName", "createdAt",
     ]
     master = service.get_collection(service.COLLECTION)

@@ -138,6 +138,9 @@ async def create_profile(employee_id: str, payload: ProfileCreate) -> dict:
         gmail_account=gmail_account,
         signature=payload.signature,
         templates=[t.model_dump() for t in payload.templates],
+        reminder_templates=[
+            t.model_dump() for t in payload.reminderTemplates
+        ],
         attachments=[a.model_dump() for a in payload.attachments] if payload.attachments else [],
         filters=payload.filters.model_dump(),
         filter_limit=payload.filterLimit,
@@ -179,6 +182,7 @@ async def get_profile(profile_id: str, employee_id: str, is_admin: bool) -> dict
     await _assert_owns_profile_or_admin(doc, employee_id, is_admin)
     # Back-fill defaults for older documents that predate new fields
     doc.setdefault("signature", "")
+    doc.setdefault("reminderTemplates", [])
     doc.setdefault("filters", _default_filters())
     doc.setdefault("filterLimit", 0)
     doc.setdefault("sendingOptions", _default_sending_options())
@@ -227,7 +231,7 @@ async def update_profile(
     for key, val in raw.items():
         if val is not None:
             # Handle templates specially - convert to list of dicts
-            if key == "templates" and val:
+            if key in {"templates", "reminderTemplates"} and val:
                 update_data[key] = [t if isinstance(t, dict) else t.model_dump() for t in val]
             else:
                 # nested pydantic objects come back as dicts via model_dump
@@ -302,9 +306,13 @@ async def send_test_email(
         raise NotFoundException("Profile not found")
     await _assert_owns_profile_or_admin(serialize_doc(existing), employee_id, is_admin)
 
-    templates = existing.get("templates") or []
+    is_reminder = payload.mailType == "reminder"
+    templates = existing.get(
+        "reminderTemplates" if is_reminder else "templates"
+    ) or []
     if not templates:
-        raise BadRequestException("This profile has no templates configured")
+        template_type = "reminder templates" if is_reminder else "templates"
+        raise BadRequestException(f"This profile has no {template_type} configured")
 
     template = None
     if payload.templateId is not None:
@@ -333,7 +341,21 @@ async def send_test_email(
         raise BadRequestException("This profile does not have a sender email configured")
 
     credentials = await get_credentials_for_send(sender_email)
-    subject = _replace_placeholders(str(template.get("subject") or ""), {"name": "Test", "fullName": "Test"})
+    if is_reminder:
+        # Reminder templates contain only a body; use a draft subject for the test.
+        draft_templates = existing.get("templates") or []
+        draft_subject = next(
+            (str(item.get("subject") or "") for item in draft_templates if item.get("subject")),
+            "Test reminder",
+        )
+        subject = _replace_placeholders(
+            draft_subject, {"name": "Test", "fullName": "Test"}
+        )
+    else:
+        subject = _replace_placeholders(
+            str(template.get("subject") or ""),
+            {"name": "Test", "fullName": "Test"},
+        )
     body = _replace_placeholders(str(template.get("body") or ""), {"name": "Test", "fullName": "Test"})
     signature = str(existing.get("signature") or "")
     html_body = f"{body.replace(chr(10), '<br>')}<br><br>{signature}"
@@ -382,6 +404,8 @@ async def send_test_email(
         "message": "Test email sent successfully" if result.success else (result.error or "Test email failed"),
         "fromEmail": credentials["email"],
         "toEmail": str(payload.toEmail),
+        "mailType": payload.mailType,
+        "templateId": str(template.get("id")) if template.get("id") is not None else None,
         "subject": subject,
         "messageId": result.message_id,
         "attachments": unique_attachments,

@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import AliasChoices, BaseModel, EmailStr, Field
 
 
@@ -52,11 +54,23 @@ class Template(BaseModel):
     weight: int = Field(default=1, ge=1, le=100, description="Selection weight (higher = more likely)")
 
 
+class ReminderTemplate(BaseModel):
+    """Body-only A/B template for reminder campaigns."""
+    name: str = Field(default="", max_length=100)
+    body: str = Field(min_length=1)
+    weight: int = Field(default=1, ge=1, le=100)
+
+
 class ProfileCreate(BaseModel):
     profileName: str = Field(min_length=1, max_length=100)
     gmailAccount: EmailStr
     signature: str = Field(default="", description="HTML signature appended to every email")
     templates: list[Template] = Field(min_length=1, max_length=5, description="1-5 A/B testing templates (required)")
+    reminderTemplates: list[ReminderTemplate] = Field(
+        default_factory=list,
+        max_length=5,
+        description="Optional body-only A/B templates for reminder campaigns",
+    )
     attachments: list[Attachment] = Field(default_factory=list, description="File attachments (sent with all templates)")
     filters: ProfileFilters = Field(default_factory=ProfileFilters)
     filterLimit: int = Field(default=0, ge=0, description="Maximum emails to fetch from filtered results (0 = no limit)")
@@ -71,6 +85,7 @@ class ProfileUpdate(BaseModel):
     gmailAccount: EmailStr | None = None
     signature: str | None = None
     templates: list[Template] | None = None
+    reminderTemplates: list[ReminderTemplate] | None = None
     filters: ProfileFilters | None = None
     filterLimit: int | None = None
     sendingOptions: ProfileSendingOptions | None = None
@@ -85,6 +100,7 @@ class ProfileOut(BaseModel):
     gmailAccount: str
     signature: str
     templates: list[Template]
+    reminderTemplates: list[ReminderTemplate] = Field(default_factory=list)
     attachments: list[Attachment] = Field(default_factory=list, description="File attachments (sent with all templates)")
     isActive: bool
     filters: ProfileFilters
@@ -119,4 +135,8 @@ class TemplateDelete(BaseModel):
 class ProfileTestEmailRequest(BaseModel):
     """Send a one-off test email using a profile's configured sender and template."""
     toEmail: EmailStr = Field(description="Recipient email used only for the test send")
-    templateId: str | None = Field(default=None, description="Optional template id to use; otherwise the first template is used")
+    templateId: str | None = Field(default=None, description="Optional template id to use; otherwise a template is selected randomly")
+    mailType: Literal["draft", "reminder"] = Field(
+        default="draft",
+        description="Choose a draft template or a reminder template",
+    )

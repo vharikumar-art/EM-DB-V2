@@ -1523,6 +1523,30 @@ async def release_email_locks(master_ids: list[str]) -> None:
     )
 
 
+async def decrement_email_usage(master_ids: list[str]) -> int:
+    """Reverse usage increments for generated leads cleared before they were sent."""
+    from datetime import datetime, timezone
+    from bson import ObjectId
+
+    object_ids = [ObjectId(mid) for mid in master_ids if ObjectId.is_valid(mid)]
+    if not object_ids:
+        return 0
+
+    master = get_collection(COLLECTION)
+    now = datetime.now(timezone.utc)
+    result = await master.update_many(
+        {
+            "_id": {"$in": object_ids},
+            "usageCount": {"$gt": 0},
+        },
+        {
+            "$inc": {"usageCount": -1},
+            "$set": {"updatedAt": now},
+        },
+    )
+    return result.modified_count
+
+
 async def mark_email_sent(master_email_id: str) -> None:
     """Record the successful send time used by the reuse cooldown policy."""
     from bson import ObjectId

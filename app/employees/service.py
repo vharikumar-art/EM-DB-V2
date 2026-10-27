@@ -69,42 +69,48 @@ async def list_employees(current_user: CurrentUser | None = None) -> list[dict]:
     query = {}
     
     if current_user and current_user.role == "admin":
-        # Get admin's employee ID
-        from app.employees.service import get_employee_by_user_id
         try:
             admin_emp = await get_employee_by_user_id(current_user.user_id)
             admin_emp_id = str(admin_emp.get("id"))
-            admin_branch = admin_emp.get("branch")
 
-            # Branch may only be on the users doc — fall back if not on employee doc
-            if not admin_branch:
-                users_col = get_collection("users")
-                admin_user_doc = await users_col.find_one(
-                    {"_id": to_object_id(current_user.user_id)}, {"branch": 1}
-                )
-                admin_branch = (admin_user_doc or {}).get("branch")
-            
-            if admin_branch:
-                import re
-                branch_regex = {"$regex": f"^{re.escape(str(admin_branch).strip())}$", "$options": "i"}
-                # Only include users whose role is 'employee' in this branch
-                users_col = get_collection("users")
-                branch_users = [
-                    u async for u in users_col.find(
-                        {"branch": branch_regex, "role": "employee"},
-                        {"_id": 1}
-                    )
-                ]
-                branch_user_ids = [str(u["_id"]) for u in branch_users] + [u["_id"] for u in branch_users]
-
-                query = {
-                    "$or": [
-                        {"_id": to_object_id(admin_emp_id)},
-                        {"userId": {"$in": branch_user_ids}},
-                    ]
-                }
+            if current_user.access_level == "partial":
+                query = {"assignedToAdmin": admin_emp_id}
             else:
-                query = {"_id": to_object_id(admin_emp_id)}
+                admin_branch = admin_emp.get("branch")
+
+                # Branch may only be on the user's document.
+                if not admin_branch:
+                    users_col = get_collection("users")
+                    admin_user_doc = await users_col.find_one(
+                        {"_id": to_object_id(current_user.user_id)}, {"branch": 1}
+                    )
+                    admin_branch = (admin_user_doc or {}).get("branch")
+
+                if admin_branch:
+                    import re
+                    branch_regex = {
+                        "$regex": f"^{re.escape(str(admin_branch).strip())}$",
+                        "$options": "i",
+                    }
+                    users_col = get_collection("users")
+                    branch_users = [
+                        user async for user in users_col.find(
+                            {"branch": branch_regex, "role": "employee"},
+                            {"_id": 1},
+                        )
+                    ]
+                    branch_user_ids = [
+                        str(user["_id"]) for user in branch_users
+                    ] + [user["_id"] for user in branch_users]
+
+                    query = {
+                        "$or": [
+                            {"_id": to_object_id(admin_emp_id)},
+                            {"userId": {"$in": branch_user_ids}},
+                        ]
+                    }
+                else:
+                    query = {"_id": to_object_id(admin_emp_id)}
         except Exception:
             # If admin has no employee profile, they should see NO employees, not ALL employees
             query = {"_id": "none"}

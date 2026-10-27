@@ -47,6 +47,8 @@ def _build_mime_message(
     body_html: str,
     message_id: str,
     attachments: list[dict] | None = None,
+    in_reply_to: str | None = None,
+    references: str | None = None,
 ) -> MIMEMultipart:
     msg = MIMEMultipart("alternative")
     msg["From"] = (
@@ -57,6 +59,10 @@ def _build_mime_message(
     msg["To"] = to
     msg["Subject"] = subject
     msg["Message-ID"] = message_id
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+    if references:
+        msg["References"] = references
 
     # Attach both plain-text and HTML parts; mail clients prefer HTML
     msg.attach(MIMEText(body_plain, "plain", "utf-8"))
@@ -115,13 +121,25 @@ def _send_sync(
     body_plain: str,
     body_html: str,
     attachments: list[dict] | None = None,
+    in_reply_to: str | None = None,
+    references: str | None = None,
 ) -> SendResult:
     """
     Synchronous SMTP send.  Called from a thread pool by the async wrapper
     so it never blocks the event loop.
     """
     message_id = f"<{uuid.uuid4().hex}@{credentials.email.split('@')[1]}>"
-    msg = _build_mime_message(credentials, to, subject, body_plain, body_html, message_id, attachments)
+    msg = _build_mime_message(
+        credentials,
+        to,
+        subject,
+        body_plain,
+        body_html,
+        message_id,
+        attachments,
+        in_reply_to,
+        references,
+    )
 
     try:
         if credentials.use_tls and credentials.smtp_port != 465:
@@ -172,6 +190,8 @@ async def send_email(
     body_plain: str,
     body_html: str,
     attachments: list[dict] | None = None,
+    in_reply_to: str | None = None,
+    references: str | None = None,
 ) -> SendResult:
     """
     Async wrapper — runs the blocking SMTP call in a thread pool
@@ -187,5 +207,7 @@ async def send_email(
         body_plain,
         body_html,
         attachments,
+        in_reply_to,
+        references,
     )
     return result

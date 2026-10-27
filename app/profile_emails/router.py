@@ -1,3 +1,5 @@
+from typing import Literal
+
 from fastapi import APIRouter, Depends, Query, status
 
 from app.core.dependencies import CurrentUser, get_current_user, require_write_access, resolve_employee_context, resolve_write_employee_context
@@ -54,9 +56,28 @@ async def get_stats(
     return ApiResponse(message="Stats fetched", data=stats)
 
 
+@router.post(
+    "/{profile_id}/convert-to-reminders",
+    response_model=ApiResponse,
+    dependencies=[Depends(require_write_access)],
+)
+async def convert_sent_drafts_to_reminders(
+    profile_id: str,
+    employeeId: str | None = Query(default=None),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Queue eligible sent drafts for a reminder campaign; does not send mail."""
+    employee_id, is_admin = await resolve_write_employee_context(current_user, employeeId)
+    result = await service.convert_sent_drafts_to_reminders(
+        profile_id, employee_id, is_admin
+    )
+    return ApiResponse(message="Sent drafts queued for reminder campaigns", data=result)
+
+
 @router.get("/{profile_id}", response_model=ApiResponse)
 async def list_profile_emails(
     profile_id: str,
+    mailType: Literal["draft", "reminder"] | None = Query(default=None),
     sendStatus: str | None = Query(default=None),
     search: str | None = Query(default=None),
     country: str | None = Query(default=None),
@@ -71,6 +92,7 @@ async def list_profile_emails(
         employee_id=employee_id,
         is_admin=is_admin,
         params=params,
+        mail_type=mailType,
         send_status=sendStatus,
         search=search,
         country=country,

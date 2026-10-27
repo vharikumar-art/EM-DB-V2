@@ -172,7 +172,9 @@ async def transition_to_processing(campaign_id: str) -> bool:
                 "status": CampaignStatus.PROCESSING.value,
                 "processingStartedAt": now,
                 "updatedAt": now,
-            }
+                "executionSent": 0,
+            },
+            "$inc": {"executionGeneration": 1},
         },
         return_document=False,  # Return the document before update
     )
@@ -180,12 +182,14 @@ async def transition_to_processing(campaign_id: str) -> bool:
     return result is not None
 
 
-async def execute_campaign(campaign_id: str) -> tuple[bool, Optional[str]]:
+async def execute_campaign(
+    campaign_id: str,
+) -> tuple[bool | None, Optional[str]]:
     """
     Execute a campaign using the existing run_campaign() function.
     
     Returns:
-        tuple: (success: bool, error_message: Optional[str])
+        A missing success value means the worker lock is held by another task.
     """
     try:
         campaigns = get_collection(COLLECTION)
@@ -195,7 +199,9 @@ async def execute_campaign(campaign_id: str) -> tuple[bool, Optional[str]]:
             return False, "Campaign not found"
         
         # Call the existing campaign execution logic
-        await run_campaign(campaign_id)
+        worker_started = await run_campaign(campaign_id)
+        if worker_started is False:
+            return None, None
         
         return True, None
     
@@ -208,13 +214,13 @@ async def execute_campaign(campaign_id: str) -> tuple[bool, Optional[str]]:
 async def finalize_campaign_execution(
     campaign_id: str,
     success: bool,
-    error_message: Optional[str] = None
+    error_message: Optional[str] = None,
+    execution_generation: int | None = None,
 ) -> None:
     """
     Update campaign status after execution attempt.
     
-    If success: status = completed
-    If failure: status = scheduled (for retry), increment retryCount
+    Successful runs complete or reschedule recurring campaigns. Failures are terminal.
     """
     campaigns = get_collection(COLLECTION)
     now = datetime.now(timezone.utc)
@@ -222,6 +228,17 @@ async def finalize_campaign_execution(
     
     if not campaign:
         return
+    if (
+        execution_generation is not None
+        and campaign.get("executionGeneration") != execution_generation
+    ):
+        return
+
+    generation_filter = (
+        {"executionGeneration": execution_generation}
+        if execution_generation is not None
+        else {}
+    )
     
     processing_started = campaign.get("processingStartedAt")
     execution_duration = None
@@ -242,25 +259,30 @@ async def finalize_campaign_execution(
             success = False
             error_message = campaign.get("errorMessage") or "Aborted by worker"
         elif current_status == CampaignStatus.PAUSED.value:
-            # Pause is only valid while more emails remain. If the queue is empty,
-            # the campaign has actually finished and should not stay paused.
-            if campaign.get("pending", 0) == 0:
-                pass
-            else:
-                await campaigns.update_one(
-                    {"_id": to_object_id(campaign_id)},
-                    {"$set": {"executionDuration": execution_duration}}
-                )
-                if campaign.get("recurrenceType") not in ["daily", "weekly"]:
-                    return
+            await campaigns.update_one(
+                {
+                    "_id": to_object_id(campaign_id),
+                    "status": CampaignStatus.PAUSED.value,
+                    **generation_filter,
+                },
+                {"$set": {"executionDuration": execution_duration}}
+            )
+            return
 
     if success:
         # Check if it should reschedule.
         recurrence_type = campaign.get("recurrenceType", "once")
         if recurrence_type in ["daily", "weekly"]:
             if campaign.get("pending", 0) == 0:
-                await campaigns.update_one(
-                    {"_id": to_object_id(campaign_id)},
+                update_result = await campaigns.update_one(
+                    {
+                        "_id": to_object_id(campaign_id),
+                        **generation_filter,
+                        "status": {"$in": [
+                            CampaignStatus.PROCESSING.value,
+                            CampaignStatus.RUNNING.value,
+                        ]},
+                    },
                     {
                         "$set": {
                             "status": CampaignStatus.COMPLETED.value,
@@ -271,6 +293,8 @@ async def finalize_campaign_execution(
                         }
                     }
                 )
+                if update_result.modified_count == 0:
+                    return
                 await create_notification(
                     employee_id=campaign.get("employeeId"),
                     message=f"Campaign '{campaign['campaignName']}' completed because all pending emails have been sent.",
@@ -291,8 +315,15 @@ async def finalize_campaign_execution(
                     recurrence_days=campaign.get("recurrenceDays", []),
                 )
 
-                await campaigns.update_one(
-                    {"_id": to_object_id(campaign_id)},
+                update_result = await campaigns.update_one(
+                    {
+                        "_id": to_object_id(campaign_id),
+                        **generation_filter,
+                        "status": {"$in": [
+                            CampaignStatus.PROCESSING.value,
+                            CampaignStatus.RUNNING.value,
+                        ]},
+                    },
                     {
                         "$set": {
                             "status": CampaignStatus.SCHEDULED.value,
@@ -303,6 +334,8 @@ async def finalize_campaign_execution(
                         }
                     }
                 )
+                if update_result.modified_count == 0:
+                    return
 
                 await create_notification(
                     employee_id=campaign.get("employeeId"),
@@ -315,8 +348,15 @@ async def finalize_campaign_execution(
                 # Fall through to standard completion if rescheduling fails
         
         # Standard completion (once, or rescheduling failed)
-        await campaigns.update_one(
-            {"_id": to_object_id(campaign_id)},
+        update_result = await campaigns.update_one(
+            {
+                "_id": to_object_id(campaign_id),
+                **generation_filter,
+                "status": {"$in": [
+                    CampaignStatus.PROCESSING.value,
+                    CampaignStatus.RUNNING.value,
+                ]},
+            },
             {
                 "$set": {
                     "status": CampaignStatus.COMPLETED.value,
@@ -327,6 +367,8 @@ async def finalize_campaign_execution(
                 }
             }
         )
+        if update_result.modified_count == 0:
+            return
         
         # Send success notification
         await create_notification(
@@ -337,63 +379,77 @@ async def finalize_campaign_execution(
     
     else:
         # Campaign failed
-        retry_count = campaign.get("retryCount", 0)
-        max_retries = campaign.get("maxRetries", 3)
-        
-        if retry_count < max_retries:
-            # Retry later - reset to scheduled status
-            retry_count += 1
-            next_retry = now + timedelta(minutes=5)  # Retry in 5 minutes
-            
-            await campaigns.update_one(
-                {"_id": to_object_id(campaign_id)},
-                {
-                    "$set": {
-                        "status": CampaignStatus.SCHEDULED.value,
-                        "scheduledFor": next_retry,
-                        "retryCount": retry_count,
-                        "executionDuration": execution_duration,
-                        "errorMessage": error_message,
-                        "updatedAt": now,
-                    }
+        error_message = error_message or campaign.get("errorMessage") or "Campaign execution failed"
+        update_result = await campaigns.update_one(
+            {
+                "_id": to_object_id(campaign_id),
+                **generation_filter,
+                "status": {"$in": [
+                    CampaignStatus.PROCESSING.value,
+                    CampaignStatus.RUNNING.value,
+                    CampaignStatus.SCHEDULED.value,
+                ]},
+            },
+            {
+                "$set": {
+                    "status": CampaignStatus.FAILED.value,
+                    "completedAt": now,
+                    "executionDuration": execution_duration,
+                    "errorMessage": error_message,
+                    "updatedAt": now,
                 }
-            )
-            
-            # Send retry notification
-            await create_notification(
-                employee_id=campaign.get("employeeId"),
-                message=f"Campaign '{campaign['campaignName']}' failed. Retrying in 5 minutes (attempt {retry_count}/{max_retries}).",
-                type=NotificationType.WARNING,
-            )
-        
-        else:
-            # Max retries exceeded - mark as failed
-            await campaigns.update_one(
-                {"_id": to_object_id(campaign_id)},
-                {
-                    "$set": {
-                        "status": CampaignStatus.FAILED.value,
-                        "completedAt": now,
-                        "executionDuration": execution_duration,
-                        "errorMessage": error_message,
-                        "updatedAt": now,
-                    }
-                }
-            )
-            
-            # Send failure notification
-            await create_notification(
-                employee_id=campaign.get("employeeId"),
-                message=f"Campaign '{campaign['campaignName']}' failed after {max_retries} attempts. Error: {error_message}",
-                type=NotificationType.ERROR,
-            )
+            }
+        )
+        if update_result.modified_count == 0:
+            return
+
+        await create_notification(
+            employee_id=campaign.get("employeeId"),
+            message=f"Campaign '{campaign['campaignName']}' failed. Error: {error_message}",
+            type=NotificationType.ERROR,
+        )
 
 
-async def _execute_and_finalize(campaign_id: str, campaign_name: str) -> None:
+async def _execute_and_finalize(
+    campaign_id: str,
+    campaign_name: str,
+    execution_generation: int | None = None,
+) -> None:
     """Wrapper to run a campaign in the background and finalize it upon completion."""
     try:
-        success, error_msg = await execute_campaign(campaign_id)
-        await finalize_campaign_execution(campaign_id, success, error_msg)
+        campaigns = get_collection(COLLECTION)
+        if execution_generation is None:
+            campaign = await campaigns.find_one(
+                {"_id": to_object_id(campaign_id)},
+                {"executionGeneration": 1},
+            )
+            if not campaign:
+                return
+            execution_generation = campaign.get("executionGeneration")
+
+        retry_delay = 0.1
+        while True:
+            campaign = await campaigns.find_one(
+                {"_id": to_object_id(campaign_id)},
+                {"status": 1, "executionGeneration": 1},
+            )
+            if (
+                not campaign
+                or campaign.get("status") != CampaignStatus.PROCESSING.value
+                or campaign.get("executionGeneration") != execution_generation
+            ):
+                return
+
+            success, error_msg = await execute_campaign(campaign_id)
+            if success is None:
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 2.0)
+                continue
+            break
+
+        await finalize_campaign_execution(
+            campaign_id, success, error_msg, execution_generation
+        )
         if success:
             logger.info(f"Scheduled campaign {campaign_id} completed successfully")
         else:
@@ -402,7 +458,9 @@ async def _execute_and_finalize(campaign_id: str, campaign_name: str) -> None:
         logger.error(f"Fatal error in background execution for {campaign_id}: {e}", exc_info=True)
         # Fallback finalize
         try:
-            await finalize_campaign_execution(campaign_id, False, str(e))
+            await finalize_campaign_execution(
+                campaign_id, False, str(e), execution_generation
+            )
         except Exception:
             pass
 
