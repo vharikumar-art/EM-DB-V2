@@ -11,6 +11,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from app.campaigns.model import CampaignStatus
+from app.campaigns.time_format import format_utc_datetime_12_hour
 from app.campaign_engine.worker import run_campaign
 from app.database.mongodb import get_collection
 from app.notifications.schema import NotificationType
@@ -127,7 +128,7 @@ async def find_due_campaigns() -> list[dict]:
     Find all campaigns that are due for execution.
     
     Returns campaigns where:
-    - status = "scheduled"
+    - status is "scheduled" or "rescheduled"
     - scheduledFor <= current_time
     - retryCount < maxRetries (or has max retries but failed)
     """
@@ -137,7 +138,12 @@ async def find_due_campaigns() -> list[dict]:
     #print(f"[SCHEDULER DEBUG] find_due_campaigns - current time: {now.isoformat()}")
     
     query = {
-        "status": CampaignStatus.SCHEDULED.value,
+        "status": {
+            "$in": [
+                CampaignStatus.SCHEDULED.value,
+                CampaignStatus.RESCHEDULED.value,
+            ]
+        },
         "scheduledFor": {"$lte": now}
     }
     
@@ -151,7 +157,7 @@ async def find_due_campaigns() -> list[dict]:
 
 async def transition_to_processing(campaign_id: str) -> bool:
     """
-    Atomically transition campaign from 'scheduled' to 'processing'.
+    Atomically transition a scheduled campaign to 'processing'.
     
     Returns True if transition succeeded (only one process should succeed).
     Returns False if another process already transitioned this campaign.
@@ -161,11 +167,16 @@ async def transition_to_processing(campaign_id: str) -> bool:
     campaigns = get_collection(COLLECTION)
     now = datetime.now(timezone.utc)
     
-    # Atomic operation: only update if current status is 'scheduled'
+    # Include rescheduled campaigns so the next recurring run is dispatched.
     result = await campaigns.find_one_and_update(
         {
             "_id": to_object_id(campaign_id),
-            "status": CampaignStatus.SCHEDULED.value
+            "status": {
+                "$in": [
+                    CampaignStatus.SCHEDULED.value,
+                    CampaignStatus.RESCHEDULED.value,
+                ]
+            },
         },
         {
             "$set": {
@@ -209,6 +220,33 @@ async def execute_campaign(
         error_msg = str(e)
         logger.error(f"Campaign {campaign_id} execution failed: {error_msg}", exc_info=True)
         return False, error_msg
+
+
+async def _record_reminder_schedule_failure(
+    campaign_id: str,
+    error: Exception,
+) -> None:
+    """Persist reminder setup failures so completed campaigns are diagnosable."""
+    try:
+        await get_collection(COLLECTION).update_one(
+            {
+                "_id": to_object_id(campaign_id),
+                "status": CampaignStatus.COMPLETED.value,
+                "reminderAutomationStatus": {"$ne": "scheduled"},
+            },
+            {
+                "$set": {
+                    "reminderAutomationStatus": "failed",
+                    "reminderAutomationError": str(error)[:500],
+                    "updatedAt": datetime.now(timezone.utc),
+                }
+            },
+        )
+    except Exception:
+        logger.exception(
+            "Could not persist automatic reminder failure for campaign %s",
+            campaign_id,
+        )
 
 
 async def finalize_campaign_execution(
@@ -295,6 +333,19 @@ async def finalize_campaign_execution(
                 )
                 if update_result.modified_count == 0:
                     return
+                if campaign.get("mailType", "draft") == "draft" and campaign.get(
+                    "autoReminderEnabled", True
+                ):
+                    from app.campaigns.service import schedule_automatic_reminder_campaign
+
+                    try:
+                        await schedule_automatic_reminder_campaign(campaign_id)
+                    except Exception as exc:
+                        logger.exception(
+                            "Campaign %s completed, but automatic reminder scheduling failed",
+                            campaign_id,
+                        )
+                        await _record_reminder_schedule_failure(campaign_id, exc)
                 await create_notification(
                     employee_id=campaign.get("employeeId"),
                     message=f"Campaign '{campaign['campaignName']}' completed because all pending emails have been sent.",
@@ -326,7 +377,7 @@ async def finalize_campaign_execution(
                     },
                     {
                         "$set": {
-                            "status": CampaignStatus.SCHEDULED.value,
+                            "status": CampaignStatus.RESCHEDULED.value,
                             "scheduledFor": next_run,
                             "executionDuration": execution_duration,
                             "updatedAt": now,
@@ -339,7 +390,7 @@ async def finalize_campaign_execution(
 
                 await create_notification(
                     employee_id=campaign.get("employeeId"),
-                    message=f"Campaign '{campaign['campaignName']}' completed this run and is scheduled for next occurrence at {next_run.strftime('%Y-%m-%d %H:%M')} UTC.",
+                    message=f"Campaign '{campaign['campaignName']}' completed this run and is scheduled for next occurrence at {format_utc_datetime_12_hour(next_run)}.",
                     type=NotificationType.INFO,
                 )
                 return
@@ -369,7 +420,20 @@ async def finalize_campaign_execution(
         )
         if update_result.modified_count == 0:
             return
-        
+        if campaign.get("mailType", "draft") == "draft" and campaign.get(
+            "autoReminderEnabled", True
+        ):
+            from app.campaigns.service import schedule_automatic_reminder_campaign
+
+            try:
+                await schedule_automatic_reminder_campaign(campaign_id)
+            except Exception as exc:
+                logger.exception(
+                    "Campaign %s completed, but automatic reminder scheduling failed",
+                    campaign_id,
+                )
+                await _record_reminder_schedule_failure(campaign_id, exc)
+
         # Send success notification
         await create_notification(
             employee_id=campaign.get("employeeId"),
@@ -388,6 +452,7 @@ async def finalize_campaign_execution(
                     CampaignStatus.PROCESSING.value,
                     CampaignStatus.RUNNING.value,
                     CampaignStatus.SCHEDULED.value,
+                    CampaignStatus.RESCHEDULED.value,
                 ]},
             },
             {
@@ -558,7 +623,12 @@ async def get_scheduler_status() -> dict:
     
     # Count campaigns awaiting execution
     awaiting = await campaigns.count_documents({
-        "status": CampaignStatus.SCHEDULED.value,
+        "status": {
+            "$in": [
+                CampaignStatus.SCHEDULED.value,
+                CampaignStatus.RESCHEDULED.value,
+            ]
+        },
         "scheduledFor": {"$lte": now}
     })
     

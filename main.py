@@ -30,6 +30,8 @@ from app.settings.router import router as settings_router
 from app.templates.router import router as templates_router
 from app.users.router import router as users_router
 
+from app.database.redis_client import connect_redis, close_redis
+
 
 async def _scheduler_loop() -> None:
     """Background task: check and fire due scheduled campaigns every 60 seconds."""
@@ -49,6 +51,7 @@ async def _scheduler_loop() -> None:
 async def lifespan(app: FastAPI):
     # Startup
     await connect_to_mongo()
+    await connect_redis()
     await create_indexes()
     await migrate_admin_access_levels()
 
@@ -63,6 +66,7 @@ async def lifespan(app: FastAPI):
         await scheduler_task
     except asyncio.CancelledError:
         pass
+    await close_redis()
     await close_mongo_connection()
 
 
@@ -79,7 +83,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(
     CORSMiddleware,
     # allow_origins=settings.cors_origins_list,
-    allow_origins=["http://localhost:5173","http://192.168.1.18:5173", "http://13.206.26.177:5001","http://localhost:5174","http://localhost:5175" , "http://13.206.26.177:2003" , "http://35.154.26.148"],
+    allow_origins=["http://localhost:5173","http://192.168.1.22:5173", "http://13.206.26.177:5001","http://localhost:5174","http://localhost:5175" , "http://13.206.26.177:2003" , "http://35.154.26.148"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -99,7 +103,7 @@ app.include_router(email_master_router)     # Permanent lead database
 app.include_router(profiles_router)         # Campaign profiles (subject/body/filters)
 app.include_router(profile_emails_router)   # Working email list per profile
 app.include_router(templates_router)        # Reusable email templates
-app.include_router(campaigns_router)        # Campaign lifecycle + start/pause/resume
+app.include_router(campaigns_router)       # Campaign lifecycle + start/pause/resume
 
 app.include_router(dashboard_router)
 app.include_router(logs_router)

@@ -1,7 +1,12 @@
+import logging
 from datetime import datetime, timezone, timedelta
 
 from app.campaigns.model import CampaignStatus, build_campaign_document
 from app.campaigns.schema import CampaignStartRequest
+from app.campaigns.time_format import (
+    format_campaign_time_12_hour,
+    format_utc_datetime_12_hour,
+)
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
 from app.database.mongodb import get_collection
 from app.notifications.schema import NotificationType
@@ -13,13 +18,28 @@ from app.utils.pagination import build_paginated_response
 from app.utils.response import serialize_doc, serialize_list, to_object_id
 
 COLLECTION = "campaigns"
+logger = logging.getLogger(__name__)
 ACTIVE_CAMPAIGN_STATUSES = [
     CampaignStatus.PENDING.value,
     CampaignStatus.RUNNING.value,
     CampaignStatus.PAUSED.value,
     CampaignStatus.SCHEDULED.value,
+    CampaignStatus.RESCHEDULED.value,
     CampaignStatus.PROCESSING.value,
 ]
+
+
+def _serialize_campaign(doc: dict) -> dict:
+    result = serialize_doc(doc)
+    scheduled_display = result.get("scheduledForDisplay")
+    if isinstance(scheduled_display, str):
+        result["scheduledForDisplay"] = format_campaign_time_12_hour(scheduled_display)
+
+    started_at = doc.get("startedAt")
+    if isinstance(started_at, datetime):
+        result["startedAtDisplay"] = format_utc_datetime_12_hour(started_at)
+
+    return result
 
 
 def _profile_email_type_filter(mail_type: str) -> dict:
@@ -34,11 +54,17 @@ def _profile_email_type_filter(mail_type: str) -> dict:
 
 
 def _add_campaign_progress(doc: dict) -> dict:
-    result = serialize_doc(doc)
+    result = _serialize_campaign(doc)
     total = max(int(result.get("totalEmails") or 0), 0)
     processed = sum(
         max(int(result.get(field) or 0), 0)
         for field in ("sent", "failed", "skipped")
+    )
+    pending = result.get("pending")
+    result["pending"] = (
+        max(int(pending), 0)
+        if pending is not None
+        else max(total - processed, 0)
     )
     result["processedEmails"] = processed
     result["progressPercent"] = round((processed / total) * 100, 1) if total else 0
@@ -176,6 +202,12 @@ async def create_campaign(
     doc["dailyLimit"] = daily_limit
     # Keep limitOverride for backward compatibility
     doc["limitOverride"] = payload.limitOverride
+    doc["autoReminderEnabled"] = (
+        payload.autoReminderEnabled and payload.mailType == "draft"
+    )
+    doc["reminderDelayDays"] = payload.reminderDelayDays
+    if not doc["autoReminderEnabled"]:
+        doc["reminderAutomationStatus"] = "disabled"
 
     result = await campaigns.insert_one(doc)
     created = await campaigns.find_one({"_id": result.inserted_id})
@@ -197,7 +229,7 @@ async def create_campaign(
         type=NotificationType.INFO,
     )
 
-    return serialize_doc(created)
+    return _serialize_campaign(created)
 
 
 async def create_scheduled_campaign(
@@ -305,6 +337,12 @@ async def create_scheduled_campaign(
     # Store dailyLimit and retry settings
     doc["dailyLimit"] = daily_limit
     doc["maxRetries"] = payload.maxRetries
+    doc["autoReminderEnabled"] = (
+        payload.autoReminderEnabled and payload.mailType == "draft"
+    )
+    doc["reminderDelayDays"] = payload.reminderDelayDays
+    if not doc["autoReminderEnabled"]:
+        doc["reminderAutomationStatus"] = "disabled"
     
     display_time = payload.scheduledTimeLocal
     if payload.scheduledDateLocal:
@@ -333,14 +371,15 @@ async def create_scheduled_campaign(
 
     scheduled_time_str = payload.scheduledTimeLocal
     if payload.scheduledDateLocal:
-        scheduled_time_str = f"{payload.scheduledDateLocal} {payload.scheduledTimeLocal}"
+        scheduled_time_str = f"{payload.scheduledDateLocal}T{payload.scheduledTimeLocal}"
+    scheduled_time_str = format_campaign_time_12_hour(scheduled_time_str)
     await create_notification(
         employee_id=profile["employeeId"],
         message=f"Campaign '{campaign_name}' scheduled for {scheduled_time_str} with {pending_count} pending email(s). Daily limit: {daily_limit}",
         type=NotificationType.INFO,
     )
 
-    return serialize_doc(created)
+    return _serialize_campaign(created)
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +411,7 @@ async def set_status(
     allowed: dict[str, set] = {
         CampaignStatus.PENDING.value: {CampaignStatus.RUNNING, CampaignStatus.PAUSED, CampaignStatus.FAILED},
         CampaignStatus.SCHEDULED.value: {CampaignStatus.PROCESSING, CampaignStatus.FAILED},
+        CampaignStatus.RESCHEDULED.value: {CampaignStatus.PROCESSING, CampaignStatus.FAILED},
         CampaignStatus.PROCESSING.value: {CampaignStatus.RUNNING, CampaignStatus.PAUSED, CampaignStatus.FAILED},
         CampaignStatus.RUNNING.value: {CampaignStatus.PAUSED, CampaignStatus.COMPLETED, CampaignStatus.FAILED, CampaignStatus.SCHEDULED},
         CampaignStatus.PAUSED.value: {CampaignStatus.RUNNING, CampaignStatus.FAILED, CampaignStatus.SCHEDULED},
@@ -398,7 +438,11 @@ async def set_status(
 
     campaigns = get_collection(COLLECTION)
     update_operation = {"$set": update}
-    if new_status in (CampaignStatus.RUNNING, CampaignStatus.SCHEDULED):
+    if new_status in (
+        CampaignStatus.RUNNING,
+        CampaignStatus.SCHEDULED,
+        CampaignStatus.RESCHEDULED,
+    ):
         update_operation["$unset"] = {"pausedFromStatus": ""}
     result = await campaigns.find_one_and_update(
         {"_id": to_object_id(campaign_id), "status": current},
@@ -407,7 +451,7 @@ async def set_status(
     )
     if result is None:
         raise BadRequestException("Campaign status changed while updating. Please try again.")
-    return serialize_doc(result)
+    return _serialize_campaign(result)
 
 
 async def resume_campaign(
@@ -449,7 +493,7 @@ async def resume_campaign(
     )
     if result is None:
         raise BadRequestException("Campaign status changed while resuming. Please try again.")
-    return serialize_doc(result), True, scheduled_execution
+    return _serialize_campaign(result), True, scheduled_execution
 
 
 async def start_campaign_worker(campaign_id: str) -> bool:
@@ -546,6 +590,17 @@ async def finalize_campaign(campaign_id: str) -> None:
     if update_result.modified_count == 0:
         return
 
+    if doc.get("mailType", "draft") == "draft" and doc.get(
+        "autoReminderEnabled", True
+    ):
+        try:
+            await schedule_automatic_reminder_campaign(campaign_id)
+        except Exception:
+            logger.exception(
+                "Campaign %s completed, but automatic reminder scheduling failed",
+                campaign_id,
+            )
+
     # Also log completion
     from app.logs.model import LogAction, build_log_document
     logs = get_collection("logs")
@@ -568,6 +623,277 @@ async def finalize_campaign(campaign_id: str) -> None:
         ),
         type=NotificationType.SUCCESS,
     )
+
+
+async def schedule_automatic_reminder_campaign(campaign_id: str) -> None:
+    """Queue this completed draft campaign's eligible recipients for follow-up in 3 days."""
+    campaigns = get_collection(COLLECTION)
+    campaign_oid = to_object_id(campaign_id)
+    claim = await campaigns.update_one(
+        {
+            "_id": campaign_oid,
+            "status": CampaignStatus.COMPLETED.value,
+            "mailType": {"$in": ["draft", None]},
+            "reminderAutomationStatus": {"$in": [None, "skipped", "failed"]},
+            "autoReminderEnabled": {"$ne": False},
+        },
+        {
+            "$set": {
+                "reminderAutomationStatus": "processing",
+                "updatedAt": datetime.now(timezone.utc),
+            }
+        },
+    )
+    if claim.modified_count == 0:
+        return
+
+    source = await campaigns.find_one({"_id": campaign_oid})
+    if not source:
+        return
+
+    async def finish_automation(status: str, **fields: object) -> None:
+        await campaigns.update_one(
+            {"_id": campaign_oid, "reminderAutomationStatus": "processing"},
+            {
+                "$set": {
+                    "reminderAutomationStatus": status,
+                    "updatedAt": datetime.now(timezone.utc),
+                    **fields,
+                }
+            },
+        )
+
+    async def notify(message: str, notification_type: NotificationType) -> None:
+        try:
+            await create_notification(
+                employee_id=source["employeeId"],
+                message=message,
+                type=notification_type,
+            )
+        except Exception:
+            logger.exception(
+                "Could not notify employee %s about reminder automation for campaign %s",
+                source["employeeId"],
+                campaign_id,
+            )
+
+    reminder_id: str | None = None
+    try:
+        profile = await get_profile(source["profileId"], source["employeeId"], True)
+        templates = [
+            template
+            for template in profile.get("reminderTemplates", [])
+            if str(template.get("body") or "").strip()
+        ]
+        if not profile.get("isActive", False):
+            reason = "The profile is inactive; no reminder campaign was scheduled."
+            await finish_automation("skipped", reminderAutomationError=reason)
+            await notify(
+                f"Automatic reminder for '{source['campaignName']}' was not scheduled. {reason}",
+                NotificationType.WARNING,
+            )
+            return
+        if not templates:
+            reason = "Add at least one reminder template to the profile."
+            await finish_automation("skipped", reminderAutomationError=reason)
+            await notify(
+                f"Automatic reminder for '{source['campaignName']}' was not scheduled. {reason}",
+                NotificationType.WARNING,
+            )
+            return
+
+        from app.profile_emails import service as profile_email_service
+
+        conversion = await profile_email_service.convert_campaign_sent_drafts_to_reminders(
+            profile_id=source["profileId"],
+            employee_id=source["employeeId"],
+            is_admin=True,
+            campaign_id=campaign_id,
+        )
+        reminder_count = conversion["convertedCount"]
+        if reminder_count == 0:
+            reason = (
+                "No eligible sent draft emails were found"
+                + (
+                    f" ({conversion['skippedMissingThreadData']} lacked a recoverable "
+                    "original subject or reply-thread ID)."
+                    if conversion["skippedMissingThreadData"]
+                    else "."
+                )
+            )
+            await finish_automation("skipped", reminderAutomationError=reason)
+            await notify(
+                f"Automatic reminder for '{source['campaignName']}' was not scheduled. {reason}",
+                NotificationType.INFO,
+            )
+            return
+
+        completed_at = source.get("completedAt")
+        if not isinstance(completed_at, datetime):
+            raise ValueError("Completed campaign is missing a valid completedAt timestamp")
+        if completed_at.tzinfo is None:
+            completed_at = completed_at.replace(tzinfo=timezone.utc)
+        reminder_delay_days = source.get("reminderDelayDays")
+        if reminder_delay_days is None or reminder_delay_days == "":
+            reminder_delay_days = 6
+        scheduled_for = completed_at + timedelta(days=reminder_delay_days)
+
+        campaign_name = f"{source['campaignName']} - Reminder"
+        reminder_doc = build_campaign_document(
+            profile_id=source["profileId"],
+            employee_id=source["employeeId"],
+            campaign_name=campaign_name,
+            total_emails=reminder_count,
+            scheduled_for=scheduled_for,
+            mail_type="reminder",
+        )
+        reminder_doc.update(
+            {
+                "sourceCampaignId": campaign_id,
+                "dailyLimit": (profile.get("sendingOptions") or {}).get(
+                    "dailyLimit"
+                )
+                or 100,
+                "maxRetries": 3,
+                "scheduledForDisplay": scheduled_for.strftime("%Y-%m-%dT%H:%M"),
+                "recurrenceType": "once",
+                "recurrenceDays": [],
+                "recurrenceEndDate": None,
+                "timezoneOffsetMinutes": 0,
+                "profileSnapshot": {
+                    "profileName": profile.get("profileName"),
+                    "gmailAccount": profile.get("gmailAccount"),
+                    "subject": profile.get("subject"),
+                    "templates": profile.get("templates", []),
+                    "reminderTemplates": profile.get("reminderTemplates", []),
+                    "sendingOptions": profile.get("sendingOptions"),
+                    "promptSettings": profile.get("promptSettings"),
+                },
+            }
+        )
+        reminder_result = await campaigns.insert_one(reminder_doc)
+        reminder_id = str(reminder_result.inserted_id)
+
+        profile_emails = get_collection("profile_emails")
+        assignment = await profile_emails.update_many(
+            {
+                "profileId": source["profileId"],
+                "campaignId": campaign_id,
+                "mailType": "reminder",
+                "sendStatus": SendStatus.PENDING.value,
+            },
+            {
+                "$set": {
+                    "campaignId": reminder_id,
+                    "updatedAt": datetime.now(timezone.utc),
+                }
+            },
+        )
+        if assignment.modified_count == 0:
+            reason = "Eligible reminder emails were no longer available to schedule."
+            await campaigns.update_one(
+                {"_id": reminder_result.inserted_id},
+                {
+                    "$set": {
+                        "status": CampaignStatus.COMPLETED.value,
+                        "totalEmails": 0,
+                        "pending": 0,
+                        "completedAt": datetime.now(timezone.utc),
+                        "updatedAt": datetime.now(timezone.utc),
+                    }
+                },
+            )
+            await finish_automation("skipped", reminderAutomationError=reason)
+            await notify(
+                f"Automatic reminder for '{source['campaignName']}' was not scheduled. {reason}",
+                NotificationType.INFO,
+            )
+            return
+
+        if assignment.modified_count != reminder_count:
+            await campaigns.update_one(
+                {"_id": reminder_result.inserted_id},
+                {
+                    "$set": {
+                        "totalEmails": assignment.modified_count,
+                        "pending": assignment.modified_count,
+                        "updatedAt": datetime.now(timezone.utc),
+                    }
+                },
+            )
+
+        await finish_automation(
+            "scheduled",
+            reminderCampaignId=reminder_id,
+            reminderScheduledFor=scheduled_for,
+            reminderAutomationError=None,
+        )
+        await notify(
+            (
+                f"Reminder campaign '{campaign_name}' scheduled for "
+                f"{format_utc_datetime_12_hour(scheduled_for)} with "
+                f"{assignment.modified_count} recipient(s)."
+            ),
+            NotificationType.INFO,
+        )
+    except Exception as exc:
+        logger.exception(
+            "Failed to schedule automatic reminder for campaign %s", campaign_id
+        )
+        if reminder_id:
+            await campaigns.update_one(
+                {"_id": to_object_id(reminder_id)},
+                {
+                    "$set": {
+                        "status": CampaignStatus.FAILED.value,
+                        "errorMessage": "Automatic reminder setup did not complete.",
+                        "completedAt": datetime.now(timezone.utc),
+                        "updatedAt": datetime.now(timezone.utc),
+                    }
+                },
+            )
+        await finish_automation(
+            "failed",
+            reminderAutomationError=str(exc)[:500],
+        )
+        await notify(
+            (
+                f"Automatic reminder for '{source['campaignName']}' could not be "
+                f"scheduled: {str(exc)[:300]}"
+            ),
+            NotificationType.ERROR,
+        )
+
+
+async def retry_automatic_reminder_campaign(
+    campaign_id: str,
+    employee_id: str,
+    is_admin: bool,
+) -> dict:
+    """Retry reminder setup for an owned, completed draft campaign."""
+    source = await _get_campaign_owned(campaign_id, employee_id, is_admin)
+    if source.get("status") != CampaignStatus.COMPLETED.value:
+        raise BadRequestException(
+            "Automatic reminders can only be retried for completed campaigns."
+        )
+    if source.get("mailType", "draft") != "draft":
+        raise BadRequestException(
+            "Automatic reminders can only be retried for draft campaigns."
+        )
+    if source.get("autoReminderEnabled", True) is False:
+        raise BadRequestException(
+            "Automatic reminders are disabled for this campaign."
+        )
+    if source.get("reminderAutomationStatus") == "scheduled":
+        return _serialize_campaign(source)
+
+    await schedule_automatic_reminder_campaign(campaign_id)
+    updated = await get_collection(COLLECTION).find_one(
+        {"_id": to_object_id(campaign_id)}
+    )
+    if not updated:
+        raise NotFoundException("Campaign not found")
+    return _serialize_campaign(updated)
 
 
 async def abort_campaign(campaign_id: str, reason: str = "") -> None:
@@ -594,6 +920,38 @@ async def abort_campaign(campaign_id: str, reason: str = "") -> None:
         employee_id=doc["employeeId"],
         message=f"Campaign '{doc['campaignName']}' failed. {reason}".strip(),
         type=NotificationType.ERROR,
+    )
+
+
+async def pause_campaign_worker(campaign_id: str) -> None:
+    """Pause an active campaign worker without recording a failure."""
+    campaigns = get_collection(COLLECTION)
+    campaign_oid = to_object_id(campaign_id)
+    doc = await campaigns.find_one(
+        {"_id": campaign_oid},
+        {"status": 1},
+    )
+    if not doc:
+        return
+
+    current_status = doc.get("status")
+    if current_status not in {
+        CampaignStatus.RUNNING.value,
+        CampaignStatus.PROCESSING.value,
+    }:
+        return
+
+    now = datetime.now(timezone.utc)
+    await campaigns.update_one(
+        {"_id": campaign_oid, "status": current_status},
+        {
+            "$set": {
+                "status": CampaignStatus.PAUSED.value,
+                "pausedAt": now,
+                "pausedFromStatus": current_status,
+                "updatedAt": now,
+            }
+        },
     )
 
 
@@ -629,7 +987,15 @@ async def list_campaigns(
             query["employeeId"] = employee_id
     normalized_status = status_filter.strip().lower() if status_filter else ""
     if normalized_status and normalized_status not in {"all", "1"}:
-        query["status"] = normalized_status
+        if normalized_status == CampaignStatus.SCHEDULED.value:
+            query["status"] = {
+                "$in": [
+                    CampaignStatus.SCHEDULED.value,
+                    CampaignStatus.RESCHEDULED.value,
+                ]
+            }
+        else:
+            query["status"] = normalized_status
     if profile_id:
         query["profileId"] = profile_id
 
@@ -642,6 +1008,59 @@ async def list_campaigns(
     )
     docs = [_add_campaign_progress(doc) async for doc in cursor]
     return build_paginated_response(docs, total, params)
+
+
+async def get_campaign_overview(employee_id: str) -> dict:
+    """Return all campaigns and aggregate progress for one employee."""
+    campaigns = get_collection(COLLECTION)
+    cursor = campaigns.find({"employeeId": employee_id}).sort("createdAt", -1)
+    campaign_records = [doc async for doc in cursor]
+    campaign_docs = [_add_campaign_progress(doc) for doc in campaign_records]
+
+    total_emails = sum(campaign.get("totalEmails", 0) for campaign in campaign_docs)
+    sent = sum(campaign.get("sent", 0) or 0 for campaign in campaign_docs)
+    pending = sum(campaign.get("pending", 0) or 0 for campaign in campaign_docs)
+    failed = sum(campaign.get("failed", 0) or 0 for campaign in campaign_docs)
+    skipped = sum(campaign.get("skipped", 0) or 0 for campaign in campaign_docs)
+    processed = sum(campaign.get("processedEmails", 0) for campaign in campaign_docs)
+
+    progress_percent = (
+        round((processed / total_emails) * 100, 1) if total_emails else 0
+    )
+    summary = (
+        f"Campaigns: {len(campaign_docs)} | Total emails: {total_emails} | "
+        f"Sent: {sent} | Pending: {pending} | Failed: {failed} | "
+        f"Skipped: {skipped} | Processed: {processed} | "
+        f"Progress: {progress_percent:g}%"
+    )
+    now = datetime.now(timezone.utc)
+    scheduled_window_end = now + timedelta(minutes=10)
+    alerts = []
+
+    for campaign, campaign_record in zip(campaign_docs, campaign_records):
+        name = campaign.get("campaignName", "Unnamed campaign")
+        status = campaign_record.get("status")
+
+        if status in {
+            CampaignStatus.RUNNING.value,
+            CampaignStatus.PROCESSING.value,
+        } and campaign["progressPercent"] >= 85:
+            alerts.append(f"{name} is about to end.")
+        elif status in {
+            CampaignStatus.SCHEDULED.value,
+            CampaignStatus.RESCHEDULED.value,
+        }:
+            scheduled_for = campaign_record.get("scheduledFor")
+            if isinstance(scheduled_for, datetime):
+                if scheduled_for.tzinfo is None:
+                    scheduled_for = scheduled_for.replace(tzinfo=timezone.utc)
+                if now < scheduled_for <= scheduled_window_end:
+                    alerts.append(f"{name} campaign will begin shortly.")
+
+    return {
+        "summary": summary,
+        "campaigns": "; ".join(alerts),
+    }
 
 
 async def get_campaign(
@@ -692,7 +1111,7 @@ async def update_daily_limit(
         type=NotificationType.INFO,
     )
     
-    return serialize_doc(result)
+    return _serialize_campaign(result)
 
 
 async def delete_campaign(

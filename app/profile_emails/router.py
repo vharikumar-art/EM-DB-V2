@@ -166,6 +166,24 @@ async def retry_failed(
     return ApiResponse(message="Failed emails reset to pending", data=result)
 
 
+@router.post(
+    "/{profile_id}/retry-sent-reminders",
+    response_model=ApiResponse,
+    dependencies=[Depends(require_write_access)],
+)
+async def retry_sent_reminders(
+    profile_id: str,
+    employeeId: str | None = Query(default=None),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Re-queue sent reminder emails for another reminder campaign."""
+    employee_id, is_admin = await resolve_write_employee_context(
+        current_user, employeeId
+    )
+    result = await service.retry_sent_reminders(profile_id, employee_id, is_admin)
+    return ApiResponse(message="Sent reminders reset to pending", data=result)
+
+
 @router.delete("/{profile_id}/clear", response_model=ApiResponse, dependencies=[Depends(require_write_access)])
 async def clear_profile_list(
     profile_id: str,

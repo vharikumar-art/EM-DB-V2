@@ -3,12 +3,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from bson import ObjectId
 
 from app.campaign_engine.sender import SMTPCredentials, _build_mime_message
 from app.campaign_engine import worker
 from app.email_master import service as email_master_service
 from app.profile_emails import service
 from app.campaigns.model import CampaignStatus
+from app.profile_emails.model import SendStatus
 
 
 class AsyncDocs:
@@ -353,7 +355,6 @@ async def test_reminder_campaign_uses_saved_subject_and_threading_headers(monkey
     monkeypatch.setattr(worker, "record_sent", AsyncMock())
     monkeypatch.setattr(worker, "mark_email_sent", AsyncMock())
     monkeypatch.setattr(worker, "_push_progress", AsyncMock())
-    monkeypatch.setattr(worker, "create_notification", AsyncMock())
 
     campaign_service = SimpleNamespace(
         start_campaign_worker=AsyncMock(return_value=True),
@@ -386,3 +387,245 @@ async def test_reminder_campaign_uses_saved_subject_and_threading_headers(monkey
     assert send_email.await_args.kwargs["references"] == "<original@example.test>"
     assert mark_sent.await_args.kwargs["mail_type"] == "reminder"
     assert mark_sent.await_args.kwargs["subject"] == "Exact subject from the draft"
+
+
+@pytest.mark.anyio
+async def test_draft_worker_persists_the_selected_template_subject(monkeypatch):
+    campaign_id = "507f1f77bcf86cd799439011"
+    profile_id = "507f1f77bcf86cd799439012"
+    campaign = {
+        "_id": ObjectId(campaign_id),
+        "profileId": profile_id,
+        "employeeId": "employee1",
+        "status": CampaignStatus.PROCESSING.value,
+        "mailType": "draft",
+        "dailyLimit": 10,
+        "recurrenceType": "once",
+        "profileSnapshot": {},
+    }
+    profile = {
+        "gmailAccount": "sender@example.test",
+        "signature": "",
+        "templates": [
+            {
+                "id": "template1",
+                "subject": "Hello [first_name]",
+                "body": "Draft body",
+            }
+        ],
+        "sendingOptions": {"delayMin": 0, "delayMax": 0},
+    }
+    lead = {
+        "id": "profile-email-1",
+        "email": "recipient@example.test",
+        "fullName": "Ada Lovelace",
+        "mailType": "draft",
+    }
+    campaigns_collection = SimpleNamespace(
+        find_one=AsyncMock(return_value=campaign)
+    )
+    profiles_collection = SimpleNamespace(
+        find_one=AsyncMock(return_value={"_id": campaign["_id"], **profile})
+    )
+    monkeypatch.setattr(
+        worker,
+        "get_collection",
+        lambda name: (
+            campaigns_collection if name == "campaigns" else profiles_collection
+        ),
+    )
+    monkeypatch.setattr(worker.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(
+        worker,
+        "get_credentials_for_send",
+        AsyncMock(
+            return_value={
+                "_id": "account1",
+                "email": "sender@example.test",
+                "password": "unused",
+                "displayName": "Sender",
+                "smtpHost": "smtp.example.test",
+                "smtpPort": 587,
+                "useTls": True,
+            }
+        ),
+    )
+    send_email = AsyncMock(
+        return_value=SimpleNamespace(
+            success=True,
+            thread_id="<draft@example.test>",
+            message_id="<draft@example.test>",
+            error="",
+        )
+    )
+    monkeypatch.setattr(worker, "send_email", send_email)
+    monkeypatch.setattr(worker, "record_send", AsyncMock())
+    monkeypatch.setattr(worker, "record_sent", AsyncMock())
+    monkeypatch.setattr(worker, "mark_email_sent", AsyncMock())
+    monkeypatch.setattr(worker, "_push_progress", AsyncMock())
+
+    campaign_service = SimpleNamespace(
+        start_campaign_worker=AsyncMock(return_value=True),
+        increment_counters=AsyncMock(),
+        finalize_campaign=AsyncMock(),
+        is_worker_active=AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(worker, "campaign_service", campaign_service)
+    monkeypatch.setattr(
+        worker.pe_service,
+        "get_pending_batch",
+        AsyncMock(side_effect=[[lead], []]),
+    )
+    monkeypatch.setattr(
+        worker.pe_service,
+        "get_sent_domain_counts_today",
+        AsyncMock(return_value={}),
+    )
+    monkeypatch.setattr(
+        worker.pe_service, "mark_sending", AsyncMock(return_value=True)
+    )
+    mark_sent = AsyncMock()
+    monkeypatch.setattr(worker.pe_service, "mark_sent", mark_sent)
+
+    await worker._run(campaign_id)
+
+    send_email.assert_awaited_once()
+    assert send_email.await_args.kwargs["subject"] == "Hello Ada"
+    mark_sent.assert_awaited_once()
+    assert mark_sent.await_args.kwargs["subject"] == "Hello Ada"
+    assert mark_sent.await_args.kwargs["mail_type"] == "draft"
+    assert mark_sent.await_args.kwargs["template_id"] == "template1"
+
+
+@pytest.mark.anyio
+async def test_draft_worker_identifies_legacy_template_without_an_id(monkeypatch):
+    campaign_id = "507f1f77bcf86cd799439021"
+    profile_id = "507f1f77bcf86cd799439022"
+    campaign = {
+        "_id": ObjectId(campaign_id),
+        "profileId": profile_id,
+        "employeeId": "employee1",
+        "status": CampaignStatus.PROCESSING.value,
+        "mailType": "draft",
+        "dailyLimit": 10,
+        "recurrenceType": "once",
+        "profileSnapshot": {},
+    }
+    profile = {
+        "gmailAccount": "sender@example.test",
+        "signature": "",
+        "templates": [
+            {"subject": "First subject", "body": "First body"},
+            {"subject": "Second subject", "body": "Second body"},
+        ],
+        "sendingOptions": {"delayMin": 0, "delayMax": 0},
+    }
+    lead = {
+        "id": "profile-email-1",
+        "email": "recipient@example.test",
+        "fullName": "Ada Lovelace",
+        "mailType": "draft",
+    }
+    monkeypatch.setattr(
+        worker,
+        "get_collection",
+        lambda name: SimpleNamespace(
+            find_one=AsyncMock(
+                return_value=campaign if name == "campaigns" else {"_id": ObjectId(profile_id), **profile}
+            )
+        ),
+    )
+    monkeypatch.setattr(worker.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(
+        worker,
+        "get_credentials_for_send",
+        AsyncMock(
+            return_value={
+                "_id": "account1",
+                "email": "sender@example.test",
+                "password": "unused",
+                "displayName": "Sender",
+                "smtpHost": "smtp.example.test",
+                "smtpPort": 587,
+                "useTls": True,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        worker,
+        "send_email",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                success=True,
+                thread_id="<draft@example.test>",
+                message_id="<draft@example.test>",
+                error="",
+            )
+        ),
+    )
+    monkeypatch.setattr(worker, "record_send", AsyncMock())
+    monkeypatch.setattr(worker, "record_sent", AsyncMock())
+    monkeypatch.setattr(worker, "mark_email_sent", AsyncMock())
+    monkeypatch.setattr(worker, "_push_progress", AsyncMock())
+    monkeypatch.setattr(
+        worker,
+        "campaign_service",
+        SimpleNamespace(
+            start_campaign_worker=AsyncMock(return_value=True),
+            increment_counters=AsyncMock(),
+            finalize_campaign=AsyncMock(),
+            is_worker_active=AsyncMock(return_value=True),
+        ),
+    )
+    monkeypatch.setattr(
+        worker.pe_service,
+        "get_pending_batch",
+        AsyncMock(side_effect=[[lead], []]),
+    )
+    monkeypatch.setattr(
+        worker.pe_service,
+        "get_sent_domain_counts_today",
+        AsyncMock(return_value={}),
+    )
+    monkeypatch.setattr(
+        worker.pe_service, "mark_sending", AsyncMock(return_value=True)
+    )
+    mark_sent = AsyncMock()
+    monkeypatch.setattr(worker.pe_service, "mark_sent", mark_sent)
+    monkeypatch.setattr(
+        worker.random,
+        "choices",
+        lambda _templates, weights, k: [profile["templates"][1]],
+    )
+
+    await worker._run(campaign_id)
+
+    assert mark_sent.await_args.kwargs["subject"] == "Second subject"
+    assert mark_sent.await_args.kwargs["template_id"] == "index:1"
+
+
+@pytest.mark.anyio
+async def test_mark_sent_persists_message_id_as_thread_fallback():
+    profile_email_id = ObjectId()
+    record = {}
+
+    class FakeProfileEmails:
+        async def update_one(self, query, update):
+            assert query["_id"] == profile_email_id
+            record.update(update["$set"])
+            return SimpleNamespace(modified_count=1)
+
+    with patch.object(service, "get_collection", return_value=FakeProfileEmails()):
+        await service.mark_sent(
+            str(profile_email_id),
+            thread_id=None,
+            message_id="<draft@example.test>",
+            mail_type="draft",
+            subject="Original subject",
+        )
+
+    assert record["sendStatus"] == SendStatus.SENT.value
+    assert record["threadId"] == "<draft@example.test>"
+    assert record["messageId"] == "<draft@example.test>"
+    assert record["draftMessageId"] == "<draft@example.test>"
+    assert record["draftSubject"] == "Original subject"

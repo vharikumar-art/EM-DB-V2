@@ -14,6 +14,10 @@ class ProfileFilters(BaseModel):
     type: list[str] = Field(default_factory=list)  # maps to designation / industry
     mailSource: list[str] = Field(default_factory=list)  # Google Scholar, University, Other
     allowUsed: bool = Field(default=False, description="If True, allow reusing emails that have been used before (usageCount > 0) but are currently unlocked")
+    oldestFirst: bool = Field(
+        default=False,
+        description="If True, generate the email list from the oldest uploaded emails to the newest",
+    )
     # ── Date filter ────────────────────────────────────────────────────────────
     date_filter: bool = Field(default=False, description="Enable upload-date filtering when generating the email list")
     date_range: str | None = Field(default=None, description="last_30_days | last_3_months | custom")
@@ -109,6 +113,7 @@ class ProfileOut(BaseModel):
     promptSettings: PromptSettings
     createdAt: str | None = None
     updatedAt: str | None = None
+    profileAge: str | None = None
 
 
 class TemplateAdd(BaseModel):

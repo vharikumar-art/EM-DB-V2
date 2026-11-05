@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+from calendar import monthrange
+from datetime import date, datetime, timezone
 import logging
 import random
 
@@ -24,8 +25,54 @@ COLLECTION = "profiles"
 logger = logging.getLogger(__name__)
 
 
+def _add_months(value: date, months: int) -> date:
+    month_index = value.month - 1 + months
+    year = value.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(value.day, monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def _format_profile_age(created_at: datetime | None, today: date | None = None) -> str | None:
+    if not isinstance(created_at, datetime):
+        return None
+
+    created_date = (
+        created_at.astimezone(timezone.utc).date()
+        if created_at.tzinfo is not None
+        else created_at.date()
+    )
+    current_date = today or datetime.now(timezone.utc).date()
+    if created_date > current_date:
+        return "0 days"
+
+    total_months = (current_date.year - created_date.year) * 12
+    total_months += current_date.month - created_date.month
+    if _add_months(created_date, total_months) > current_date:
+        total_months -= 1
+
+    years, months = divmod(total_months, 12)
+    remaining_days = (current_date - _add_months(created_date, total_months)).days
+    parts = []
+    for value, unit in (
+        (years, "year"),
+        (months, "month"),
+        (remaining_days, "day"),
+    ):
+        if value:
+            parts.append(f"{value} {unit}{'' if value == 1 else 's'}")
+    return ", ".join(parts) or "0 days"
+
+
 def _default_filters() -> dict:
-    return {"country": [], "domain": [], "domainGroup": [], "university": [], "type": []}
+    return {
+        "country": [],
+        "domain": [],
+        "domainGroup": [],
+        "university": [],
+        "type": [],
+        "oldestFirst": False,
+    }
 
 
 async def _resolve_admin_name(admin_employee_id: str) -> str:
@@ -170,7 +217,11 @@ async def list_profiles(employee_id: str | list[str] | None) -> list[dict]:
     else:
         query = {"employeeId": employee_id}
     cursor = profiles.find(query).sort("createdAt", -1)
-    return serialize_list([d async for d in cursor])
+    documents = [document async for document in cursor]
+    results = serialize_list(documents)
+    for document, profile in zip(documents, results):
+        profile["profileAge"] = _format_profile_age(document.get("createdAt"))
+    return results
 
 
 async def get_profile(profile_id: str, employee_id: str, is_admin: bool) -> dict:

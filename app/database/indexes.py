@@ -114,7 +114,7 @@ async def create_indexes() -> None:
     await db["campaigns"].create_index(
         [("status", 1), ("scheduledFor", 1)]
     )
-    # Find campaigns due for execution: status='scheduled' AND scheduledFor <= now
+    # Find scheduled/rescheduled campaigns due for execution.
     await db["campaigns"].create_index("scheduledFor")
     # Compound index for efficient query: find scheduled campaigns due for execution
     await db["campaigns"].create_index(

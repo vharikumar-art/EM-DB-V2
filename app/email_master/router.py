@@ -45,7 +45,7 @@ async def upload_emails(
         raise BadRequestException("Only .csv, .xlsx, and .xls files are supported")
 
     file_bytes = await file.read()
-    
+
     # Get employee name from database
     from app.employees.service import get_employee_by_user_id
     try:
@@ -54,7 +54,7 @@ async def upload_emails(
     except:
         # Fallback to user_id if employee not found
         uploaded_by_name = current_user.user_id
-    
+
     result = await service.upload_file(
         uploaded_by_id=current_user.user_id,
         uploaded_by_name=uploaded_by_name,
@@ -440,7 +440,7 @@ async def list_emails(
         start_date=parsed_start,
         end_date=parsed_end,
     )
-    
+
     return ApiResponse(
         message="Emails fetched",
         data=result,

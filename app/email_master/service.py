@@ -15,6 +15,13 @@ from app.schemas.common import PaginationParams
 from app.utils.csv_utils import parse_file_bytes, validate_and_clean_rows
 from app.utils.pagination import build_paginated_response
 from app.utils.response import serialize_doc, serialize_list, to_object_id
+import json
+import logging
+import app.database.redis_client as redis_connection
+from redis.exceptions import RedisError
+
+
+
 
 COLLECTION = "email_master"
 FILTER_DROPDOWN_COLLECTION = "filter_dropdowns"
@@ -23,16 +30,35 @@ FILTER_DROPDOWN_ID = "global"
 # ── In-memory cache for dropdown options ─────────────────────────────────────
 # These values rarely change (only when a new CSV is uploaded), so we cache
 # the result for 30 minutes to avoid full-collection scans on every page load.
-_DROPDOWN_CACHE: dict | None = None
-_DROPDOWN_CACHE_AT: datetime | None = None
-_DROPDOWN_CACHE_TTL_SECONDS = 30 * 60  # 30 minutes
+# _DROPDOWN_CACHE: dict | None = None
+# _DROPDOWN_CACHE_AT: datetime | None = None
+# _DROPDOWN_CACHE_TTL_SECONDS = 30 * 60  # 30 minutes
 
 
-def invalidate_dropdown_cache() -> None:
-    """Call this after a new upload so the cache refreshes on next request."""
-    global _DROPDOWN_CACHE, _DROPDOWN_CACHE_AT
-    _DROPDOWN_CACHE = None
-    _DROPDOWN_CACHE_AT = None
+# def invalidate_dropdown_cache() -> None:
+#     """Call this after a new upload so the cache refreshes on next request."""
+#     global _DROPDOWN_CACHE, _DROPDOWN_CACHE_AT
+#     _DROPDOWN_CACHE = None
+#     _DROPDOWN_CACHE_AT = None
+
+
+
+# Redis dropdown cache
+_DROPDOWN_CACHE_KEY = "email_master:dropdown_options"
+_DROPDOWN_CACHE_TTL_SECONDS = 30 * 60
+
+
+async def invalidate_dropdown_cache() -> None:
+    """Delete shared dropdown cache after data changes."""
+    client = redis_connection.redis_client
+
+    if client is None:
+        return
+
+    try:
+        await client.delete(_DROPDOWN_CACHE_KEY)
+    except RedisError:
+        logging.exception("Failed to invalidate Redis dropdown cache")
 
 
 def _filter_values(value: Any) -> list[str]:
@@ -230,7 +256,7 @@ async def list_emails(
     and_clauses: list[dict] = []
 
     # Helper: normalise a raw filter value (str, list[str], or None)
-    # into a clean de-duplicated list, splitting on commas.
+    # into a clean de-duplicated list, splitting on commas.++++++++++++++
     def _vals(v) -> list[str]:
         return _filter_values(v)
 
@@ -925,7 +951,7 @@ async def update_email(email_id: str, update_data: dict) -> dict:
         raise NotFoundException("Email record not found")
 
     # Invalidate dropdown cache so updated country/domain etc. appear immediately
-    invalidate_dropdown_cache()
+    await invalidate_dropdown_cache()
 
     # Replicate updated fields to all associated profile_emails working copies
     profile_emails_col = get_collection("profile_emails")
@@ -1051,7 +1077,7 @@ async def _update_dropdown_filters(docs_to_insert: list[dict], uploaded_by_id: s
             },
             upsert=True
         )
-        invalidate_dropdown_cache()
+        await invalidate_dropdown_cache()
 
 
 async def rebuild_dropdown_filters() -> dict:
@@ -1116,7 +1142,7 @@ async def rebuild_dropdown_filters() -> dict:
 
     # Full replace — removes any values no longer in email_master
     await filter_col.replace_one({"_id": FILTER_DROPDOWN_ID}, new_doc, upsert=True)
-    invalidate_dropdown_cache()
+    await invalidate_dropdown_cache()
 
     return {
         "countries":    len(countries),
@@ -1129,32 +1155,92 @@ async def rebuild_dropdown_filters() -> dict:
     }
 
 
-async def get_dropdown_options() -> dict:
-    """Returns dropdown options from the pre-computed filter_dropdowns collection."""
-    global _DROPDOWN_CACHE, _DROPDOWN_CACHE_AT
-    now = datetime.now(timezone.utc)
+# async def get_dropdown_options() -> dict:
+    # """Returns dropdown options from the pre-computed filter_dropdowns collection."""
+    # global _DROPDOWN_CACHE, _DROPDOWN_CACHE_AT
+    # now = datetime.now(timezone.utc)
     
-    if _DROPDOWN_CACHE is not None and _DROPDOWN_CACHE_AT is not None:
-        age = (now - _DROPDOWN_CACHE_AT).total_seconds()
-        if age < _DROPDOWN_CACHE_TTL_SECONDS:
-            return _DROPDOWN_CACHE
+    # if _DROPDOWN_CACHE is not None and _DROPDOWN_CACHE_AT is not None:
+    #     age = (now - _DROPDOWN_CACHE_AT).total_seconds()
+    #     if age < _DROPDOWN_CACHE_TTL_SECONDS:
+    #         return _DROPDOWN_CACHE
             
-    filter_col = get_collection(FILTER_DROPDOWN_COLLECTION)
-    doc = await filter_col.find_one({"_id": FILTER_DROPDOWN_ID})
+    # filter_col = get_collection(FILTER_DROPDOWN_COLLECTION)
+    # doc = await filter_col.find_one({"_id": FILTER_DROPDOWN_ID})
     
+    # if not doc:
+    #     result = {
+    #         "domains": [], "countries": [], "states": [], "universities": [],
+    #         "designations": [], "mailSources": [], "uploaders": [], "usedByEmployees": []
+    #     }
+    # else:
+    #     result = {
+    #         key: doc.get(key, [])
+    #         for key in ("domains", "countries", "states", "universities", "designations", "mailSources", "uploaders", "usedByEmployees")
+    #     }
+
+    # _DROPDOWN_CACHE = result
+    # _DROPDOWN_CACHE_AT = now
+    # return result
+
+async def get_dropdown_options() -> dict:
+    """Return dropdown options using Redis cache with MongoDB fallback."""
+
+    client = redis_connection.redis_client
+
+    # 1. Check Redis cache
+    if client is not None:
+        try:
+            cached_data = await client.get(_DROPDOWN_CACHE_KEY)
+
+            if cached_data:
+                return json.loads(cached_data)
+
+        except (RedisError, json.JSONDecodeError):
+            logging.exception("Redis dropdown cache read failed")
+
+    # 2. Cache miss: fetch from MongoDB
+    filter_col = get_collection(FILTER_DROPDOWN_COLLECTION)
+
+    doc = await filter_col.find_one({"_id": FILTER_DROPDOWN_ID})
+
     if not doc:
         result = {
-            "domains": [], "countries": [], "states": [], "universities": [],
-            "designations": [], "mailSources": [], "uploaders": [], "usedByEmployees": []
+            "domains": [],
+            "countries": [],
+            "states": [],
+            "universities": [],
+            "designations": [],
+            "mailSources": [],
+            "uploaders": [],
+            "usedByEmployees": [],
         }
     else:
         result = {
             key: doc.get(key, [])
-            for key in ("domains", "countries", "states", "universities", "designations", "mailSources", "uploaders", "usedByEmployees")
+            for key in (
+                "domains",
+                "countries",
+                "states",
+                "universities",
+                "designations",
+                "mailSources",
+                "uploaders",
+                "usedByEmployees",
+            )
         }
 
-    _DROPDOWN_CACHE = result
-    _DROPDOWN_CACHE_AT = now
+    # 3. Store in Redis for 30 minutes
+    if client is not None:
+        try:
+            await client.setex(
+                _DROPDOWN_CACHE_KEY,
+                _DROPDOWN_CACHE_TTL_SECONDS,
+                json.dumps(result, default=str),
+            )
+        except RedisError:
+            logging.exception("Redis dropdown cache write failed")
+
     return result
 
 
@@ -1410,14 +1496,35 @@ async def query_for_profile(
     # A positive filter limit caps the result; zero or missing means no limit.
     fetch_limit = filter_limit if filter_limit > 0 else None
 
+    oldest_first = filters.get("oldestFirst", False)
     if fetch_limit is None:
         cursor = master.find(query)
+        if oldest_first:
+            cursor = cursor.sort([("uploadedDate", 1), ("_id", 1)])
         all_results = serialize_list([d async for d in cursor])
         return _apply_profile_email_domain_limits(all_results, 0)
 
     matching_count = await master.count_documents(query)
     if matching_count == 0:
         return []
+
+    if oldest_first:
+        domain_limit = ((fetch_limit - 1) // 100 + 1) * 5
+        domain_counts: dict[str, int] = {}
+        available_results: list[dict] = []
+        cursor = master.find(query).sort([("uploadedDate", 1), ("_id", 1)])
+        async for doc in cursor:
+            record = serialize_doc(doc)
+            email = str(record.get("email") or "").strip()
+            email_domain = email.rpartition("@")[2].casefold()
+            if email_domain and email_domain != "gmail.com":
+                if domain_counts.get(email_domain, 0) >= domain_limit:
+                    continue
+                domain_counts[email_domain] = domain_counts.get(email_domain, 0) + 1
+            available_results.append(record)
+            if len(available_results) >= fetch_limit:
+                break
+        return available_results
 
     sample_size = min(matching_count, max(fetch_limit * 2, fetch_limit + 100))
     while True:

@@ -19,8 +19,7 @@ Flow per campaign:
   5. When no more PENDING rows → finalize campaign (COMPLETED)
 
 Error handling:
-  - Per-email SMTP errors → mark FAILED, continue loop
-  - Auth failure → abort entire campaign
+  - SMTP errors → mark the recipient FAILED and fail the campaign
   - Unhandled exception → abort campaign with error message
 """
 
@@ -38,8 +37,6 @@ from app.email_accounts.service import get_credentials_for_send, record_send
 from app.email_master.service import mark_email_sent
 from app.send_stats.model import record_sent
 from app.utils.personalizer import build_email_payload
-from app.notifications.schema import NotificationType
-from app.notifications.service import create_notification
 from app.notifications.websocket import manager
 from app.profile_emails import service as pe_service
 from app.utils.response import serialize_doc, to_object_id
@@ -49,10 +46,6 @@ logger = logging.getLogger("campaign_engine.worker")
 # How many profile_emails to load per iteration (keeps memory bounded)
 BATCH_SIZE = 50
 DOMAIN_DAILY_SEND_LIMIT = 5
-
-# How many consecutive auth failures before aborting
-MAX_AUTH_FAILURES = 3
-
 
 def select_template_weighted(templates: list[dict]) -> dict:
     """
@@ -279,7 +272,6 @@ async def _run(campaign_id: str) -> None:
     # ------------------------------------------------------------------
     # 4. Send loop
     # ------------------------------------------------------------------
-    auth_failure_count = 0
     total_sent = max(int(campaign.get("executionSent") or 0), 0)
     total_failed = 0
     daily_limit: int = campaign.get("dailyLimit", 100)  # Get from campaign
@@ -306,10 +298,7 @@ async def _run(campaign_id: str) -> None:
                         daily_limit,
                     )
                     return
-                await campaign_service.abort_campaign(
-                    campaign_id,
-                    f"Campaign daily send limit reached ({daily_limit}); remaining recipients were not sent.",
-                )
+                await campaign_service.pause_campaign_worker(campaign_id)
                 return
             logger.info("Campaign %s reached its limit with no recipients remaining.", campaign_id)
             break
@@ -365,10 +354,7 @@ async def _run(campaign_id: str) -> None:
                         daily_limit,
                     )
                     return
-                await campaign_service.abort_campaign(
-                    campaign_id,
-                    f"Campaign daily send limit reached ({daily_limit}); remaining recipients were not sent.",
-                )
+                await campaign_service.pause_campaign_worker(campaign_id)
                 return
             if not await campaign_service.is_worker_active(campaign_id):
                 logger.info("Campaign %s is paused, deleted, or terminal; exiting worker", campaign_id)
@@ -406,6 +392,17 @@ async def _run(campaign_id: str) -> None:
             # ----------------------------------------------------------
             selected_template = select_template_weighted(templates)
             logger.debug(f"Selected template '{selected_template.get('name', 'unnamed')}' for campaign {campaign_id}")
+            selected_template_index = next(
+                (
+                    index
+                    for index, template in enumerate(templates)
+                    if template is selected_template
+                ),
+                None,
+            )
+            selected_template_id = selected_template.get("id")
+            if selected_template_id is None and selected_template_index is not None:
+                selected_template_id = f"index:{selected_template_index}"
             
             # Extract subject and body from template (required fields)
             subject_text = selected_template.get("subject", "").strip()
@@ -473,13 +470,16 @@ async def _run(campaign_id: str) -> None:
             )
 
             if result.success:
+                sent_subject = payload.get("subject")
+                if not isinstance(sent_subject, str):
+                    sent_subject = subject_text
                 await pe_service.mark_sent(
                     pe_id,
                     result.thread_id,
                     result.message_id,
-                    template_id=selected_template.get("id"),
+                    template_id=selected_template_id,
                     mail_type=mail_type,
-                    subject=payload["subject"],
+                    subject=sent_subject,
                 )
                 if pe.get("masterEmailId"):
                     await mark_email_sent(pe["masterEmailId"])
@@ -488,7 +488,6 @@ async def _run(campaign_id: str) -> None:
                 # ── Record in immutable daily stats (survives campaign deletion) ──
                 await record_sent(employee_id, count=1)
                 total_sent += 1
-                auth_failure_count = 0  # reset on success
                 if recipient_domain and recipient_domain != "gmail.com":
                     sent_domain_counts[recipient_domain] = (
                         sent_domain_counts.get(recipient_domain, 0) + 1
@@ -511,31 +510,13 @@ async def _run(campaign_id: str) -> None:
 
             else:
                 error_msg = result.error or "Unknown send error"
-
-                # Check for SMTP daily limit errors
-                is_daily_limit = any(keyword in error_msg.lower() for keyword in [
-                    "daily user sending quota exceeded",
-                    "rate limit",
-                    "too many messages",
-                    "limit exceeded",
-                    "quota exceeded",
-                    "450 4.2.1"
-                ])
-
-                if is_daily_limit:
-                    logger.warning(
-                        "Campaign %s reached SMTP daily limit on %s: %s",
-                        campaign_id, gmail_account, error_msg
-                    )
-                    # Revert to pending so it can be retried in next cycle
-                    await pe_service.mark_pending(pe_id)
-                    
-                    await campaign_service.abort_campaign(
-                        campaign_id,
-                        f"SMTP daily sending limit reached for {gmail_account}: {error_msg}",
-                    )
-                    return
-
+                logger.error(
+                    "Campaign %s failed to send to %s through %s: %s",
+                    campaign_id,
+                    lead_email,
+                    gmail_account,
+                    error_msg,
+                )
                 await pe_service.mark_failed(pe_id, error_msg)
                 await campaign_service.increment_counters(campaign_id, failed=1)
                 total_failed += 1
@@ -549,34 +530,11 @@ async def _run(campaign_id: str) -> None:
                     total_failed=total_failed,
                 )
 
-                # Auth failure → abort entire campaign immediately
-                if "Authentication" in error_msg or "auth" in error_msg.lower():
-                    auth_failure_count += 1
-                    if auth_failure_count >= MAX_AUTH_FAILURES:
-                        logger.error(
-                            "Campaign %s aborted — repeated auth failures for %s",
-                            campaign_id, gmail_account,
-                        )
-                        await campaign_service.abort_campaign(
-                            campaign_id,
-                            f"Authentication failed for {gmail_account}. "
-                            "Check your Gmail App Password in Email Accounts settings.",
-                        )
-                        return
-
-                # Push failure notification (throttled — only every 10 failures)
-                if total_failed % 10 == 1:
-                    campaign_name = campaign.get("campaignName") or "Unnamed campaign"
-                    profile_name = profile.get("profileName") or "Unnamed profile"
-                    await create_notification(
-                        employee_id=employee_id,
-                        message=(
-                            f"Campaign: {campaign_name}. Profile: {profile_name}. "
-                            f"{total_failed} email(s) failed so far. "
-                            f"Last error: {error_msg[:100]}"
-                        ),
-                        type=NotificationType.WARNING,
-                    )
+                await campaign_service.abort_campaign(
+                    campaign_id,
+                    f"SMTP send failed for {gmail_account}: {error_msg}",
+                )
+                return
 
             # ----------------------------------------------------------
             # Random delay between sends

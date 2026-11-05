@@ -2,6 +2,8 @@ from datetime import datetime, timezone
 import re
 from typing import Any
 
+from bson import ObjectId
+
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
 from app.database.mongodb import get_collection
 from app.email_master.service import (
@@ -16,6 +18,7 @@ from app.notifications.service import create_notification
 from app.profile_emails.model import ProfileEmailType, SendStatus, build_profile_email_document
 from app.profiles.service import get_profile
 from app.schemas.common import PaginationParams
+from app.utils.personalizer import personalize
 from app.utils.pagination import build_paginated_response
 from app.utils.response import serialize_doc, serialize_list, to_object_id
 
@@ -296,11 +299,120 @@ async def convert_sent_drafts_to_reminders(
     employee_id: str,
     is_admin: bool,
 ) -> dict:
+    return await _convert_sent_drafts_to_reminders(
+        profile_id, employee_id, is_admin, campaign_id=None
+    )
+
+
+async def convert_campaign_sent_drafts_to_reminders(
+    profile_id: str,
+    employee_id: str,
+    is_admin: bool,
+    campaign_id: str,
+) -> dict:
+    """Queue sent drafts from one campaign for its automatic reminder."""
+    return await _convert_sent_drafts_to_reminders(
+        profile_id, employee_id, is_admin, campaign_id=campaign_id
+    )
+
+
+async def _convert_sent_drafts_to_reminders(
+    profile_id: str,
+    employee_id: str,
+    is_admin: bool,
+    campaign_id: str | None,
+) -> dict:
     """Queue sent drafts with saved subject and Message-ID for reminder campaigns."""
     await get_profile(profile_id, employee_id, is_admin)
     col = get_collection(COLLECTION)
-    cursor = col.find(
-        {
+    campaigns = get_collection("campaigns")
+    campaign_snapshots: dict[str, dict] = {}
+
+    async def get_campaign_snapshot(doc: dict) -> dict:
+        source_campaign_id = campaign_id or doc.get("campaignId")
+        if not source_campaign_id:
+            return {}
+        source_campaign_id = str(source_campaign_id)
+        if source_campaign_id not in campaign_snapshots:
+            if not ObjectId.is_valid(source_campaign_id):
+                campaign_snapshots[source_campaign_id] = {}
+            else:
+                campaign = await campaigns.find_one(
+                    {"_id": ObjectId(source_campaign_id)},
+                    {"profileSnapshot": 1},
+                )
+                campaign_snapshots[source_campaign_id] = (
+                    (campaign or {}).get("profileSnapshot") or {}
+                )
+        return campaign_snapshots[source_campaign_id]
+
+    def resolve_original_subject(doc: dict, snapshot: dict) -> str | None:
+        subject = doc.get("draftSubject")
+        if isinstance(subject, str) and subject.strip():
+            return subject
+
+        templates = snapshot.get("templates") or []
+        template_id = doc.get("templateId")
+        matching_templates = [
+            template
+            for template in templates
+            if template_id
+            and template_id != "default"
+            and str(template.get("id")) == str(template_id)
+        ]
+        if not matching_templates and isinstance(template_id, str) and template_id.startswith("index:"):
+            try:
+                template_index = int(template_id.removeprefix("index:"))
+            except ValueError:
+                template_index = -1
+            if 0 <= template_index < len(templates):
+                matching_templates = [templates[template_index]]
+        if not matching_templates and len(templates) == 1:
+            matching_templates = templates
+        if not matching_templates and not templates:
+            snapshot_subject = snapshot.get("subject")
+            if isinstance(snapshot_subject, str) and snapshot_subject.strip():
+                matching_templates = [{"subject": snapshot_subject}]
+
+        if len(matching_templates) != 1:
+            return None
+
+        template_subject = matching_templates[0].get("subject")
+        if not isinstance(template_subject, str) or not template_subject.strip():
+            return None
+        resolved_subject, _ = personalize(template_subject, "", "", doc)
+        return resolved_subject if resolved_subject.strip() else None
+
+    sent_draft_query = {
+        "profileId": profile_id,
+        "sendStatus": SendStatus.SENT.value,
+        "$or": [
+            {"mailType": ProfileEmailType.DRAFT.value},
+            {"mailType": {"$exists": False}},
+        ],
+    }
+    if campaign_id:
+        sent_draft_query["campaignId"] = campaign_id
+
+    cursor = col.find(sent_draft_query)
+    converted_count = 0
+    skipped_missing_thread_data = 0
+    now = datetime.now(timezone.utc)
+
+    async for doc in cursor:
+        snapshot = await get_campaign_snapshot(doc)
+        original_subject = resolve_original_subject(doc, snapshot)
+        original_message_id = (
+            doc.get("draftMessageId")
+            or doc.get("messageId")
+            or doc.get("threadId")
+        )
+        if not original_subject or not original_message_id:
+            skipped_missing_thread_data += 1
+            continue
+
+        conversion_query = {
+            "_id": doc["_id"],
             "profileId": profile_id,
             "sendStatus": SendStatus.SENT.value,
             "$or": [
@@ -308,27 +420,11 @@ async def convert_sent_drafts_to_reminders(
                 {"mailType": {"$exists": False}},
             ],
         }
-    )
-    converted_count = 0
-    skipped_missing_thread_data = 0
-    now = datetime.now(timezone.utc)
-
-    async for doc in cursor:
-        original_subject = doc.get("draftSubject")
-        original_message_id = doc.get("draftMessageId") or doc.get("messageId")
-        if not original_subject or not original_message_id:
-            skipped_missing_thread_data += 1
-            continue
+        if campaign_id:
+            conversion_query["campaignId"] = campaign_id
 
         result = await col.update_one(
-            {
-                "_id": doc["_id"],
-                "sendStatus": SendStatus.SENT.value,
-                "$or": [
-                    {"mailType": ProfileEmailType.DRAFT.value},
-                    {"mailType": {"$exists": False}},
-                ],
-            },
+            conversion_query,
             {
                 "$set": {
                     "mailType": ProfileEmailType.REMINDER.value,
@@ -435,6 +531,56 @@ async def retry_failed(profile_id: str, employee_id: str, is_admin: bool) -> dic
         },
     )
     return {"resetCount": result.modified_count}
+
+
+async def retry_sent_reminders(
+    profile_id: str,
+    employee_id: str,
+    is_admin: bool,
+) -> dict:
+    """Re-queue sent reminder rows for another reminder campaign."""
+    await get_profile(profile_id, employee_id, is_admin)
+
+    campaigns = get_collection("campaigns")
+    active_campaign = await campaigns.find_one(
+        {
+            "profileId": profile_id,
+            "mailType": ProfileEmailType.REMINDER.value,
+            "status": {
+                "$in": [
+                    "pending",
+                    "running",
+                    "paused",
+                    "scheduled",
+                    "rescheduled",
+                    "processing",
+                ]
+            },
+        },
+        {"_id": 1},
+    )
+    if active_campaign:
+        raise BadRequestException(
+            "Cannot re-queue sent reminders while this profile has an active "
+            "reminder campaign."
+        )
+
+    now = datetime.now(timezone.utc)
+    result = await get_collection(COLLECTION).update_many(
+        {
+            "profileId": profile_id,
+            "mailType": ProfileEmailType.REMINDER.value,
+            "sendStatus": SendStatus.SENT.value,
+        },
+        {
+            "$set": {
+                "sendStatus": SendStatus.PENDING.value,
+                "errorMessage": None,
+                "updatedAt": now,
+            }
+        },
+    )
+    return {"profileId": profile_id, "resetCount": result.modified_count}
 
 
 async def clear_profile_list(profile_id: str, employee_id: str, is_admin: bool) -> dict:
@@ -592,10 +738,11 @@ async def mark_sent(
 ) -> None:
     col = get_collection(COLLECTION)
     now = datetime.now(timezone.utc)
+    persisted_message_id = message_id or thread_id
     update_fields = {
         "sendStatus": SendStatus.SENT.value,
-        "threadId": thread_id,
-        "messageId": message_id,
+        "threadId": thread_id or persisted_message_id,
+        "messageId": persisted_message_id,
         "sentDate": now,
         "errorMessage": None,
         "templateId": template_id or "default",
@@ -605,7 +752,7 @@ async def mark_sent(
         update_fields.update(
             {
                 "draftSubject": subject,
-                "draftMessageId": message_id,
+                "draftMessageId": persisted_message_id,
                 "draftSentDate": now,
             }
         )
@@ -613,7 +760,7 @@ async def mark_sent(
         update_fields.update(
             {
                 "reminderSubject": subject,
-                "reminderMessageId": message_id,
+                "reminderMessageId": persisted_message_id,
                 "reminderSentDate": now,
             }
         )
@@ -639,7 +786,7 @@ async def mark_failed(profile_email_id: str, error: str) -> None:
 
 
 async def mark_pending(profile_email_id: str) -> None:
-    """Revert a SENDING/FAILED row back to PENDING (e.g. on SMTP limits)."""
+    """Revert a claimed email to PENDING when sending stops before dispatch."""
     col = get_collection(COLLECTION)
     now = datetime.now(timezone.utc)
     await col.update_one(

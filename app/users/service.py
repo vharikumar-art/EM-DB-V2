@@ -136,6 +136,11 @@ async def list_users(current_user: CurrentUser) -> list[dict]:
             if current_user.access_level == "partial":
                 # Partial admin: find employees assigned to this admin
                 assigned_emps = [e async for e in employees_col.find({"assignedToAdmin": admin_emp_id})]
+                allowed_user_ids = [
+                    str(employee["userId"])
+                    for employee in assigned_emps
+                    if employee.get("userId")
+                ]
             else:
                 # Full admin: find all employees and users in the same branch.
                 # Branch may be on the employee doc or only on the user doc — check both.
@@ -531,6 +536,7 @@ def _get_pending_campaign_statuses() -> list[str]:
     return [
         CampaignStatus.PENDING.value,
         CampaignStatus.SCHEDULED.value,
+        CampaignStatus.RESCHEDULED.value,
         CampaignStatus.WAITING_FOR_MAILS.value,
         CampaignStatus.FAILED.value,
         CampaignStatus.PAUSED.value,

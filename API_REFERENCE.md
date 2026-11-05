@@ -422,6 +422,10 @@ curl -X POST http://localhost:8000/profiles \
 
 ### GET /profiles — List Profiles
 
+Each profile includes `profileAge`, a human-readable age calculated from `createdAt`
+(for example, `1 day`, `2 months, 20 days`, or `1 year, 3 months`). It is `null`
+for profiles without a valid creation date.
+
 **cURL:**
 ```bash
 # Employee sees own profiles
@@ -534,6 +538,8 @@ curl -X POST "http://localhost:8000/profiles/64f1a2b3c4d5e6f7a8b9c0d1/attachment
 ### POST /profile-emails/{profile_id}/generate — Generate Working List
 
 Filters leads from Email Master into the working list.
+The profile filter `oldestFirst` defaults to `false`; set it to `true` to select
+matching emails in upload-date order, oldest first, before applying `filterLimit`.
 
 **cURL:**
 ```bash
@@ -619,8 +625,11 @@ curl http://localhost:8000/profile-emails/64f1a2b3c4d5e6f7a8b9c0d1/stats \
 ### POST /profile-emails/{profile_id}/convert-to-reminders — Queue Sent Drafts
 
 Moves successfully sent drafts into the reminder queue. This endpoint does not
-send email. Only rows with a saved original subject and Message-ID can be
-converted; the response reports rows skipped because those fields are missing.
+send email. The converter uses saved draft subject/message fields first; if a
+subject is missing, it can recover it from the source campaign snapshot when
+the selected template is identified unambiguously. It uses the original
+Message-ID, falling back to the stored thread ID. Rows without a recoverable
+subject or message ID are skipped.
 
 **cURL:**
 ```bash
@@ -647,6 +656,33 @@ curl -X POST http://localhost:8000/profile-emails/64f1a2b3c4d5e6f7a8b9c0d1/conve
 ```bash
 curl -X POST http://localhost:8000/profile-emails/64f1a2b3c4d5e6f7a8b9c0d1/retry-failed \
   -H "Authorization: Bearer <token>"
+```
+
+---
+
+### POST /profile-emails/{profile_id}/retry-sent-reminders — Queue Another Reminder Round
+
+Resets sent reminder rows in the profile to `pending`, allowing them to be sent
+again by a new reminder campaign. Only rows with `mailType: "reminder"` and
+`sendStatus: "sent"` are changed; draft rows and failed or pending reminders
+are left untouched. The request is rejected while the profile has an active
+reminder campaign.
+
+This endpoint does not send emails. Start or schedule a reminder campaign
+after it returns to send the re-queued recipients.
+
+**cURL:**
+```bash
+curl -X POST http://localhost:8000/profile-emails/64f1a2b3c4d5e6f7a8b9c0d1/retry-sent-reminders \
+  -H "Authorization: ******"
+```
+
+**Response data:**
+```json
+{
+  "profileId": "64f1a2b3c4d5e6f7a8b9c0d1",
+  "resetCount": 12
+}
 ```
 
 ---
@@ -689,7 +725,9 @@ curl -X POST http://localhost:8000/campaigns/start \
     "profileId": "64f1a2b3c4d5e6f7a8b9c0d1",
     "campaignName": "Q3 India Outreach",
     "mailType": "draft",
-    "dailyLimit": 100
+    "dailyLimit": 100,
+    "autoReminderEnabled": true,
+    "reminderDelayDays": 6
   }'
 ```
 
@@ -700,6 +738,8 @@ curl -X POST http://localhost:8000/campaigns/start \
 | `mailType` | string | ❌ | `draft` (default) or `reminder` |
 | `campaignName` | string | ❌ | Auto-generated if empty |
 | `dailyLimit` | int | ❌ | Overrides profile default |
+| `autoReminderEnabled` | boolean | ❌ | Automatically create a reminder after a draft completes (default `true`; ignored for reminder campaigns) |
+| `reminderDelayDays` | int | ❌ | Delay after draft completion, from 1 to 15 days (default `6`; empty or null uses `6`) |
 
 Only one active campaign of each type is allowed per profile. A draft and a
 reminder campaign can run concurrently. Reminder campaigns use the original
@@ -707,6 +747,9 @@ draft's exact subject and SMTP reply headers to keep the message in the thread.
 Their body is selected randomly, using template weights, from the profile's
 `reminderTemplates` list. Configure body-only reminder templates through
 `PATCH /profiles/{profile_id}`; at least one non-empty template is required.
+When enabled, the reminder is scheduled after the draft campaign completes.
+If disabled or automatic setup cannot complete, a reminder can still be
+created and run manually.
 
 ---
 
@@ -725,7 +768,9 @@ curl -X POST http://localhost:8000/campaigns/schedule \
     "scheduledTimeLocal": "10:00",
     "scheduledDateLocal": "2026-08-01",
     "timezoneOffsetMinutes": -330,
-    "dailyLimit": 100
+    "dailyLimit": 100,
+    "autoReminderEnabled": true,
+    "reminderDelayDays": 6
   }'
 ```
 
@@ -763,12 +808,15 @@ curl -X POST http://localhost:8000/campaigns/schedule \
 ```
 
 > `recurrenceDays`: 0=Monday, 1=Tuesday, 2=Wednesday, 3=Thursday, 4=Friday, 5=Saturday, 6=Sunday
+>
+> Draft campaigns can include `autoReminderEnabled` and `reminderDelayDays`,
+> using the same options as `/campaigns/start`.
 
 ---
 
 ### POST /campaigns/{campaign_id}/pause — Pause Campaign
 
-Pausing stops the worker before it starts another email; an email already handed to the SMTP server may still complete. Daily campaign, SMTP-provider, and recipient-domain limit errors mark the campaign as `failed` and save the reason in `errorMessage`. Failed scheduled runs are not automatically retried.
+Pausing stops the worker before it starts another email; an email already handed to the SMTP server may still complete. Reaching the configured send limit pauses an immediate campaign; for a recurring campaign it ends that run and schedules the next occurrence with status `rescheduled`. SMTP-provider errors mark the recipient and campaign as `failed` and save the reason in `errorMessage`. Failed scheduled runs are not automatically retried.
 
 **cURL:**
 ```bash
@@ -790,6 +838,26 @@ curl -X POST http://localhost:8000/campaigns/64f1a2b3c4d5e6f7a8b9c0d1/resume \
 
 ---
 
+### POST /campaigns/{campaign_id}/reminder/retry — Retry Automatic Reminder Setup
+
+Retries reminder setup for an owned, completed draft campaign. This can recover
+campaigns completed before automatic reminder scheduling was enabled, or
+campaigns previously skipped because the profile was inactive or had no
+eligible recipients. The operation is idempotent for campaigns already marked
+as scheduled.
+
+**cURL:**
+```bash
+curl -X POST http://localhost:8000/campaigns/64f1a2b3c4d5e6f7a8b9c0d1/reminder/retry \
+  -H "Authorization: ******"
+```
+
+When an older sent-email row has no saved draft subject, the backend can recover
+it from the campaign snapshot only when the original template is unambiguous.
+Rows without a recoverable subject or original message ID are not queued.
+
+---
+
 ### GET /campaigns — List Campaigns
 
 **cURL:**
@@ -798,7 +866,37 @@ curl "http://localhost:8000/campaigns?status=running&page=1&pageSize=20" \
   -H "Authorization: Bearer <token>"
 ```
 
-**Query Parameters:** `status` (`all` or one of `pending`, `running`, `paused`, `completed`, `failed`, `waiting_for_mails`, `scheduled`, `processing`), `profileId`, `employeeId` (admin only), `page`, `pageSize`. The frontend's `status=1` value is also treated as `all`.
+**Query Parameters:** `status` (`all` or one of `pending`, `running`, `paused`, `completed`, `failed`, `waiting_for_mails`, `scheduled`, `rescheduled`, `processing`), `profileId`, `employeeId` (admin only), `page`, `pageSize`. Filtering by `scheduled` includes both initially scheduled campaigns and recurring campaigns rescheduled for their next occurrence. The frontend's `status=1` value is also treated as `all`.
+
+---
+
+### GET /campaigns/overview — Get My Campaign Overview
+
+Returns an aggregate summary and progress details for every campaign owned by
+the authenticated employee. No `employeeId` query parameter is accepted.
+The frontend can poll this endpoint every five minutes to refresh the campaign
+status bar.
+
+**cURL:**
+```bash
+curl http://localhost:8000/campaigns/overview \
+  -H "Authorization: Bearer <access_token>"
+```
+
+**Response data:**
+```json
+{
+  "summary": "Campaigns: 2 | Total emails: 2000 | Sent: 900 | Pending: 1100 | Failed: 0 | Skipped: 0 | Processed: 900 | Progress: 45%",
+  "campaigns": "Summer Campaign is about to end.; Product Launch starts within 10 minutes."
+}
+```
+
+Both values are strings, not objects or arrays. `campaigns` only contains alert
+messages: active campaigns at 85% progress or higher are reported as "is about
+to end", and scheduled/rescheduled campaigns starting in the next 10 minutes
+are reported as "starts within 10 minutes". Multiple alerts are joined with
+semicolons; an empty string means there are no alerts. Other campaign details
+are not included in this field.
 
 ---
 

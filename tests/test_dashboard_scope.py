@@ -60,6 +60,54 @@ class DashboardScopeTests(unittest.TestCase):
         self.assertEqual(week_start.strftime("%Y-%m-%d"), "2026-09-07")
         self.assertEqual(week_end.strftime("%Y-%m-%d"), "2026-09-13")
 
+    def test_last_week_range_uses_previous_monday_to_sunday(self):
+        now = datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc)
+
+        week_start, week_end = service._get_last_week_range(now)
+
+        self.assertEqual(week_start.strftime("%Y-%m-%d"), "2026-08-31")
+        self.assertEqual(week_end.strftime("%Y-%m-%d"), "2026-09-06")
+
+    def test_current_office_month_after_26th_runs_through_next_month_25th(self):
+        now = datetime(2026, 10, 30, 12, 0, tzinfo=timezone.utc)
+
+        month_start, month_end = service._get_current_month_range(now)
+
+        self.assertEqual(month_start.strftime("%Y-%m-%d"), "2026-10-26")
+        self.assertEqual(month_end.strftime("%Y-%m-%d"), "2026-11-25")
+
+    def test_current_office_month_on_or_before_25th_starts_previous_month_26th(self):
+        now = datetime(2026, 10, 25, 12, 0, tzinfo=timezone.utc)
+
+        month_start, month_end = service._get_current_month_range(now)
+
+        self.assertEqual(month_start.strftime("%Y-%m-%d"), "2026-09-26")
+        self.assertEqual(month_end.strftime("%Y-%m-%d"), "2026-10-25")
+
+    def test_current_office_month_handles_year_boundary(self):
+        now = datetime(2026, 12, 30, 12, 0, tzinfo=timezone.utc)
+
+        month_start, month_end = service._get_current_month_range(now)
+
+        self.assertEqual(month_start.strftime("%Y-%m-%d"), "2026-12-26")
+        self.assertEqual(month_end.strftime("%Y-%m-%d"), "2027-01-25")
+
+    def test_last_office_month_is_previous_26th_through_25th(self):
+        now = datetime(2026, 10, 30, 12, 0, tzinfo=timezone.utc)
+
+        month_start, month_end = service._get_last_month_range(now)
+
+        self.assertEqual(month_start.strftime("%Y-%m-%d"), "2026-09-26")
+        self.assertEqual(month_end.strftime("%Y-%m-%d"), "2026-10-25")
+
+    def test_last_office_month_handles_year_boundary(self):
+        now = datetime(2027, 1, 10, 12, 0, tzinfo=timezone.utc)
+
+        month_start, month_end = service._get_last_month_range(now)
+
+        self.assertEqual(month_start.strftime("%Y-%m-%d"), "2026-11-26")
+        self.assertEqual(month_end.strftime("%Y-%m-%d"), "2026-12-25")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -8,9 +9,86 @@ from app.campaign_engine import worker
 from app.email_master import service as email_master_service
 from app.email_master.service import _apply_profile_email_domain_limits
 from app.profile_emails import service as profile_email_service
+from app.profiles.schema import ProfileFilters
 
 
 class EmailDomainLimitTests(unittest.TestCase):
+    def test_oldest_first_filter_selects_oldest_matching_emails_before_limit(self):
+        uploaded_dates = [
+            "2026-03-03T00:00:00+00:00",
+            "2026-01-01T00:00:00+00:00",
+            "2026-02-02T00:00:00+00:00",
+        ]
+        records = [
+            {
+                "_id": ObjectId(),
+                "email": f"user{index}@gmail.com",
+                "uploadedDate": datetime.fromisoformat(uploaded_at),
+                "isDuplicate": False,
+                "hasReply": False,
+                "inProfileEmails": False,
+                "usageCount": 0,
+            }
+            for index, uploaded_at in enumerate(uploaded_dates)
+        ]
+
+        class Cursor:
+            def __init__(self, documents):
+                self.documents = documents
+                self.sort_spec = None
+
+            def sort(self, sort_spec):
+                self.sort_spec = sort_spec
+                self.documents = sorted(
+                    self.documents,
+                    key=lambda doc: (doc["uploadedDate"], doc["_id"]),
+                )
+                return self
+
+            def __aiter__(self):
+                self.documents = iter(self.documents)
+                return self
+
+            async def __anext__(self):
+                try:
+                    return next(self.documents)
+                except StopIteration:
+                    raise StopAsyncIteration
+
+        class Collection:
+            def __init__(self, documents):
+                self.documents = documents
+                self.cursor = None
+
+            async def count_documents(self, _query):
+                return len(self.documents)
+
+            def find(self, _query):
+                self.cursor = Cursor(self.documents)
+                return self.cursor
+
+        collection = Collection(records)
+        with patch.object(
+            email_master_service, "get_collection", return_value=collection
+        ):
+            selected = asyncio.run(
+                email_master_service.query_for_profile(
+                    filters={"oldestFirst": True},
+                    daily_limit=100,
+                    filter_limit=2,
+                )
+            )
+
+        self.assertFalse(ProfileFilters().oldestFirst)
+        self.assertEqual(
+            collection.cursor.sort_spec,
+            [("uploadedDate", 1), ("_id", 1)],
+        )
+        self.assertEqual(
+            [record["email"] for record in selected],
+            ["user1@gmail.com", "user2@gmail.com"],
+        )
+
     def test_duplicate_upload_refreshes_upload_metadata_without_insert(self):
         existing_id = ObjectId()
 

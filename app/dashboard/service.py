@@ -124,6 +124,36 @@ def _get_current_week_range(now: datetime) -> tuple[datetime, datetime]:
     return start_of_week, end_of_week
 
 
+def _get_last_week_range(now: datetime) -> tuple[datetime, datetime]:
+    """Return the previous Monday-Sunday range in UTC."""
+    current_week_start, _ = _get_current_week_range(now)
+    last_week_end = current_week_start - timedelta(days=1)
+    last_week_start = last_week_end - timedelta(days=6)
+    return last_week_start, last_week_end
+
+
+def _get_current_month_range(now: datetime) -> tuple[datetime, datetime]:
+    """Return the current office month range (26th through 25th) in UTC."""
+    if now.day >= 26:
+        month_start = now.replace(day=26, hour=0, minute=0, second=0, microsecond=0)
+        next_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0) + timedelta(days=32)
+        month_end = next_month.replace(day=25)
+    else:
+        previous_month_end = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+        month_start = previous_month_end.replace(day=26)
+        month_end = now.replace(day=25, hour=0, minute=0, second=0, microsecond=0)
+    return month_start, month_end
+
+
+def _get_last_month_range(now: datetime) -> tuple[datetime, datetime]:
+    """Return the previous completed office month range (26th through 25th)."""
+    current_month_start, _ = _get_current_month_range(now)
+    last_month_end = current_month_start - timedelta(days=1)
+    previous_month_end = last_month_end.replace(day=1) - timedelta(days=1)
+    last_month_start = previous_month_end.replace(day=26)
+    return last_month_start, last_month_end
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Employee dashboard
 # ─────────────────────────────────────────────────────────────────────────────
@@ -211,6 +241,54 @@ async def get_employee_dashboard(employee_id: str, query: DashboardQuery) -> dic
     weekly_sent_res = await send_stats.aggregate(weekly_sent_pipeline).to_list(length=1)
     current_week_sent = weekly_sent_res[0]["total"] if weekly_sent_res else 0
 
+    month_start, month_end = _get_current_month_range(now)
+    monthly_sent_pipeline = [
+        {
+            "$match": {
+                "employeeId": employee_id,
+                "date": {
+                    "$gte": month_start.strftime("%Y-%m-%d"),
+                    "$lte": month_end.strftime("%Y-%m-%d"),
+                },
+            }
+        },
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    monthly_sent_res = await send_stats.aggregate(monthly_sent_pipeline).to_list(length=1)
+    current_month_sent = monthly_sent_res[0]["total"] if monthly_sent_res else 0
+
+    last_month_start, last_month_end = _get_last_month_range(now)
+    last_monthly_sent_pipeline = [
+        {
+            "$match": {
+                "employeeId": employee_id,
+                "date": {
+                    "$gte": last_month_start.strftime("%Y-%m-%d"),
+                    "$lte": last_month_end.strftime("%Y-%m-%d"),
+                },
+            }
+        },
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    last_monthly_sent_res = await send_stats.aggregate(last_monthly_sent_pipeline).to_list(length=1)
+    last_month_sent = last_monthly_sent_res[0]["total"] if last_monthly_sent_res else 0
+
+    last_week_start, last_week_end = _get_last_week_range(now)
+    last_weekly_sent_pipeline = [
+        {
+            "$match": {
+                "employeeId": employee_id,
+                "date": {
+                    "$gte": last_week_start.strftime("%Y-%m-%d"),
+                    "$lte": last_week_end.strftime("%Y-%m-%d"),
+                },
+            }
+        },
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    last_weekly_sent_res = await send_stats.aggregate(last_weekly_sent_pipeline).to_list(length=1)
+    last_week_sent = last_weekly_sent_res[0]["total"] if last_weekly_sent_res else 0
+
     return {
         "todayUploadCount":    today_uploads,
         "last7DaysUploadCount": last_7_uploads,
@@ -223,6 +301,9 @@ async def get_employee_dashboard(employee_id: str, query: DashboardQuery) -> dic
         "runningCampaigns":    running_campaigns,
         "overallSent":         overall_sent,
         "currentWeekSent":     current_week_sent,
+        "currentMonthSent":    current_month_sent,
+        "lastMonthSent":       last_month_sent,
+        "lastWeekSent":        last_week_sent,
         "pendingCount":        pending_total,
     }
 
@@ -395,6 +476,54 @@ async def get_admin_scoped_dashboard(admin_user_id: str, query: DashboardQuery) 
     ]
     weekly_sent_res = await send_stats.aggregate(weekly_sent_pipeline).to_list(length=1)
     current_week_sent = weekly_sent_res[0]["total"] if weekly_sent_res else 0
+
+    month_start, month_end = _get_current_month_range(now_admin)
+    monthly_sent_pipeline = [
+        {
+            "$match": {
+                "employeeId": {"$in": scope_emp_ids},
+                "date": {
+                    "$gte": month_start.strftime("%Y-%m-%d"),
+                    "$lte": month_end.strftime("%Y-%m-%d"),
+                },
+            }
+        },
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    monthly_sent_res = await send_stats.aggregate(monthly_sent_pipeline).to_list(length=1)
+    current_month_sent = monthly_sent_res[0]["total"] if monthly_sent_res else 0
+
+    last_month_start, last_month_end = _get_last_month_range(now_admin)
+    last_monthly_sent_pipeline = [
+        {
+            "$match": {
+                "employeeId": {"$in": scope_emp_ids},
+                "date": {
+                    "$gte": last_month_start.strftime("%Y-%m-%d"),
+                    "$lte": last_month_end.strftime("%Y-%m-%d"),
+                },
+            }
+        },
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    last_monthly_sent_res = await send_stats.aggregate(last_monthly_sent_pipeline).to_list(length=1)
+    last_month_sent = last_monthly_sent_res[0]["total"] if last_monthly_sent_res else 0
+
+    last_week_start, last_week_end = _get_last_week_range(now_admin)
+    last_weekly_sent_pipeline = [
+        {
+            "$match": {
+                "employeeId": {"$in": scope_emp_ids},
+                "date": {
+                    "$gte": last_week_start.strftime("%Y-%m-%d"),
+                    "$lte": last_week_end.strftime("%Y-%m-%d"),
+                },
+            }
+        },
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    last_weekly_sent_res = await send_stats.aggregate(last_weekly_sent_pipeline).to_list(length=1)
+    last_week_sent = last_weekly_sent_res[0]["total"] if last_weekly_sent_res else 0
     
     return {
         "adminOwnUploads": admin_own_uploads,
@@ -405,6 +534,9 @@ async def get_admin_scoped_dashboard(admin_user_id: str, query: DashboardQuery) 
         "totalSentToProfiles": total_sent_profiles,
         "overallSent": overall_sent,
         "currentWeekSent": current_week_sent,
+        "currentMonthSent": current_month_sent,
+        "lastMonthSent": last_month_sent,
+        "lastWeekSent": last_week_sent,
         "totalCampaigns": total_campaigns,
         "runningCampaigns": running_campaigns,
         "totalProfiles": total_profiles,
@@ -478,6 +610,51 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
     ]
     weekly_sent_res = await send_stats.aggregate(weekly_sent_pipeline).to_list(length=1)
     current_week_sent = weekly_sent_res[0]["total"] if weekly_sent_res else 0
+
+    month_start, month_end = _get_current_month_range(now)
+    monthly_sent_pipeline = [
+        {
+            "$match": {
+                "date": {
+                    "$gte": month_start.strftime("%Y-%m-%d"),
+                    "$lte": month_end.strftime("%Y-%m-%d"),
+                },
+            }
+        },
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    monthly_sent_res = await send_stats.aggregate(monthly_sent_pipeline).to_list(length=1)
+    current_month_sent = monthly_sent_res[0]["total"] if monthly_sent_res else 0
+
+    last_month_start, last_month_end = _get_last_month_range(now)
+    last_monthly_sent_pipeline = [
+        {
+            "$match": {
+                "date": {
+                    "$gte": last_month_start.strftime("%Y-%m-%d"),
+                    "$lte": last_month_end.strftime("%Y-%m-%d"),
+                },
+            }
+        },
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    last_monthly_sent_res = await send_stats.aggregate(last_monthly_sent_pipeline).to_list(length=1)
+    last_month_sent = last_monthly_sent_res[0]["total"] if last_monthly_sent_res else 0
+
+    last_week_start, last_week_end = _get_last_week_range(now)
+    last_weekly_sent_pipeline = [
+        {
+            "$match": {
+                "date": {
+                    "$gte": last_week_start.strftime("%Y-%m-%d"),
+                    "$lte": last_week_end.strftime("%Y-%m-%d"),
+                },
+            }
+        },
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    last_weekly_sent_res = await send_stats.aggregate(last_weekly_sent_pipeline).to_list(length=1)
+    last_week_sent = last_weekly_sent_res[0]["total"] if last_weekly_sent_res else 0
 
     # Active profiles
     active_profiles = await profiles.count_documents({"isActive": True})
@@ -639,6 +816,9 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
         "totalSentToProfiles": total_sent_profiles,
         "overallSent":         overall_sent,
         "currentWeekSent":     current_week_sent,
+        "currentMonthSent":    current_month_sent,
+        "lastMonthSent":       last_month_sent,
+        "lastWeekSent":        last_week_sent,
         "totalCampaigns":      total_campaigns,
         "runningCampaigns":    running_campaigns,
         "activeEmailAccounts": total_accounts,
@@ -752,7 +932,7 @@ async def get_dropdown_options(current_user=None) -> dict:
         "admins": admins,
         "profiles": profiles,
         "campaigns": campaigns
-    }
+    }   
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1020,4 +1200,3 @@ async def get_upload_history(
         },
         "todayStatus": today_status,
     }
-

@@ -77,6 +77,29 @@ async def resume_campaign(
         message = "Scheduled campaign resumed"
     return ApiResponse(message=message, data=campaign)
 
+
+@router.post(
+    "/{campaign_id}/reminder/retry",
+    response_model=ApiResponse,
+    dependencies=[Depends(require_write_access)],
+)
+async def retry_campaign_reminder(
+    campaign_id: str,
+    employeeId: str | None = Query(default=None),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Retry automatic reminder setup for a completed draft campaign."""
+    employee_id, is_admin = await resolve_write_employee_context(
+        current_user, employeeId
+    )
+    campaign = await service.retry_automatic_reminder_campaign(
+        campaign_id,
+        employee_id,
+        is_admin,
+    )
+    return ApiResponse(message="Automatic reminder setup checked", data=campaign)
+
+
 @router.get("", response_model=ApiResponse)
 async def list_campaigns(
     employeeId: str | None = Query(default=None),
@@ -95,6 +118,19 @@ async def list_campaigns(
         profile_id=profileId,
     )
     return ApiResponse(message="Campaigns fetched", data=result)
+
+
+@router.get("/overview", response_model=ApiResponse)
+async def campaign_overview(
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Get the signed-in employee's aggregate campaign progress and campaigns."""
+    from app.employees.service import get_employee_by_user_id
+
+    employee = await get_employee_by_user_id(current_user.user_id)
+    employee_id = str(employee.get("id", current_user.user_id))
+    result = await service.get_campaign_overview(employee_id)
+    return ApiResponse(message="Campaign overview fetched", data=result)
 
 
 @router.get("/{campaign_id}", response_model=ApiResponse)
@@ -165,10 +201,10 @@ async def process_scheduled_campaigns_endpoint():
     Process all campaigns due for execution.
     
     Called by Linux Cron every minute. This endpoint:
-    1. Finds all campaigns where status='scheduled' and scheduledFor <= now
+    1. Finds scheduled or rescheduled campaigns where scheduledFor <= now
     2. Atomically transitions each to 'processing' status
     3. Executes each campaign using existing run_campaign() logic
-    4. Updates status to 'completed' or 'scheduled' (for retry)
+    4. Completes one-time campaigns or marks recurring campaigns rescheduled
     
     Returns execution summary with counts and errors.
     

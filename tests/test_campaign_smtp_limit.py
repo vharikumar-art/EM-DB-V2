@@ -1,9 +1,9 @@
+from unittest.mock import patch, AsyncMock
+
 import pytest
-import asyncio
-from unittest.mock import patch, AsyncMock, MagicMock
+
 from app.campaign_engine.worker import _run
 from app.campaigns.model import CampaignStatus
-from datetime import datetime, timezone
 
 # We will mock the database collections and services
 @pytest.fixture
@@ -23,7 +23,14 @@ def mock_collections():
         yield mock_campaigns, mock_profiles, mock_profile_emails
 
 @pytest.mark.anyio
-async def test_smtp_daily_limit_handling(mock_collections):
+@pytest.mark.parametrize(
+    "smtp_error",
+    [
+        "SMTP error: (550, b'5.4.5 Daily user sending limit exceeded')",
+        "SMTP error: (451, b'Temporary SMTP failure')",
+    ],
+)
+async def test_smtp_errors_fail_campaign(mock_collections, smtp_error):
     mock_campaigns, mock_profiles, mock_profile_emails = mock_collections
     
     # Mock campaign document
@@ -69,11 +76,11 @@ async def test_smtp_daily_limit_handling(mock_collections):
             mock_pe.mark_pending = AsyncMock()
             mock_pe.mark_failed = AsyncMock()
             
-            # Mock send_email to fail with daily limit error
+            # Mock send_email to return an SMTP-side error
             with patch("app.campaign_engine.worker.send_email", new_callable=AsyncMock) as mock_send:
                 class SendResult:
                     success = False
-                    error = "450 4.2.1 Daily user sending quota exceeded"
+                    error = smtp_error
                 mock_send.return_value = SendResult()
                 
                 with patch("app.campaign_engine.worker.campaign_service") as mock_camp:
@@ -84,18 +91,78 @@ async def test_smtp_daily_limit_handling(mock_collections):
                     mock_camp.increment_counters = AsyncMock()
                     mock_camp.finalize_campaign = AsyncMock()
                     mock_camp.abort_campaign = AsyncMock()
-                    
-                    await _run("507f1f77bcf86cd799439011")
 
-                    mock_pe.mark_pending.assert_called_once_with("pe1")
-                    mock_pe.mark_failed.assert_not_called()
-                    mock_camp.abort_campaign.assert_awaited_once()
-                    assert "SMTP daily sending limit reached" in (
-                        mock_camp.abort_campaign.await_args.args[1]
+                    with patch("app.campaign_engine.worker._push_progress", new_callable=AsyncMock) as push_progress:
+                        await _run("507f1f77bcf86cd799439011")
+
+                    mock_pe.mark_pending.assert_not_called()
+                    mock_pe.mark_failed.assert_awaited_once_with("pe1", smtp_error)
+                    mock_camp.increment_counters.assert_awaited_once_with(
+                        "507f1f77bcf86cd799439011", failed=1
                     )
+                    mock_camp.abort_campaign.assert_awaited_once()
+                    failure_message = mock_camp.abort_campaign.await_args.args[1]
+                    assert "test@gmail.com" in failure_message
+                    assert smtp_error in failure_message
+                    mock_send.assert_awaited_once()
+                    push_progress.assert_awaited_once()
                     mock_camp.start_campaign_worker.assert_awaited_once_with(
                         "507f1f77bcf86cd799439011"
                     )
 
-if __name__ == "__main__":
-    asyncio.run(test_smtp_daily_limit_handling())
+
+@pytest.mark.anyio
+async def test_immediate_campaign_daily_limit_pauses_campaign(mock_collections):
+    mock_campaigns, mock_profiles, _ = mock_collections
+    campaign_id = "507f1f77bcf86cd799439011"
+    mock_campaigns.find_one.return_value = {
+        "_id": campaign_id,
+        "profileId": "507f1f77bcf86cd799439012",
+        "employeeId": "emp1",
+        "status": CampaignStatus.RUNNING.value,
+        "dailyLimit": 50,
+        "executionSent": 50,
+        "recurrenceType": "once",
+        "campaignName": "Test Campaign",
+    }
+    mock_profiles.find_one.return_value = {
+        "_id": "507f1f77bcf86cd799439012",
+        "employeeId": "emp1",
+        "gmailAccount": "test@gmail.com",
+        "templates": [{"id": "t1", "subject": "Hello", "body": "World"}],
+        "sendingOptions": {"delayMin": 0, "delayMax": 0},
+    }
+
+    with (
+        patch(
+            "app.campaign_engine.worker.get_credentials_for_send",
+            new_callable=AsyncMock,
+            return_value={
+                "_id": "cred1",
+                "email": "test@gmail.com",
+                "password": "pass",
+                "smtpHost": "smtp.gmail.com",
+                "smtpPort": 587,
+                "useTls": True,
+            },
+        ),
+        patch("app.campaign_engine.worker.pe_service") as mock_pe,
+        patch("app.campaign_engine.worker.send_email", new_callable=AsyncMock) as mock_send,
+        patch("app.campaign_engine.worker.campaign_service") as mock_camp,
+    ):
+        mock_pe.get_sent_domain_counts_today = AsyncMock(return_value={})
+        mock_pe.get_pending_batch = AsyncMock(
+            return_value=[{"id": "pe1", "email": "lead@test.com"}]
+        )
+        mock_camp.claim_campaign_worker = AsyncMock(return_value=True)
+        mock_camp.release_campaign_worker = AsyncMock()
+        mock_camp.is_worker_active = AsyncMock(return_value=True)
+        mock_camp.start_campaign_worker = AsyncMock(return_value=True)
+        mock_camp.pause_campaign_worker = AsyncMock()
+        mock_camp.abort_campaign = AsyncMock()
+
+        await _run(campaign_id)
+
+    mock_camp.pause_campaign_worker.assert_awaited_once_with(campaign_id)
+    mock_camp.abort_campaign.assert_not_awaited()
+    mock_send.assert_not_awaited()

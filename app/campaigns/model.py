@@ -13,6 +13,7 @@ class CampaignStatus(str, Enum):
     WAITING_FOR_MAILS = "waiting_for_mails"
     # Scheduled execution statuses
     SCHEDULED = "scheduled"
+    RESCHEDULED = "rescheduled"
     PROCESSING = "processing"
 
 

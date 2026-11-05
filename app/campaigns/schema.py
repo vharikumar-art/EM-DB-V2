@@ -14,6 +14,23 @@ class CampaignStartRequest(BaseModel):
     campaignName: str = Field(default="", max_length=200)
     dailyLimit: int | None = Field(default=None, ge=1, le=10000, description="Daily email limit for this campaign (required, not optional)")
     limitOverride: int | None = Field(default=None, ge=1, le=10000, description="[DEPRECATED] Use dailyLimit instead")
+    autoReminderEnabled: bool = Field(
+        default=True,
+        description="Automatically schedule a reminder after a draft campaign completes",
+    )
+    reminderDelayDays: int = Field(
+        default=6,
+        ge=1,
+        le=15,
+        description="Days after draft completion before the automatic reminder runs",
+    )
+
+    @field_validator("reminderDelayDays", mode="before")
+    @classmethod
+    def default_empty_reminder_delay(cls, value):
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return 6
+        return value
 
 
 class CampaignScheduleRequest(BaseModel):
@@ -32,6 +49,23 @@ class CampaignScheduleRequest(BaseModel):
     recurrenceType: str = Field(default="once", description="Recurrence type: 'once', 'daily', or 'weekly'")
     recurrenceDays: list[int] = Field(default_factory=list, description="Days for weekly recurrence (0=Mon, 6=Sun)")
     recurrenceEndDate: str | None = Field(default=None, description="End date for recurring campaigns (YYYY-MM-DD)")
+    autoReminderEnabled: bool = Field(
+        default=True,
+        description="Automatically schedule a reminder after a draft campaign completes",
+    )
+    reminderDelayDays: int = Field(
+        default=6,
+        ge=1,
+        le=15,
+        description="Days after draft completion before the automatic reminder runs",
+    )
+
+    @field_validator("reminderDelayDays", mode="before")
+    @classmethod
+    def default_empty_reminder_delay(cls, value):
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return 6
+        return value
 
 
 class SchedulerProcessResponse(BaseModel):
@@ -74,6 +108,7 @@ class CampaignOut(BaseModel):
     dailyLimit: int | None = None
     limitOverride: int | None = None
     startedAt: str | None = None
+    startedAtDisplay: str | None = None
     completedAt: str | None = None
     pausedAt: str | None = None
     createdAt: str | None = None
@@ -86,6 +121,12 @@ class CampaignOut(BaseModel):
     errorMessage: str | None = None
     retryCount: int = 0
     maxRetries: int = 3
+    autoReminderEnabled: bool = True
+    reminderDelayDays: int = 6
+    reminderAutomationStatus: str | None = None
+    reminderAutomationError: str | None = None
+    reminderCampaignId: str | None = None
+    reminderScheduledFor: str | None = None
     # Recurrence fields
     recurrenceType: str = "once"
     recurrenceDays: list[int] = []
