@@ -44,7 +44,7 @@ FILTER_DROPDOWN_ID = "global"
 
 
 # Redis dropdown cache
-_DROPDOWN_CACHE_KEY = "email_master:dropdown_options"
+_DROPDOWN_CACHE_KEY = "email_master_production:dropdown_options"
 _DROPDOWN_CACHE_TTL_SECONDS = 30 * 60
 
 
