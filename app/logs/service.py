@@ -3,19 +3,25 @@ from app.logs.model import LogAction, build_log_document
 from app.schemas.common import PaginationParams
 from app.utils.pagination import build_paginated_response
 from app.utils.response import serialize_doc, serialize_list
+from app.users.unknown import UNKNOWN_EMPLOYEE_ID, resolve_unknown_employee_ids
 
 COLLECTION = "logs"
 
 
 async def list_logs(
-    employee_id: str | None,
+    employee_id: str | list[str] | None,
     params: PaginationParams,
     action_filter: str | None = None,
 ) -> dict:
     logs = get_collection(COLLECTION)
     query: dict = {}
-    if employee_id:
-        query["employeeId"] = employee_id
+    if employee_id is not None:
+        if isinstance(employee_id, list):
+            query["employeeId"] = {"$in": employee_id}
+        elif employee_id == UNKNOWN_EMPLOYEE_ID:
+            query["employeeId"] = {"$in": await resolve_unknown_employee_ids()}
+        else:
+            query["employeeId"] = employee_id
     if action_filter:
         query["action"] = action_filter.upper()
 

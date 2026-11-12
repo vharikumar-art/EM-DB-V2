@@ -8,7 +8,12 @@ Used by admin to select which employee/profile/campaign to act on.
 from fastapi import APIRouter, Depends, Query
 
 from app.campaigns.service import list_campaigns
-from app.core.dependencies import CurrentUser, get_current_user, require_admin
+from app.core.dependencies import (
+    CurrentUser,
+    get_current_user,
+    require_admin,
+    resolve_employee_context,
+)
 from app.employees.service import get_employee_by_user_id
 from app.profiles.service import list_profiles
 from app.schemas.common import ApiResponse
@@ -16,9 +21,40 @@ from app.users.service import list_users
 from app.database.mongodb import get_collection
 from app.settings.service import list_branch_options, list_setting_values
 from app.utils.pagination import PaginationParams
-from app.utils.response import serialize_doc
+from app.utils.response import serialize_doc, to_object_id
+from app.users.unknown import (
+    UNKNOWN_EMPLOYEE_ID,
+    UNKNOWN_USER_ID,
+    resolve_unknown_employee_ids,
+)
 
 router = APIRouter(prefix="/options", tags=["Options"])
+
+
+async def _unknown_employee_ids_for_dropdown(current_user: CurrentUser) -> list[str]:
+    if current_user.role == "super_admin":
+        return await resolve_unknown_employee_ids()
+    if current_user.role != "admin":
+        return []
+
+    admin_employee = await get_employee_by_user_id(current_user.user_id)
+    if current_user.access_level == "partial":
+        return await resolve_unknown_employee_ids(
+            assigned_to_admin=str(admin_employee["id"]),
+            include_all=False,
+        )
+
+    branch = admin_employee.get("branch")
+    if not branch:
+        admin_user = await get_collection("users").find_one(
+            {"_id": to_object_id(current_user.user_id)},
+            {"branch": 1},
+        )
+        branch = (admin_user or {}).get("branch")
+    return await resolve_unknown_employee_ids(
+        branch=branch,
+        include_all=False,
+    )
 
 
 @router.get("/employees", response_model=ApiResponse)
@@ -40,8 +76,8 @@ async def get_employees_options(
         user_id = emp.get("userId")
         name = emp.get("name")
         
-        # Skip orphaned/deleted users
-        if not name or name == "Unknown" or not user_id:
+        # Skip orphaned records, but retain the shared Unknown identity.
+        if not name or not user_id:
             continue
             
         # Skip duplicate entries
@@ -57,6 +93,20 @@ async def get_employees_options(
             "email": emp.get("email") or "",
             "branch": emp.get("branch") or "",
         })
+
+    unknown_employee_ids = await _unknown_employee_ids_for_dropdown(current_user)
+    if (
+        len(unknown_employee_ids) > 1
+        and UNKNOWN_USER_ID not in seen_user_ids
+    ):
+        options.append({
+            "id": UNKNOWN_EMPLOYEE_ID,
+            "userId": UNKNOWN_USER_ID,
+            "name": "Unknown",
+            "email": "unknown@system.invalid",
+            "branch": "",
+        })
+        seen_user_ids.add(UNKNOWN_USER_ID)
 
     # Super-admin accounts do not normally have employee documents, so they
     # must be added from users for the super-admin employee selector.
@@ -99,11 +149,11 @@ async def get_profiles_options(
     
     Returns: List of {id, profileName, gmailAccount}
     """
-    # Resolve employee context
+    # Resolve employee context, including branch-scoped Unknown records.
     if current_user.role in ("super_admin", "admin"):
         if not employeeId:
             return ApiResponse(message="Admins must specify employeeId", data=[])
-        target_employee_id = employeeId
+        target_employee_id, _ = await resolve_employee_context(current_user, employeeId)
     else:
         # Employee views their own profiles
         employee = await get_employee_by_user_id(current_user.user_id)

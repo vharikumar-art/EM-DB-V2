@@ -9,6 +9,7 @@ from app.employees.schema import EmployeeCreate, EmployeeUpdate
 from app.users.model import UserRole
 from app.users.service import create_user
 from app.users.schema import UserCreate
+from app.users.unknown import UNKNOWN_MARKER
 from app.utils.response import serialize_doc, to_object_id
 
 COLLECTION = "employees"
@@ -67,7 +68,7 @@ async def _attach_user_info(employee_doc: dict, include_password: bool = False) 
 async def list_employees(current_user: CurrentUser | None = None) -> list[dict]:
     employees = get_collection(COLLECTION)
     query = {}
-    
+
     if current_user and current_user.role == "admin":
         try:
             admin_emp = await get_employee_by_user_id(current_user.user_id)
@@ -114,7 +115,6 @@ async def list_employees(current_user: CurrentUser | None = None) -> list[dict]:
         except Exception:
             # If admin has no employee profile, they should see NO employees, not ALL employees
             query = {"_id": "none"}
-
     cursor = employees.find(query)
     docs = [serialize_doc(d) async for d in cursor]
     # include_password=True so the frontend Accounts table can display it
@@ -127,7 +127,7 @@ async def get_employee(employee_id: str, current_user: CurrentUser | None = None
     doc = await employees.find_one({"_id": to_object_id(employee_id)})
     if not doc:
         raise NotFoundException("Employee not found")
-        
+
     if current_user and current_user.role == "admin":
         try:
             admin_emp = await get_employee_by_user_id(current_user.user_id)
@@ -152,24 +152,24 @@ async def get_employee(employee_id: str, current_user: CurrentUser | None = None
                         {"_id": to_object_id(t_user_id)}, {"branch": 1}
                     )
                     target_branch = (t_user or {}).get("branch")
-            
+
             is_self = str(doc["_id"]) == admin_emp_id
             is_same_branch = bool(
                 admin_branch and target_branch and str(admin_branch).strip().casefold() == str(target_branch).strip().casefold()
             )
-            
+
             if not is_self and not is_same_branch:
                 raise ForbiddenException("You don't have access to this employee")
         except NotFoundException:
             pass
-            
+
     return await _attach_user_info(serialize_doc(doc), include_password=True)
 
 
 async def get_employee_by_user_id(user_id: str) -> dict:
     employees = get_collection(COLLECTION)
     doc = await employees.find_one({"userId": user_id})
-    
+
     if not doc:
         # Auto-create employee record if it doesn't exist
         # This handles cases where a user was created but no employee record exists
@@ -177,20 +177,22 @@ async def get_employee_by_user_id(user_id: str) -> dict:
         user = await users.find_one({"_id": to_object_id(user_id)})
         if not user:
             raise NotFoundException("User not found")
-        
+
         # Create default employee record
         emp_doc = build_employee_document(user_id=user_id, branch=None)
         result = await employees.insert_one(emp_doc)
         doc = await employees.find_one({"_id": result.inserted_id})
-    
+
     return await _attach_user_info(serialize_doc(doc))
 
 
 async def update_employee(employee_id: str, payload: EmployeeUpdate, current_user: CurrentUser | None = None) -> dict:
     employees = get_collection(COLLECTION)
     # Check access
-    await get_employee(employee_id, current_user)
-    
+    existing = await get_employee(employee_id, current_user)
+    if existing.get("systemAccount") == UNKNOWN_MARKER:
+        raise ForbiddenException("The Unknown system account cannot be modified")
+
     update_data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
     if not update_data:
         return await get_employee(employee_id)
@@ -229,19 +231,48 @@ async def delete_employee(employee_id: str, current_user: CurrentUser | None = N
     employees = get_collection(COLLECTION)
     # Check access (ensures employee exists and matches branch)
     emp_doc = await get_employee(employee_id, current_user)
+    if emp_doc.get("systemAccount") == UNKNOWN_MARKER:
+        raise ForbiddenException("The Unknown system account cannot be deleted")
+
+    employee_user_id = str(emp_doc.get("userId") or "")
+    users = get_collection("users")
+    target_user = (
+        await users.find_one({"_id": to_object_id(employee_user_id)})
+        if employee_user_id
+        else None
+    )
 
     if current_user and current_user.role == "admin":
-        from app.employees.service import get_employee_by_user_id
         admin_emp = await get_employee_by_user_id(current_user.user_id)
         is_self = str(admin_emp.get("id")) == str(employee_id)
-        
+
         # Check target user role
         if not is_self:
-            users = get_collection("users")
-            target_u = await users.find_one({"_id": to_object_id(str(emp_doc.get("userId")))})
-            if target_u and target_u.get("role") in {"admin", "super_admin"}:
+            if target_user and target_user.get("role") in {"admin", "super_admin"}:
                 raise ForbiddenException("Admins cannot delete other admins or super admins")
-    
+
+    from app.users.unknown import preserve_deleted_user_data
+
+    await preserve_deleted_user_data(
+        user_id=employee_user_id or employee_id,
+        employee_id=employee_id,
+        deleted_name=(
+            target_user.get("name")
+            or target_user.get("email")
+            or emp_doc.get("name")
+            or "Unknown"
+        ),
+        branch=emp_doc.get("branch") or (target_user or {}).get("branch"),
+        assigned_to_admin=emp_doc.get("assignedToAdmin"),
+    )
+
+    await employees.update_many(
+        {"assignedToAdmin": employee_id},
+        {"$set": {"assignedToAdmin": None, "updatedAt": datetime.now(timezone.utc)}},
+    )
+    if target_user:
+        await users.delete_one({"_id": target_user["_id"]})
+
     result = await employees.delete_one({"_id": to_object_id(employee_id)})
     if result.deleted_count == 0:
         raise NotFoundException("Employee not found")

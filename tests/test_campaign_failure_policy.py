@@ -56,6 +56,31 @@ def test_daily_limit_pause_does_not_mark_campaign_failed(monkeypatch):
     assert "errorMessage" not in campaign
 
 
+def test_scheduler_does_not_complete_a_campaign_paused_by_worker(monkeypatch):
+    campaign = {
+        "_id": ObjectId("507f1f77bcf86cd799439011"),
+        "status": CampaignStatus.PAUSED.value,
+        "recurrenceType": "once",
+    }
+
+    class FakeCampaigns:
+        async def find_one(self, *_args, **_kwargs):
+            return campaign
+
+        async def update_one(self, *_args, **_kwargs):
+            return SimpleNamespace(modified_count=0)
+
+    monkeypatch.setattr(scheduler, "get_collection", lambda _name: FakeCampaigns())
+
+    asyncio.run(
+        scheduler.finalize_campaign_execution(
+            str(campaign["_id"]), success=True
+        )
+    )
+
+    assert campaign["status"] == CampaignStatus.PAUSED.value
+
+
 def test_worker_start_does_not_overwrite_a_concurrent_pause(monkeypatch):
     class FakeCampaigns:
         document = {"status": "processing", "startedAt": None}

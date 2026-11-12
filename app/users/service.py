@@ -1,9 +1,17 @@
+from datetime import datetime, timezone
+
 from app.core.exceptions import ConflictException, ForbiddenException, NotFoundException
 from app.core.security import encrypt_password, hash_password, verify_password
 from app.database.mongodb import get_collection
 from app.users.model import AdminAccessLevel, UserRole, build_user_document
 from app.users.schema import UserCreate, UserUpdate, PasswordUpdate
 from app.core.dependencies import CurrentUser
+from app.users.unknown import (
+    UNKNOWN_EMPLOYEE_ID,
+    UNKNOWN_MARKER,
+    UNKNOWN_USER_ID,
+    preserve_deleted_user_data,
+)
 from app.utils.response import serialize_doc, serialize_user_with_password, serialize_list_users_with_password, to_object_id
 
 COLLECTION = "users"
@@ -53,7 +61,7 @@ async def create_user(payload: UserCreate, current_user: CurrentUser | None = No
     )
     result = await users.insert_one(doc)
     created = await users.find_one({"_id": result.inserted_id})
-    
+
     # Auto-create employee document for admins and employees
     if created["role"] in (UserRole.ADMIN.value, UserRole.EMPLOYEE.value):
         from app.employees.model import build_employee_document
@@ -64,7 +72,7 @@ async def create_user(payload: UserCreate, current_user: CurrentUser | None = No
         )
         employees = get_collection("employees")
         await employees.insert_one(emp_doc)
-        
+
     return serialize_user_with_password(created)
 
 
@@ -113,7 +121,7 @@ async def get_user_by_email(email: str) -> dict | None:
 async def get_user_by_id(user_id: str) -> dict:
     users = get_collection(COLLECTION)
     doc = await users.find_one({"_id": to_object_id(user_id)})
-    if not doc:
+    if not doc or doc.get("systemAccount") == UNKNOWN_MARKER:
         raise NotFoundException("User not found")
     return serialize_user_with_password(doc)
 
@@ -126,7 +134,7 @@ async def list_users(current_user: CurrentUser) -> list[dict]:
     campaigns_col = get_collection("campaigns")
     profile_emails_col = get_collection("profile_emails")
 
-    query = {}
+    query = {"systemAccount": {"$ne": UNKNOWN_MARKER}}
     if current_user.role == "admin":
         from app.employees.service import get_employee_by_user_id
         try:
@@ -166,7 +174,6 @@ async def list_users(current_user: CurrentUser) -> list[dict]:
 
             # Always allow admin to see themselves
             allowed_user_ids.append(current_user.user_id)
-
             query = {"_id": {"$in": [to_object_id(uid) for uid in set(allowed_user_ids)]}}
         except Exception:
             # If admin has no employee document or error, they only see themselves
@@ -176,6 +183,7 @@ async def list_users(current_user: CurrentUser) -> list[dict]:
 
     # ── 1. Fetch scoped users ────────────────────────────────────────────────────
     docs = [d async for d in users_col.find(query)]
+    docs = [doc for doc in docs if doc.get("systemAccount") != UNKNOWN_MARKER]
     users = serialize_list_users_with_password(docs)
     user_ids = [u["id"] for u in users]
 
@@ -233,16 +241,23 @@ async def list_users(current_user: CurrentUser) -> list[dict]:
         uid = u["id"]
         eid = user_to_emp.get(uid)          # employee doc id for this user
         admin_id = user_to_admin.get(uid, "")
-        cm = campaign_map.get(eid, {}) if eid else {}
+        stat_employee_ids = (
+            unknown_employee_ids
+            if uid == UNKNOWN_USER_ID
+            else ([eid] if eid else [])
+        )
+        total_campaigns = sum(campaign_map.get(stat_id, {}).get("totalCampaigns", 0) for stat_id in stat_employee_ids)
+        running_campaigns = sum(campaign_map.get(stat_id, {}).get("runningCampaigns", 0) for stat_id in stat_employee_ids)
+        pending_campaigns = sum(campaign_map.get(stat_id, {}).get("pendingCampaigns", 0) for stat_id in stat_employee_ids)
         u["employeeId"] = eid
         u["assignedToAdmin"] = admin_id
         u["stats"] = {
             "uniqueUploads": email_map.get(uid, 0),
-            "totalProfiles": profile_map.get(eid, 0) if eid else 0,
-            "totalCampaigns": cm.get("totalCampaigns", 0),
-            "runningCampaigns": cm.get("runningCampaigns", 0),
-            "pendingEmails": pending_emails_map.get(eid, 0) if eid else 0,
-            "pendingCampaigns": cm.get("pendingCampaigns", 0),
+            "totalProfiles": sum(profile_map.get(stat_id, 0) for stat_id in stat_employee_ids),
+            "totalCampaigns": total_campaigns,
+            "runningCampaigns": running_campaigns,
+            "pendingEmails": sum(pending_emails_map.get(stat_id, 0) for stat_id in stat_employee_ids),
+            "pendingCampaigns": pending_campaigns,
         }
 
     return users
@@ -254,12 +269,13 @@ async def list_users(current_user: CurrentUser) -> list[dict]:
 async def update_user(user_id: str, payload: UserUpdate, current_user: CurrentUser) -> dict:
     users = get_collection(COLLECTION)
     update_data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
-    target = None
+    target = await users.find_one({"_id": to_object_id(user_id)}, {"role": 1, "systemAccount": 1})
+    if not target:
+        raise NotFoundException("User not found")
+    if target.get("systemAccount") == UNKNOWN_MARKER:
+        raise ForbiddenException("The Unknown system account cannot be modified")
 
     if "accessLevel" in update_data or "role" in update_data:
-        target = await users.find_one({"_id": to_object_id(user_id)}, {"role": 1})
-        if not target:
-            raise NotFoundException("User not found")
         requested_role = update_data.get("role", target.get("role"))
         if isinstance(requested_role, UserRole):
             requested_role = requested_role.value
@@ -315,7 +331,7 @@ async def update_user(user_id: str, payload: UserUpdate, current_user: CurrentUs
             # Prevent changing branch to something else
             if "branch" in update_data and admin_branch:
                 update_data["branch"] = admin_branch
-    
+
     # Extract employee-specific fields
     assigned_to_admin = update_data.pop("assignedToAdmin", None)
     branch = update_data.get("branch", None)
@@ -372,7 +388,7 @@ async def update_user(user_id: str, payload: UserUpdate, current_user: CurrentUs
         if assigned_to_admin is not None:
             # If empty string, treat as unassign (None)
             emp_update["assignedToAdmin"] = assigned_to_admin if assigned_to_admin else None
-        
+
         await employees.update_one(
             {"userId": str(result["_id"])},
             {"$set": emp_update}
@@ -403,16 +419,19 @@ async def delete_user(
     users = get_collection(COLLECTION)
     employees = get_collection("employees")
     user = await users.find_one(
-        {"_id": to_object_id(user_id)}, {"name": 1, "email": 1, "role": 1, "branch": 1}
+        {"_id": to_object_id(user_id)},
+        {"name": 1, "email": 1, "role": 1, "branch": 1, "systemAccount": 1},
     )
     if not user:
         raise NotFoundException("User not found")
+    if user.get("systemAccount") == UNKNOWN_MARKER:
+        raise ForbiddenException("The Unknown system account cannot be deleted")
 
     if actor_role == "admin":
         is_self = actor_id and str(user["_id"]) == actor_id
         if not is_self and user.get("role") in {"admin", "super_admin"}:
             raise ForbiddenException("Admins cannot delete other admins or super admins")
-        
+
         # Ensure target is in same branch
         if not is_self and actor_id:
             from app.employees.service import get_employee_by_user_id
@@ -430,8 +449,15 @@ async def delete_user(
                 raise ForbiddenException("You cannot delete users outside your branch")
 
     employee = await employees.find_one(
-        {"userId": user_id}, {"_id": 1, "userId": 1}
+        {"userId": user_id},
+        {"_id": 1, "userId": 1, "branch": 1, "assignedToAdmin": 1},
     )
+    employee_id = str(employee["_id"]) if employee else None
+    deleted_name = user.get("name") or user.get("email") or "Unknown"
+    if employee_id is None:
+        from app.users.unknown import find_legacy_employee_id_for_user
+
+        employee_id = await find_legacy_employee_id_for_user(user_id, deleted_name)
 
     if actor_role in {"admin", "super_admin"}:
         # Notify while the employee assignment still exists so admins receive the event.
@@ -450,10 +476,24 @@ async def delete_user(
             # Deletion must not fail if notification delivery/storage is unavailable.
             pass
 
+    await preserve_deleted_user_data(
+        user_id=user_id,
+        employee_id=employee_id,
+        deleted_name=deleted_name,
+        branch=(employee or {}).get("branch") or user.get("branch"),
+        assigned_to_admin=(employee or {}).get("assignedToAdmin"),
+    )
+
+    if employee_id:
+        await employees.update_many(
+            {"assignedToAdmin": employee_id},
+            {"$set": {"assignedToAdmin": None, "updatedAt": datetime.now(timezone.utc)}},
+        )
+
     result = await users.delete_one({"_id": to_object_id(user_id)})
     if result.deleted_count == 0:
         raise NotFoundException("User not found")
-        
+
     # Cascade delete the employee record to prevent orphans
     await employees.delete_many({"userId": user_id})
 
@@ -461,20 +501,22 @@ async def delete_user(
 async def update_password(user_id: str, payload: PasswordUpdate) -> dict:
     from app.core.exceptions import BadRequestException
     from datetime import datetime, timezone
-    
+
     users = get_collection(COLLECTION)
     user_doc = await users.find_one({"_id": to_object_id(user_id)})
     if not user_doc:
         raise NotFoundException("User not found")
-    
+    if user_doc.get("systemAccount") == UNKNOWN_MARKER:
+        raise ForbiddenException("The Unknown system account cannot be modified")
+
     # Verify old password
     if not verify_password(payload.old_password, user_doc.get("password", "")):
         raise BadRequestException("Old password is incorrect")
-    
+
     # Hash and encrypt new password
     hashed = hash_password(payload.new_password)
     encrypted = encrypt_password(payload.new_password)
-    
+
     # Update password
     result = await users.find_one_and_update(
         {"_id": to_object_id(user_id)},
@@ -487,14 +529,14 @@ async def update_password(user_id: str, payload: PasswordUpdate) -> dict:
         },
         return_document=True
     )
-    
+
     return serialize_user_with_password(result)
 
 
 async def migrate_add_branch() -> dict:
     """Add branch 'Vellore' to all users that don't have it"""
     from datetime import datetime, timezone
-    
+
     users = get_collection(COLLECTION)
     result = await users.update_many(
         {"branch": {"$exists": False}},
@@ -505,7 +547,7 @@ async def migrate_add_branch() -> dict:
             }
         }
     )
-    
+
     return {
         "matched_count": result.matched_count,
         "modified_count": result.modified_count,
@@ -543,7 +585,10 @@ def _get_pending_campaign_statuses() -> list[str]:
     ]
 
 
-async def get_user_details(user_id: str) -> dict:
+async def get_user_details(
+    user_id: str,
+    current_user: CurrentUser | None = None,
+) -> dict:
     """Get full user profile including performance stats: uploads, profiles, campaigns, running campaigns."""
     users = get_collection(COLLECTION)
     logs_col = get_collection("logs")
@@ -551,18 +596,28 @@ async def get_user_details(user_id: str) -> dict:
     campaigns_col = get_collection("campaigns")
 
     doc = await users.find_one({"_id": to_object_id(user_id)})
-    if not doc:
+    if not doc or doc.get("systemAccount") == UNKNOWN_MARKER:
         raise NotFoundException("User not found")
 
     user = serialize_user_with_password(doc)
     employee_id = await _resolve_employee_id_for_user(user_id)
+    if user_id == UNKNOWN_USER_ID:
+        if current_user and current_user.role == "admin":
+            from app.core.dependencies import resolve_employee_context
+
+            employee_ids, _ = await resolve_employee_context(
+                current_user,
+                UNKNOWN_EMPLOYEE_ID,
+            )
+        else:
+            from app.users.unknown import resolve_unknown_employee_ids
+
+            employee_ids = await resolve_unknown_employee_ids()
+    else:
+        employee_ids = [employee_id or user_id]
 
     # ── Upload stats from logs ─────────────────────────────────────────────
-    upload_match = {"action": "UPLOAD"}
-    if employee_id:
-        upload_match["employeeId"] = employee_id
-    else:
-        upload_match["employeeId"] = user_id
+    upload_match = {"action": "UPLOAD", "employeeId": {"$in": employee_ids}}
 
     upload_pipeline = [
         {"$match": upload_match},
@@ -585,31 +640,25 @@ async def get_user_details(user_id: str) -> dict:
     upload_events = upload_stats.get("uploadCount", 0)
 
     # ── Profile count ─────────────────────────────────────────────────────
-    if employee_id:
-        total_profiles = await profiles_col.count_documents({"employeeId": employee_id})
-    else:
-        total_profiles = await profiles_col.count_documents({"employeeId": user_id})
+    total_profiles = await profiles_col.count_documents(
+        {"employeeId": {"$in": employee_ids}}
+    )
 
     # ── Campaign stats ────────────────────────────────────────────────────
     running_statuses = _get_running_campaign_statuses()
 
-    if employee_id:
-        total_campaigns = await campaigns_col.count_documents({"employeeId": employee_id})
-        running_campaigns = await campaigns_col.count_documents(
-            {"employeeId": employee_id, "status": {"$in": running_statuses}}
-        )
-    else:
-        total_campaigns = await campaigns_col.count_documents({"employeeId": user_id})
-        running_campaigns = await campaigns_col.count_documents(
-            {"employeeId": user_id, "status": {"$in": running_statuses}}
-        )
+    total_campaigns = await campaigns_col.count_documents(
+        {"employeeId": {"$in": employee_ids}}
+    )
+    running_campaigns = await campaigns_col.count_documents(
+        {
+            "employeeId": {"$in": employee_ids},
+            "status": {"$in": running_statuses},
+        }
+    )
 
     # ── Recent upload history (last 10 batches) ────────────────────────────
-    recent_query = {"action": "UPLOAD"}
-    if employee_id:
-        recent_query["employeeId"] = employee_id
-    else:
-        recent_query["employeeId"] = user_id
+    recent_query = {"action": "UPLOAD", "employeeId": {"$in": employee_ids}}
 
     recent_cursor = logs_col.find(
         recent_query,

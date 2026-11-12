@@ -126,7 +126,7 @@ def test_campaign_overview_alerts_only_scheduled_campaigns_within_ten_minutes(
 
     result = asyncio.run(service.get_campaign_overview("employee-1"))
 
-    assert result["campaigns"] == "Starts Soon starts within 10 minutes."
+    assert result["campaigns"] == "Starts Soon campaign will begin shortly."
     assert "Starts Later" not in result["campaigns"]
     assert "Already Started" not in result["campaigns"]
 
@@ -170,7 +170,7 @@ def test_campaign_overview_includes_multiple_alerts_and_omits_non_alert_details(
 
     assert result["campaigns"] == (
         "Nearly Done is about to end.; "
-        "Scheduled Soon starts within 10 minutes."
+        "Scheduled Soon campaign will begin shortly."
     )
     assert "Sent:" not in result["campaigns"]
     assert "Progress:" not in result["campaigns"]

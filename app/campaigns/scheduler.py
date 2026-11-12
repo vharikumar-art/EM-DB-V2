@@ -193,6 +193,15 @@ async def transition_to_processing(campaign_id: str) -> bool:
     return result is not None
 
 
+async def dispatch_campaign_now(campaign_id: str, campaign_name: str) -> bool:
+    """Atomically claim and dispatch a due campaign without waiting for the next scheduler tick."""
+    if not await transition_to_processing(campaign_id):
+        return False
+
+    asyncio.create_task(_execute_and_finalize(campaign_id, campaign_name))
+    return True
+
+
 async def execute_campaign(
     campaign_id: str,
 ) -> tuple[bool | None, Optional[str]]:
@@ -566,17 +575,14 @@ async def process_scheduled_campaigns() -> dict:
             
             try:
                 # Atomic transition to processing
-                transition_ok = await transition_to_processing(campaign_id)
-                
-                if not transition_ok:
+                dispatched = await dispatch_campaign_now(campaign_id, campaign_name)
+
+                if not dispatched:
                     logger.warning(f"Campaign {campaign_id} already being processed by another scheduler instance")
                     continue
                 
                 logger.info(f"Dispatching campaign: {campaign_name} ({campaign_id})")
                 result.total_executed += 1
-                
-                # Execute the campaign in the background so we don't block the scheduler
-                asyncio.create_task(_execute_and_finalize(campaign_id, campaign_name))
             
             except Exception as e:
                 result.failed += 1

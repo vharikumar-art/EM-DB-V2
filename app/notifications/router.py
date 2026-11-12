@@ -1,18 +1,26 @@
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 
-from app.core.dependencies import CurrentUser, get_current_user
+from app.core.dependencies import (
+    CurrentUser,
+    get_current_user,
+    resolve_employee_context,
+)
 from app.core.security import decode_token
 from app.employees.service import get_employee_by_user_id
 from app.notifications import service
 from app.notifications.websocket import manager
 from app.schemas.common import ApiResponse
+from app.users.unknown import UNKNOWN_EMPLOYEE_ID
 
 router = APIRouter(prefix="/notifications", tags=["Notifications"])
 
 
-async def _resolve_employee_id(current_user: CurrentUser, employee_id_query: str | None) -> str:
+async def _resolve_employee_id(
+    current_user: CurrentUser,
+    employee_id_query: str | None,
+) -> str | list[str]:
     """Resolve which employee's notifications the user is trying to view.
-    
+
     - super_admin: can view any employee
     - admin: can view assigned employees only
     - employee: can only view own notifications
@@ -20,8 +28,14 @@ async def _resolve_employee_id(current_user: CurrentUser, employee_id_query: str
     if current_user.role == "super_admin":
         # Super admin can view any employee's notifications
         return employee_id_query or current_user.user_id
-    
+
     if current_user.role == "admin":
+        if employee_id_query == UNKNOWN_EMPLOYEE_ID:
+            employee_ids, _ = await resolve_employee_context(
+                current_user,
+                employee_id_query,
+            )
+            return employee_ids
         # If an admin provides an employeeId, verify they manage that employee
         if employee_id_query:
             # Check if this employee is assigned to this admin
@@ -33,7 +47,7 @@ async def _resolve_employee_id(current_user: CurrentUser, employee_id_query: str
             return employee_id_query
         # Otherwise, default to the admin's own notifications
         return current_user.user_id
-    
+
     # Employee: only view own notifications
     employee = await get_employee_by_user_id(current_user.user_id)
     return employee["id"]

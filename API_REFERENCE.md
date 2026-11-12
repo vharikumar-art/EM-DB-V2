@@ -739,7 +739,7 @@ curl -X POST http://localhost:8000/campaigns/start \
 | `campaignName` | string | ❌ | Auto-generated if empty |
 | `dailyLimit` | int | ❌ | Overrides profile default |
 | `autoReminderEnabled` | boolean | ❌ | Automatically create a reminder after a draft completes (default `true`; ignored for reminder campaigns) |
-| `reminderDelayDays` | int | ❌ | Delay after draft completion, from 1 to 15 days (default `6`; empty or null uses `6`) |
+| `reminderDelayDays` | int | ❌ | Delay after draft completion, from 0 to 15 days (default `6`; empty or null uses `6`). `0` starts the reminder immediately when the draft completes. |
 
 Only one active campaign of each type is allowed per profile. A draft and a
 reminder campaign can run concurrently. Reminder campaigns use the original
@@ -1122,7 +1122,10 @@ receive super-admin user options. Since super-admin accounts normally have no
 employee record, their `id` falls back to their user ID; `userId` is also
 included. Partial admins see employees assigned to them; full admins see
 employees in their branch; super admins see all employees and super-admin
-accounts. Regular admins do not receive super-admin options.
+accounts. After a user is deleted, eligible callers also see one **Unknown**
+option for that caller's retained data. Selecting it lists the deleted users'
+profiles and other employee-owned records together. The original owner IDs are
+retained internally so profiles with duplicate names remain distinct.
 
 **cURL:**
 ```bash

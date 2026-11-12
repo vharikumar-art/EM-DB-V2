@@ -7,6 +7,10 @@ from app.core.dependencies import CurrentUser
 from app.employees import service
 
 
+async def _no_unknown_records(**_kwargs):
+    return ["000000000000000000000002"]
+
+
 class AsyncCursor:
     def __init__(self, docs):
         self.docs = docs
@@ -75,6 +79,10 @@ class UserCollection:
 
 @pytest.mark.anyio
 async def test_partial_admin_employee_list_is_limited_to_assigned_employees(monkeypatch):
+    monkeypatch.setattr(
+        "app.users.unknown.resolve_unknown_employee_ids",
+        _no_unknown_records,
+    )
     admin_employee_id = ObjectId()
     admin_user_id = ObjectId()
     assigned_employee_id = ObjectId()
@@ -127,6 +135,10 @@ async def test_partial_admin_employee_list_is_limited_to_assigned_employees(monk
 
 @pytest.mark.anyio
 async def test_full_admin_employee_list_is_limited_to_admin_branch(monkeypatch):
+    monkeypatch.setattr(
+        "app.users.unknown.resolve_unknown_employee_ids",
+        _no_unknown_records,
+    )
     admin_employee_id = ObjectId()
     admin_user_id = ObjectId()
     branch_employee_id = ObjectId()

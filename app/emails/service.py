@@ -12,6 +12,7 @@ from app.utils.pagination import build_paginated_response
 from app.utils.response import serialize_list
 from app.notifications.service import create_notification
 from app.notifications.schema import NotificationType
+from app.users.unknown import UNKNOWN_EMPLOYEE_ID, resolve_unknown_employee_ids
 
 COLLECTION = "emails"
 
@@ -152,7 +153,7 @@ async def upload_file(employee_id: str, file_bytes: bytes, filename: str, insert
 
 
 async def list_emails(
-    employee_id: str | None,
+    employee_id: str | list[str] | None,
     params: PaginationParams,
     country: str | None = None,
     domain: str | None = None,
@@ -160,8 +161,14 @@ async def list_emails(
 ):
     emails = get_collection(COLLECTION)
     query: dict = {}
-    if employee_id:
-        query["employeeId"] = employee_id
+    if employee_id is not None:
+        if isinstance(employee_id, list):
+            employee_ids = employee_id
+        elif employee_id == UNKNOWN_EMPLOYEE_ID:
+            employee_ids = await resolve_unknown_employee_ids()
+        else:
+            employee_ids = [employee_id]
+        query["employeeId"] = {"$in": employee_ids}
     if country:
         query["country"] = country
     if domain:
@@ -189,7 +196,15 @@ async def get_emails_for_profile(profile_id: str, employee_id: str, is_admin: bo
     profile = await get_profile(profile_id, employee_id, is_admin)
     options = profile["options"]
 
-    query: dict = {"employeeId": profile["employeeId"], "isDuplicate": False}
+    profile_employee_id = profile["employeeId"]
+    unknown_ids = await resolve_unknown_employee_ids()
+    employee_ids = (
+        unknown_ids
+        if profile_employee_id == UNKNOWN_EMPLOYEE_ID
+        or profile_employee_id in unknown_ids
+        else [profile_employee_id]
+    )
+    query: dict = {"employeeId": {"$in": employee_ids}, "isDuplicate": False}
     if options.get("country"):
         query["country"] = {"$in": options["country"]}
     if options.get("domain"):
@@ -210,14 +225,21 @@ async def get_emails_for_profile(profile_id: str, employee_id: str, is_admin: bo
     return docs
 
 
-async def get_dropdown_options(employee_id: str) -> dict:
+async def get_dropdown_options(employee_id: str | list[str]) -> dict:
     emails = get_collection(COLLECTION)
     profiles_col = get_collection("profiles")
 
     # Fetch distinct values
-    domains = await emails.distinct("domain", {"employeeId": employee_id})
-    countries = await emails.distinct("country", {"employeeId": employee_id})
-    states = await emails.distinct("state", {"employeeId": employee_id})
+    if isinstance(employee_id, list):
+        employee_ids = employee_id
+    elif employee_id == UNKNOWN_EMPLOYEE_ID:
+        employee_ids = await resolve_unknown_employee_ids()
+    else:
+        employee_ids = [employee_id]
+    employee_query = {"employeeId": {"$in": employee_ids}}
+    domains = await emails.distinct("domain", employee_query)
+    countries = await emails.distinct("country", employee_query)
+    states = await emails.distinct("state", employee_query)
 
     # Filter out empty strings and None
     domains = sorted([d for d in domains if d])
@@ -225,7 +247,8 @@ async def get_dropdown_options(employee_id: str) -> dict:
     states = sorted([s for s in states if s])
 
     # Fetch profiles
-    cursor = profiles_col.find({"employeeId": employee_id}, {"profileName": 1})
+    profile_ids = employee_ids
+    cursor = profiles_col.find({"employeeId": {"$in": profile_ids}}, {"profileName": 1})
     profiles = serialize_list([p async for p in cursor])
     
     # We map profiles to only return id and name if desired, but serialize_list handles _id -> id

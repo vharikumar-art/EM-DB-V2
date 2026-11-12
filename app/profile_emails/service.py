@@ -48,14 +48,14 @@ async def generate_list(
     filters["allowUsed"] = allow_used or filters.get("allowUsed", False)
     generation_limit = int(profile.get("filterLimit") or 0)
     profile_emails_col = get_collection(COLLECTION)
-    
+
     # CHECK: Profile email generation LOCK
     # If profile already has emails generated, cannot generate again
     # unless they delete them first or send and clear
     existing_emails_count = await profile_emails_col.count_documents(
         {"profileId": profile_id, "sendStatus": SendStatus.PENDING.value}
     )
-    
+
     if existing_emails_count > 0:
         raise BadRequestException(
             f"❌ Cannot generate more emails. This profile already has {existing_emails_count} pending emails. "
@@ -78,7 +78,7 @@ async def generate_list(
         # Count total emails in master to help diagnose
         master_col = get_collection(COLLECTION)
         total_in_master = await master_col.count_documents({"isDuplicate": False})
-        
+
         if total_in_master == 0:
             raise BadRequestException(
                 "❌ Email Master is empty. Please upload emails first via the 'Email Master' page. "
@@ -98,7 +98,7 @@ async def generate_list(
         {"masterEmailId": 1}
     )
     pending_master_ids = [doc["masterEmailId"] async for doc in pending_cursor]
-    
+
     if pending_master_ids:
         await release_email_locks(pending_master_ids)
 
@@ -143,7 +143,7 @@ async def generate_list(
             employee_id=profile["employeeId"],
             profile_name=profile["profileName"],
         )
-        
+
         # Also mark emails as assigned to this employee (claim them)
         # Get employee name from employees collection
         from app.employees.service import get_employee
@@ -152,7 +152,7 @@ async def generate_list(
             employee_name = employee.get("name", profile["employeeId"])
         except:
             employee_name = profile["employeeId"]
-        
+
         await mark_emails_assigned_to_employee(
             master_ids=master_ids_to_mark,
             employee_id=profile["employeeId"],
@@ -506,7 +506,7 @@ async def delete_profile_email(
     master_email_id = doc.get("masterEmailId")
     if master_email_id:
         await release_email_locks([master_email_id])
-        
+
     await col.delete_one({"_id": to_object_id(profile_email_id)})
 
 
@@ -590,7 +590,7 @@ async def clear_profile_list(profile_id: str, employee_id: str, is_admin: bool) 
     """
     await get_profile(profile_id, employee_id, is_admin)
     col = get_collection(COLLECTION)
-    
+
     cursor = col.find(
         {"profileId": profile_id},
         {"masterEmailId": 1, "sendStatus": 1, "mailType": 1},
@@ -613,7 +613,7 @@ async def clear_profile_list(profile_id: str, employee_id: str, is_admin: bool) 
 
     if master_ids:
         await release_email_locks(master_ids)
-        
+
     result = await col.delete_many({"profileId": profile_id})
     usage_reversed = await decrement_email_usage(unused_master_ids)
     return {
@@ -633,11 +633,11 @@ async def bulk_delete(
     object_ids = [
         ObjectId(i) for i in profile_email_ids if ObjectId.is_valid(i)
     ]
-    
+
     query = {"_id": {"$in": object_ids}}
     if not is_admin:
         query["employeeId"] = employee_id
-        
+
     # Get all masterEmailIds before deleting
     cursor = col.find(query, {"masterEmailId": 1})
     master_ids = [doc["masterEmailId"] async for doc in cursor if doc.get("masterEmailId")]

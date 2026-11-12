@@ -5,6 +5,7 @@ from app.database.mongodb import get_collection
 from app.notifications.model import build_notification_document
 from app.notifications.schema import NotificationType
 from app.utils.response import serialize_doc, serialize_list, to_object_id
+from app.users.unknown import UNKNOWN_EMPLOYEE_ID, resolve_unknown_employee_ids
 
 COLLECTION = "notifications"
 
@@ -18,51 +19,51 @@ from app.notifications.websocket import manager
 
 async def _get_all_super_admin_user_ids() -> list[str]:
     """Return user_ids of all super_admin users.
-    
+
     Results are cached for 60 seconds to reduce database load.
     """
     global _super_admin_cache
     now = datetime.now(timezone.utc)
-    
+
     # Check if cache is still valid
     if _super_admin_cache["expires_at"] and now < _super_admin_cache["expires_at"]:
         return _super_admin_cache["ids"]
-    
+
     # Cache expired or not set, fetch from database
     from app.database.mongodb import get_collection as _gc
     users = _gc("users")
     cursor = users.find({"role": "super_admin"}, {"_id": 1})
     super_admin_ids = [str(doc["_id"]) async for doc in cursor]
-    
+
     # Update cache with 60-second TTL
     _super_admin_cache["ids"] = super_admin_ids
     _super_admin_cache["expires_at"] = now + timedelta(seconds=60)
-    
+
     return super_admin_ids
 
 
 async def _get_all_admin_user_ids() -> list[str]:
     """Return user_ids of all admin users (excludes super_admins).
-    
+
     Results are cached for 60 seconds to reduce database load.
     """
     global _admin_cache
     now = datetime.now(timezone.utc)
-    
+
     # Check if cache is still valid
     if _admin_cache["expires_at"] and now < _admin_cache["expires_at"]:
         return _admin_cache["ids"]
-    
+
     # Cache expired or not set, fetch from database
     from app.database.mongodb import get_collection as _gc
     users = _gc("users")
     cursor = users.find({"role": "admin"}, {"_id": 1})
     admin_ids = [str(doc["_id"]) async for doc in cursor]
-    
+
     # Update cache with 60-second TTL
     _admin_cache["ids"] = admin_ids
     _admin_cache["expires_at"] = now + timedelta(seconds=60)
-    
+
     return admin_ids
 
 
@@ -107,7 +108,7 @@ async def create_notification(employee_id: str, message: str, type: Notification
 
 async def _is_employee_in_admin_scope(employee_id: str, admin_user_id: str) -> bool:
     """Check if an employee is within an admin's scope (branch-based for full access admins).
-    
+
     For full access admins: checks if the employee is in the same branch.
     For partial access admins: checks if the employee is directly assigned to this admin.
     Also always returns True if the admin's own employee record matches.
@@ -115,27 +116,27 @@ async def _is_employee_in_admin_scope(employee_id: str, admin_user_id: str) -> b
     try:
         employees = get_collection("employees")
         users = get_collection("users")
-        
+
         # Get the admin user to check their access level
         admin_user = await users.find_one({"_id": to_object_id(admin_user_id)}, {"accessLevel": 1})
         admin_access_level = (admin_user or {}).get("accessLevel", "full")
-        
+
         # Get admin's own employee record
         admin_employee = await employees.find_one({"userId": admin_user_id})
         if not admin_employee:
             return False
-        
+
         admin_emp_id = str(admin_employee.get("_id"))
-        
+
         # Always allow admin to be notified for their own actions
         if admin_emp_id == employee_id:
             return True
-        
+
         # Get the target employee
         employee = await employees.find_one({"_id": to_object_id(employee_id)})
         if not employee:
             return False
-        
+
         if admin_access_level == "partial":
             # Partial admin: check direct assignment
             return str(employee.get("assignedToAdmin")) == admin_emp_id
@@ -167,9 +168,18 @@ _is_employee_assigned_to_admin = _is_employee_in_admin_scope
 
 
 
-async def list_notifications(employee_id: str, unread_only: bool = False, limit: int = 50) -> list[dict]:
+async def list_notifications(
+    employee_id: str | list[str],
+    unread_only: bool = False,
+    limit: int = 50,
+) -> list[dict]:
     notifications = get_collection(COLLECTION)
-    query: dict = {"employeeId": employee_id}
+    if isinstance(employee_id, list):
+        query: dict = {"employeeId": {"$in": employee_id}}
+    elif employee_id == UNKNOWN_EMPLOYEE_ID:
+        query = {"employeeId": {"$in": await resolve_unknown_employee_ids()}}
+    else:
+        query = {"employeeId": employee_id}
     if unread_only:
         query["isRead"] = False
 
@@ -177,11 +187,20 @@ async def list_notifications(employee_id: str, unread_only: bool = False, limit:
     return serialize_list([d async for d in cursor])
 
 
-async def mark_as_read(notification_id: str, employee_id: str) -> dict:
+async def mark_as_read(
+    notification_id: str,
+    employee_id: str | list[str],
+) -> dict:
     notifications = get_collection(COLLECTION)
     now = datetime.now(timezone.utc)
+    if isinstance(employee_id, list):
+        employee_query = {"$in": employee_id}
+    elif employee_id == UNKNOWN_EMPLOYEE_ID:
+        employee_query = {"$in": await resolve_unknown_employee_ids()}
+    else:
+        employee_query = employee_id
     result = await notifications.find_one_and_update(
-        {"_id": to_object_id(notification_id), "employeeId": employee_id},
+        {"_id": to_object_id(notification_id), "employeeId": employee_query},
         {"$set": {"isRead": True, "readAt": now}},
         return_document=True,
     )
@@ -190,11 +209,17 @@ async def mark_as_read(notification_id: str, employee_id: str) -> dict:
     return serialize_doc(result)
 
 
-async def mark_all_as_read(employee_id: str) -> dict:
+async def mark_all_as_read(employee_id: str | list[str]) -> dict:
     notifications = get_collection(COLLECTION)
     now = datetime.now(timezone.utc)
+    if isinstance(employee_id, list):
+        employee_query = {"$in": employee_id}
+    elif employee_id == UNKNOWN_EMPLOYEE_ID:
+        employee_query = {"$in": await resolve_unknown_employee_ids()}
+    else:
+        employee_query = employee_id
     result = await notifications.update_many(
-        {"employeeId": employee_id, "isRead": False},
+        {"employeeId": employee_query, "isRead": False},
         {"$set": {"isRead": True, "readAt": now}}
     )
     return {"modifiedCount": result.modified_count}

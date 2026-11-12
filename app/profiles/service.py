@@ -17,6 +17,7 @@ from app.notifications.schema import NotificationType
 from app.notifications.service import create_notification
 from app.profiles.model import MAX_PROFILES_PER_EMPLOYEE, build_profile_document
 from app.profiles.schema import ProfileCreate, ProfileTestEmailRequest, ProfileUpdate
+from app.users.unknown import UNKNOWN_EMPLOYEE_ID, resolve_unknown_employee_ids
 
 from app.utils.response import serialize_doc, serialize_list, to_object_id
 
@@ -215,7 +216,12 @@ async def list_profiles(employee_id: str | list[str] | None) -> list[dict]:
     elif isinstance(employee_id, list):
         query = {"employeeId": {"$in": employee_id}}
     else:
-        query = {"employeeId": employee_id}
+        employee_ids = (
+            await resolve_unknown_employee_ids()
+            if employee_id == UNKNOWN_EMPLOYEE_ID
+            else [employee_id]
+        )
+        query = {"employeeId": {"$in": employee_ids}}
     cursor = profiles.find(query).sort("createdAt", -1)
     documents = [document async for document in cursor]
     results = serialize_list(documents)
@@ -287,6 +293,15 @@ async def update_profile(
             else:
                 # nested pydantic objects come back as dicts via model_dump
                 update_data[key] = val
+
+    if "employeeId" in update_data:
+        if not is_admin:
+            raise ForbiddenException("Only admins can reassign a profile")
+        target_employee = await get_collection("employees").find_one(
+            {"_id": to_object_id(update_data["employeeId"])}
+        )
+        if not target_employee:
+            raise NotFoundException("Target employee not found")
 
     if not update_data:
         return serialize_doc(existing)
@@ -506,10 +521,10 @@ async def delete_profile(profile_id: str, employee_id: str, is_admin: bool) -> N
     await _assert_owns_profile_or_admin(
         serialize_doc(existing), employee_id, is_admin
     )
-    
+
     # Delete the profile
     await profiles.delete_one({"_id": to_object_id(profile_id)})
-    
+
     # Also delete all profile_emails records for this profile (cleanup orphaned records)
     profile_emails = get_collection("profile_emails")
     await profile_emails.delete_many({"profileId": profile_id})
@@ -526,11 +541,11 @@ async def add_template(
     await _assert_owns_profile_or_admin(
         serialize_doc(existing), employee_id, is_admin
     )
-    
+
     # Generate unique template ID
     import uuid
     template_id = str(uuid.uuid4())[:8]
-    
+
     new_template = {
         "id": template_id,
         "name": template_data.get("name", f"Template {template_id}"),
@@ -538,7 +553,7 @@ async def add_template(
         "body": template_data.get("body", ""),
         "weight": template_data.get("weight", 1),
     }
-    
+
     result = await profiles.find_one_and_update(
         {"_id": to_object_id(profile_id)},
         {
@@ -561,7 +576,7 @@ async def update_template(
     await _assert_owns_profile_or_admin(
         serialize_doc(existing), employee_id, is_admin
     )
-    
+
     # Find template
     templates = existing.get("templates", [])
     template_idx = None
@@ -569,10 +584,10 @@ async def update_template(
         if t.get("id") == template_id:
             template_idx = idx
             break
-    
+
     if template_idx is None:
         raise NotFoundException(f"Template {template_id} not found")
-    
+
     # Update template
     update_dict = {}
     if "name" in template_data:
@@ -583,9 +598,9 @@ async def update_template(
         update_dict[f"templates.{template_idx}.body"] = template_data["body"]
     if "weight" in template_data:
         update_dict[f"templates.{template_idx}.weight"] = template_data["weight"]
-    
+
     update_dict["updatedAt"] = datetime.now(timezone.utc)
-    
+
     result = await profiles.find_one_and_update(
         {"_id": to_object_id(profile_id)},
         {"$set": update_dict},
@@ -605,12 +620,12 @@ async def delete_template(
     await _assert_owns_profile_or_admin(
         serialize_doc(existing), employee_id, is_admin
     )
-    
+
     # Must have at least one template
     templates = existing.get("templates", [])
     if len(templates) <= 1:
         raise BadRequestException("Cannot delete the last template")
-    
+
     # Find and delete any attached files
     for template in templates:
         if template.get("id") == template_id:
@@ -620,7 +635,7 @@ async def delete_template(
                 if filepath:
                     _delete_file(filepath)
             break
-    
+
     result = await profiles.find_one_and_update(
         {"_id": to_object_id(profile_id)},
         {
@@ -638,7 +653,7 @@ async def upload_attachment(
     """Upload an attachment file for a template"""
     import os
     import uuid
-    
+
     profiles = get_collection(COLLECTION)
     existing = await profiles.find_one({"_id": to_object_id(profile_id)})
     if not existing:
@@ -646,7 +661,7 @@ async def upload_attachment(
     await _assert_owns_profile_or_admin(
         serialize_doc(existing), employee_id, is_admin
     )
-    
+
     # Find template
     templates = existing.get("templates", [])
     template_idx = None
@@ -654,16 +669,16 @@ async def upload_attachment(
         if t.get("id") == template_id:
             template_idx = idx
             break
-    
+
     if template_idx is None:
         raise NotFoundException(f"Template {template_id} not found")
-    
+
     # Validate file size (max 10MB)
     max_size = 10 * 1024 * 1024  # 10MB
     file_content = await file.read()
     if len(file_content) > max_size:
         raise BadRequestException(f"File too large. Maximum size is 10MB")
-    
+
     # Validate file type (allow common attachment types)
     allowed_types = {
         "application/pdf",
@@ -677,24 +692,24 @@ async def upload_attachment(
         "text/plain",
         "text/csv",
     }
-    
+
     if file.content_type not in allowed_types:
         raise BadRequestException(f"File type not allowed. Allowed: PDF, DOC, XLS, images, etc.")
-    
+
     # Generate unique filename
     file_id = str(uuid.uuid4())[:8]
     file_ext = os.path.splitext(file.filename)[1]
     safe_filename = f"{file_id}_{file.filename}"
     filepath = f"uploads/templates/{safe_filename}"
-    
+
     # Save file to disk
     upload_dir = os.path.join(os.path.dirname(__file__), "..", "..", "uploads", "templates")
     os.makedirs(upload_dir, exist_ok=True)
     full_path = os.path.join(upload_dir, safe_filename)
-    
+
     with open(full_path, "wb") as f:
         f.write(file_content)
-    
+
     # Create attachment record
     attachment = {
         "id": file_id,
@@ -702,11 +717,11 @@ async def upload_attachment(
         "filepath": filepath,
         "size": len(file_content),
     }
-    
+
     # Add attachment to template
     update_dict = {f"templates.{template_idx}.attachments": attachment}
     update_dict["updatedAt"] = datetime.now(timezone.utc)
-    
+
     # Use $push to add to attachments array
     result = await profiles.find_one_and_update(
         {"_id": to_object_id(profile_id)},
@@ -721,7 +736,7 @@ async def delete_attachment(
 ) -> dict:
     """Delete an attachment from a template"""
     import os
-    
+
     profiles = get_collection(COLLECTION)
     existing = await profiles.find_one({"_id": to_object_id(profile_id)})
     if not existing:
@@ -729,12 +744,12 @@ async def delete_attachment(
     await _assert_owns_profile_or_admin(
         serialize_doc(existing), employee_id, is_admin
     )
-    
+
     # Find template and attachment
     templates = existing.get("templates", [])
     template_idx = None
     attachment_path = None
-    
+
     for idx, template in enumerate(templates):
         if template.get("id") == template_id:
             template_idx = idx
@@ -743,16 +758,16 @@ async def delete_attachment(
                     attachment_path = att.get("filepath")
                     break
             break
-    
+
     if template_idx is None:
         raise NotFoundException(f"Template {template_id} not found")
-    
+
     if not attachment_path:
         raise NotFoundException(f"Attachment {attachment_id} not found")
-    
+
     # Delete file from disk
     _delete_file(attachment_path)
-    
+
     # Remove from database
     result = await profiles.find_one_and_update(
         {"_id": to_object_id(profile_id)},
@@ -782,7 +797,7 @@ async def upload_profile_attachment(
     """Upload an attachment file for the profile (shared across all templates)"""
     import os
     import uuid
-    
+
     profiles = get_collection(COLLECTION)
     existing = await profiles.find_one({"_id": to_object_id(profile_id)})
     if not existing:
@@ -790,13 +805,13 @@ async def upload_profile_attachment(
     await _assert_owns_profile_or_admin(
         serialize_doc(existing), employee_id, is_admin
     )
-    
+
     # Validate file size (max 10MB)
     max_size = 10 * 1024 * 1024  # 10MB
     file_content = await file.read()
     if len(file_content) > max_size:
         raise BadRequestException("File too large. Maximum size is 10MB")
-    
+
     # Validate file type (allow common attachment types)
     allowed_types = {
         "application/pdf",
@@ -810,23 +825,23 @@ async def upload_profile_attachment(
         "text/plain",
         "text/csv",
     }
-    
+
     if file.content_type not in allowed_types:
         raise BadRequestException("File type not allowed. Allowed: PDF, DOC, XLS, images, etc.")
-    
+
     # Generate unique filename
     file_id = str(uuid.uuid4())[:8]
     file_ext = os.path.splitext(file.filename)[1]
     safe_filename = f"{file_id}_{file.filename}"
-    
+
     # Save to local filesystem
     upload_dir = os.path.join(os.path.dirname(__file__), "..", "..", "uploads", "profiles")
     os.makedirs(upload_dir, exist_ok=True)
-    
+
     filepath = os.path.join(upload_dir, safe_filename)
     with open(filepath, "wb") as f:
         f.write(file_content)
-    
+
     # Only one attachment per profile - replace if exists
     relative_filepath = f"uploads/profiles/{safe_filename}"
     attachment = {
@@ -835,7 +850,7 @@ async def upload_profile_attachment(
         "filepath": relative_filepath,
         "size": len(file_content),
     }
-    
+
     result = await profiles.find_one_and_update(
         {"_id": to_object_id(profile_id)},
         {
@@ -846,7 +861,7 @@ async def upload_profile_attachment(
         },
         return_document=True,
     )
-    
+
     return serialize_doc(result)
 
 
@@ -861,25 +876,25 @@ async def delete_profile_attachment(
     await _assert_owns_profile_or_admin(
         serialize_doc(existing), employee_id, is_admin
     )
-    
+
     # Find attachment to delete
     attachments = existing.get("attachments", [])
     attachment_idx = None
     filepath_to_delete = None
-    
+
     for idx, att in enumerate(attachments):
         if att.get("id") == attachment_id:
             attachment_idx = idx
             filepath_to_delete = att.get("filepath")
             break
-    
+
     if attachment_idx is None:
         raise NotFoundException(f"Attachment {attachment_id} not found")
-    
+
     # Delete from filesystem
     if filepath_to_delete:
         _delete_file(filepath_to_delete)
-    
+
     # Remove from profile
     result = await profiles.find_one_and_update(
         {"_id": to_object_id(profile_id)},
@@ -889,13 +904,13 @@ async def delete_profile_attachment(
         },
         return_document=True,
     )
-    
+
     return serialize_doc(result)
 
 
 async def backfill_profile_employee_info() -> dict:
     """SUPER ADMIN: Backfill employeeName and assignedAdmin for all existing profiles.
-    
+
     Iterates every profile, resolves the employee's name and assigned admin
     from the employees+users collections, and patches only profiles where
     the values are missing or empty.

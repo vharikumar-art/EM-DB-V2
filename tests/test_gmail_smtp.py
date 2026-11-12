@@ -1,33 +1,28 @@
+"""Opt-in SMTP connectivity test; never contacts an SMTP server by default."""
 
+import os
 import smtplib
-import socket
-import traceback
 
-SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 465
+import pytest
 
-SMTP_USERNAME = "vharikumar@gmail.com"
-SMTP_PASSWORD = "qvzeeprmkgbjyvst"  # Enter your Google App Password
 
-try:
-    print("Step 1: Checking network connection...")
+def test_smtp_login():
+    if os.getenv("RUN_SMTP_INTEGRATION_TESTS") != "1":
+        pytest.skip("Set RUN_SMTP_INTEGRATION_TESTS=1 to enable SMTP integration tests.")
 
-    with smtplib.SMTP_SSL(
-        SMTP_HOST,
-        SMTP_PORT,
-        timeout=30
-    ) as server:
+    username = os.getenv("SMTP_USERNAME")
+    password = os.getenv("SMTP_PASSWORD")
+    if not username or not password:
+        pytest.fail("SMTP_USERNAME and SMTP_PASSWORD must be configured.")
 
-        print("Step 2: SSL connection established.")
-        server.set_debuglevel(1)
-
-        print("Step 3: Testing SMTP login...")
-        server.login(SMTP_USERNAME, SMTP_PASSWORD)
-
-        print("Step 4: SMTP login successful.")
-
-except (smtplib.SMTPException, OSError, socket.error) as exc:
-    print("\nSMTP diagnostic failed.")
-    print("Exception type:", type(exc).__name__)
-    print("Exception details:", repr(exc))
-    traceback.print_exc()
+    host = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    port = int(os.getenv("SMTP_PORT", "465"))
+    if port == 465:
+        with smtplib.SMTP_SSL(host, port, timeout=30) as server:
+            server.login(username, password)
+    elif port == 587:
+        with smtplib.SMTP(host, port, timeout=30) as server:
+            server.starttls()
+            server.login(username, password)
+    else:
+        pytest.fail("SMTP_PORT must be 465 or 587.")

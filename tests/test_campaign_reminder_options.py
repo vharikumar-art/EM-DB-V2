@@ -36,8 +36,8 @@ def test_reminder_delay_defaults_to_six_for_empty_values(
     assert request.reminderDelayDays == 6
 
 
-@pytest.mark.parametrize("delay_days", [1, 6, 15])
-def test_reminder_delay_accepts_values_from_one_through_fifteen(delay_days):
+@pytest.mark.parametrize("delay_days", [0, 1, 6, 15])
+def test_reminder_delay_accepts_values_from_zero_through_fifteen(delay_days):
     request = CampaignStartRequest(
         profileId="profile1",
         autoReminderEnabled=False,
@@ -48,10 +48,59 @@ def test_reminder_delay_accepts_values_from_one_through_fifteen(delay_days):
     assert request.reminderDelayDays == delay_days
 
 
-@pytest.mark.parametrize("delay_days", [0, 16, -1])
-def test_reminder_delay_rejects_values_outside_one_through_fifteen(delay_days):
+@pytest.mark.parametrize(
+    "request_type, request_data",
+    [
+        (CampaignStartRequest, {"profileId": "profile1"}),
+        (
+            CampaignScheduleRequest,
+            {
+                "profileId": "profile1",
+                "scheduledTimeLocal": "09:00",
+                "timezoneOffsetMinutes": -330,
+            },
+        ),
+    ],
+)
+def test_zero_reminder_delay_is_accepted_for_both_campaign_request_types(
+    request_type,
+    request_data,
+):
+    request = request_type(**request_data, reminderDelayDays=0)
+
+    assert request.reminderDelayDays == 0
+
+
+@pytest.mark.parametrize("delay_days", [16, -1])
+def test_reminder_delay_rejects_values_outside_zero_through_fifteen(delay_days):
     with pytest.raises(ValidationError):
         CampaignStartRequest(profileId="profile1", reminderDelayDays=delay_days)
+
+
+@pytest.mark.anyio
+async def test_immediate_campaign_dispatch_uses_scheduler_claim(monkeypatch):
+    from app.campaigns import scheduler
+
+    transition = AsyncMock(return_value=True)
+    tasks = []
+
+    monkeypatch.setattr(scheduler, "transition_to_processing", transition)
+    monkeypatch.setattr(
+        scheduler,
+        "_execute_and_finalize",
+        lambda campaign_id, campaign_name: None,
+    )
+    monkeypatch.setattr(
+        scheduler.asyncio,
+        "create_task",
+        lambda task: tasks.append(task),
+    )
+
+    dispatched = await scheduler.dispatch_campaign_now("campaign1", "Reminder")
+
+    assert dispatched is True
+    transition.assert_awaited_once_with("campaign1")
+    assert len(tasks) == 1
 
 
 @pytest.mark.anyio

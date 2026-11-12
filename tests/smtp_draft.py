@@ -1,61 +1,53 @@
+"""Manually send an SMTP integration-test email when explicitly enabled."""
 
-# send_initial.py
-
+import os
 import smtplib
 from email.message import EmailMessage
 from email.utils import make_msgid
 
-# ---------------- SMTP CONFIGURATION ----------------
-SMTP_HOST = "smtp.gmail.com"       # Example: smtp.gmail.com
-SMTP_PORT = 465      # 465 for SSL, or 587 for STARTTLS
-SMTP_USERNAME = "vharikumar.art@gmail.com"
-SMTP_PASSWORD = "qvzeeprmkgbjyvst"   # Gmail: use an App Password
-SENDER_EMAIL = "vharikumar@gmail.com"
-RECIPIENT_EMAIL = "saikrishnabit2003@gmail.com"
 
-# ---------------- EMAIL CONTENT ----------------
-SUBJECT = "Test email"
-BODY = "This is a test email.If you receive this, please save the Message-ID printed in the console for sending a reminder."
+def _required_setting(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"Set {name} to run SMTP integration tests.")
+    return value
 
-# ---------------------------------------------------
 
-msg = EmailMessage()
-msg["From"] = SENDER_EMAIL
-msg["To"] = RECIPIENT_EMAIL
-msg["Subject"] = SUBJECT
+def main() -> None:
+    if os.getenv("RUN_SMTP_INTEGRATION_TESTS") != "1":
+        raise RuntimeError(
+            "Set RUN_SMTP_INTEGRATION_TESTS=1 to send an integration-test email."
+        )
 
-# Generate and set the RFC Message-ID.
-msg["Message-ID"] = make_msgid()
-msg.set_content(BODY)
+    host = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    port = int(os.getenv("SMTP_PORT", "465"))
+    username = _required_setting("SMTP_USERNAME")
+    password = _required_setting("SMTP_PASSWORD")
+    sender = _required_setting("SMTP_SENDER_EMAIL")
+    recipient = _required_setting("SMTP_TEST_RECIPIENT")
 
-try:
-    if SMTP_PORT == 465:
-        # with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
-        #     server.login(SMTP_USERNAME, SMTP_PASSWORD)
-        #     server.send_message(msg)
-        with smtplib.SMTP_SSL(SMTP_HOST,465,timeout=30) as server:
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.send_message(msg)
-            server.set_debuglevel(1)
+    message = EmailMessage()
+    message["From"] = sender
+    message["To"] = recipient
+    message["Subject"] = "SMTP integration test"
+    message["Message-ID"] = make_msgid()
+    message.set_content("This is an SMTP integration-test message.")
 
-            print("Connected to SMTP server")
-
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            print("SMTP login successful")
-
-            server.send_message(msg)
-            print("Email submitted successfully")
-    else:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+    if port == 465:
+        with smtplib.SMTP_SSL(host, port, timeout=30) as server:
+            server.login(username, password)
+            server.send_message(message)
+    elif port == 587:
+        with smtplib.SMTP(host, port, timeout=30) as server:
             server.starttls()
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.send_message(msg)
+            server.login(username, password)
+            server.send_message(message)
+    else:
+        raise ValueError("SMTP_PORT must be 465 or 587.")
 
-    print("Initial email sent successfully.")
-    print("Save these values for the reminder:")
-    print("Message-ID:", msg["Message-ID"])
-    print("Subject:", SUBJECT)
-    print("Recipient:", RECIPIENT_EMAIL)
+    print("SMTP integration-test email sent.")
+    print("Message-ID:", message["Message-ID"])
 
-except Exception as exc:
-    print("Failed to send initial email:", exc)
+
+if __name__ == "__main__":
+    main()

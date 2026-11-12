@@ -1,68 +1,65 @@
+"""Manually send an SMTP reminder integration-test email when enabled."""
 
-# send_reminder.py
-
+import os
 import smtplib
 from email.message import EmailMessage
 
-# ---------------- SMTP CONFIGURATION ----------------
-SMTP_HOST = "smtp.gmail.com"       # Example: smtp.gmail.com
-SMTP_PORT = 465      # 465 for SSL, or 587 for STARTTLS
-SMTP_USERNAME = "vharikumar.art@gmail.com"
-SMTP_PASSWORD = "qvzeeprmkgbjyvst"
-SENDER_EMAIL = "vharikumar@gmail.com"
-RECIPIENT_EMAIL = "saikrishnabit2003@gmail.com"
 
-# ---------------- ORIGINAL EMAIL DETAILS ----------------
-ORIGINAL_SUBJECT = "Test email for reminder"
+def _required_setting(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"Set {name} to run SMTP integration tests.")
+    return value
 
-# Paste the exact Message-ID printed by send_initial.py
-ORIGINAL_MESSAGE_ID = "<CAFQC8ctEfp4KogGPNFKfYfVDDPvWGY33LdME-veyUBenifT=sg@mail.gmail.com>"
 
-# If the original email already had References headers,
-# paste the existing References chain here. Otherwise leave blank.
-ORIGINAL_REFERENCES = ""
+def main() -> None:
+    if os.getenv("RUN_SMTP_INTEGRATION_TESTS") != "1":
+        raise RuntimeError(
+            "Set RUN_SMTP_INTEGRATION_TESTS=1 to send an integration-test email."
+        )
 
-# ---------------- REMINDER CONTENT ----------------
-REMINDER_BODY = "This is a reminder email in reply to the original message. Please check your inbox for the initial email."
+    host = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    port = int(os.getenv("SMTP_PORT", "465"))
+    username = _required_setting("SMTP_USERNAME")
+    password = _required_setting("SMTP_PASSWORD")
+    sender = _required_setting("SMTP_SENDER_EMAIL")
+    recipient = _required_setting("SMTP_TEST_RECIPIENT")
+    original_message_id = _required_setting("SMTP_ORIGINAL_MESSAGE_ID")
+    original_subject = os.getenv("SMTP_ORIGINAL_SUBJECT", "SMTP integration test")
+    references = os.getenv("SMTP_ORIGINAL_REFERENCES", "").strip()
 
-# ---------------------------------------------------
+    message = EmailMessage()
+    message["From"] = sender
+    message["To"] = recipient
+    message["Subject"] = (
+        original_subject
+        if original_subject.casefold().startswith("re:")
+        else f"Re: {original_subject}"
+    )
+    message["In-Reply-To"] = original_message_id
+    message["References"] = (
+        f"{references} {original_message_id}"
+        if references
+        else original_message_id
+    )
+    message.set_content("This is an SMTP reminder integration-test message.")
 
-msg = EmailMessage()
-msg["From"] = SENDER_EMAIL
-msg["To"] = RECIPIENT_EMAIL
-
-# Keep the original subject, adding Re: if needed.
-if ORIGINAL_SUBJECT.lower().startswith("re:"):
-    msg["Subject"] = ORIGINAL_SUBJECT
-else:
-    msg["Subject"] = f"Re: {ORIGINAL_SUBJECT}"
-
-# Reply-threading headers
-msg["In-Reply-To"] = ORIGINAL_MESSAGE_ID
-
-references = ORIGINAL_REFERENCES.strip()
-if references:
-    references = f"{references} {ORIGINAL_MESSAGE_ID}"
-else:
-    references = ORIGINAL_MESSAGE_ID
-
-msg["References"] = references
-msg.set_content(REMINDER_BODY)
-
-try:
-    if SMTP_PORT == 465:
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.send_message(msg)
-    else:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+    if port == 465:
+        with smtplib.SMTP_SSL(host, port, timeout=30) as server:
+            server.login(username, password)
+            server.send_message(message)
+    elif port == 587:
+        with smtplib.SMTP(host, port, timeout=30) as server:
             server.starttls()
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.send_message(msg)
+            server.login(username, password)
+            server.send_message(message)
+    else:
+        raise ValueError("SMTP_PORT must be 465 or 587.")
 
-    print("Reminder email sent successfully.")
-    print("In-Reply-To:", msg["In-Reply-To"])
-    print("References:", msg["References"])
+    print("SMTP reminder integration-test email sent.")
+    print("In-Reply-To:", message["In-Reply-To"])
+    print("References:", message["References"])
 
-except Exception as exc:
-    print("Failed to send reminder:", exc)
+
+if __name__ == "__main__":
+    main()

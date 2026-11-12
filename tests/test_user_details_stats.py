@@ -1,8 +1,10 @@
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from bson import ObjectId
 
 from app.core.dependencies import CurrentUser
+from app.profiles.schema import ProfileCreate
 from app.users import service
 
 
@@ -45,21 +47,17 @@ def test_pending_campaign_statuses_include_failed_and_paused():
     ]
 
 
-def test_effective_generation_limit_uses_user_requested_value_without_fixed_cap():
-    from app.profile_emails import service as profile_emails_service
+def test_profile_generation_limit_is_independent_of_daily_sending_limit():
+    profile = ProfileCreate(
+        profileName="Test profile",
+        gmailAccount="sender@example.com",
+        templates=[{}],
+        filterLimit=1000,
+        sendingOptions={"dailyLimit": 100},
+    )
 
-    # blank/zero daily values default to 100
-    assert profile_emails_service._get_effective_generation_limit(0, 0, False) == 100
-    assert profile_emails_service._get_effective_generation_limit(None, 0, False) == 100
-    assert profile_emails_service._get_effective_generation_limit("", 0, False) == 100
-
-    # custom values are respected and no fixed cap is enforced
-    assert profile_emails_service._get_effective_generation_limit(1000, 0, False) == 1000
-    assert profile_emails_service._get_effective_generation_limit(1000, 400, False) == 400
-    assert profile_emails_service._get_effective_generation_limit(1000, 1000, False) == 1000
-    assert profile_emails_service._get_effective_generation_limit(3000, 0, False) == 3000
-    assert profile_emails_service._get_effective_generation_limit(1000, 5000, False) == 5000
-    assert profile_emails_service._get_effective_generation_limit(1000, 0, True) == 1000
+    assert profile.filterLimit == 1000
+    assert profile.sendingOptions.dailyLimit == 100
 
 
 def test_partial_admin_lists_themselves_and_assigned_employees(monkeypatch):
@@ -163,6 +161,10 @@ def test_partial_admin_lists_themselves_and_assigned_employees(monkeypatch):
     monkeypatch.setattr(
         "app.employees.service.get_employee_by_user_id",
         fake_get_employee_by_user_id,
+    )
+    monkeypatch.setattr(
+        "app.users.unknown.resolve_unknown_employee_ids",
+        AsyncMock(return_value=["000000000000000000000002"]),
     )
 
     result = asyncio.run(

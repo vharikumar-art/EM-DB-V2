@@ -30,6 +30,7 @@ class AsyncDocs:
     ("reminder_delay_days", "expected_scheduled_for"),
     [
         (None, datetime(2026, 11, 7, 9, 30, tzinfo=timezone.utc)),
+        (0, datetime(2026, 11, 1, 9, 30, tzinfo=timezone.utc)),
         (2, datetime(2026, 11, 3, 9, 30, tzinfo=timezone.utc)),
     ],
 )
@@ -98,6 +99,11 @@ async def test_completed_draft_campaign_schedules_reminder_after_configured_dela
             return_value={"convertedCount": 2, "skippedMissingThreadData": 0},
         ) as convert_to_reminders,
         patch.object(service, "create_notification", new_callable=AsyncMock),
+        patch(
+            "app.campaigns.scheduler.dispatch_campaign_now",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as dispatch_campaign_now,
     ):
         await service.schedule_automatic_reminder_campaign(str(source_id))
 
@@ -125,6 +131,12 @@ async def test_completed_draft_campaign_schedules_reminder_after_configured_dela
         is_admin=True,
         campaign_id=str(source_id),
     )
+    if reminder_delay_days == 0:
+        dispatch_campaign_now.assert_awaited_once_with(
+            str(reminder_id), "Initial campaign - Reminder"
+        )
+    else:
+        dispatch_campaign_now.assert_not_awaited()
 
 
 @pytest.mark.anyio

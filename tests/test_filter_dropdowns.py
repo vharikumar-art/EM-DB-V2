@@ -7,7 +7,7 @@ from app.email_master import service
 
 class FilterDropdownTests(unittest.TestCase):
     def tearDown(self):
-        service.invalidate_dropdown_cache()
+        asyncio.run(service.invalidate_dropdown_cache())
 
     def test_update_uses_only_domain_field_for_domain_dropdown(self):
         collection = type("Collection", (), {"update_one": AsyncMock()})()

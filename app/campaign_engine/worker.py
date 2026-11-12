@@ -321,10 +321,13 @@ async def _run(campaign_id: str) -> None:
                     profile_id, 1, mail_type=mail_type
                 )
                 if pending_batch:
-                    await campaign_service.abort_campaign(
+                    logger.info(
+                        "Campaign %s paused because all remaining recipient domains "
+                        "reached the daily limit of %d sends.",
                         campaign_id,
-                        f"All remaining recipient domains reached the daily limit of {DOMAIN_DAILY_SEND_LIMIT} sends.",
+                        DOMAIN_DAILY_SEND_LIMIT,
                     )
+                    await campaign_service.pause_campaign_worker(campaign_id)
                     return
 
             recurrence = campaign.get("recurrenceType", "once")

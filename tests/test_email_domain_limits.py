@@ -449,13 +449,27 @@ class EmailDomainLimitTests(unittest.TestCase):
         ] + [
             {
                 "id": str(ObjectId()),
+                "email": f"recipient{index}@college.example",
+                "sendStatus": "pending",
+            }
+            for index in range(4)
+        ] + [
+            {
+                "id": str(ObjectId()),
+                "email": f"recipient{index}@company.example",
+                "sendStatus": "pending",
+            }
+            for index in range(10)
+        ] + [
+            {
+                "id": str(ObjectId()),
                 "email": f"gmail{index}@gmail.com",
                 "sendStatus": "pending",
             }
             for index in range(6)
         ]
         sent_emails: list[str] = []
-        abort_calls: list[tuple[str, str]] = []
+        pause_calls: list[str] = []
 
         class Collection:
             def __init__(self, document):
@@ -493,9 +507,9 @@ class EmailDomainLimitTests(unittest.TestCase):
         async def set_status(_campaign_id, status, *_args, **_kwargs):
             campaign["status"] = status.value
 
-        async def abort_campaign(_campaign_id, reason):
-            abort_calls.append((_campaign_id, reason))
-            campaign["status"] = "failed"
+        async def pause_campaign_worker(_campaign_id):
+            pause_calls.append(_campaign_id)
+            campaign["status"] = "paused"
 
         async def send_email(*_args, **_kwargs):
             return SimpleNamespace(
@@ -545,7 +559,11 @@ class EmailDomainLimitTests(unittest.TestCase):
                 "is_worker_active",
                 AsyncMock(side_effect=lambda _campaign_id: campaign["status"] in {"running", "processing"}),
             ),
-            patch.object(worker.campaign_service, "abort_campaign", abort_campaign),
+            patch.object(
+                worker.campaign_service,
+                "pause_campaign_worker",
+                pause_campaign_worker,
+            ),
             patch.object(worker.campaign_service, "increment_counters", AsyncMock()),
             patch.object(
                 worker.campaign_service,
@@ -555,18 +573,23 @@ class EmailDomainLimitTests(unittest.TestCase):
         ):
             asyncio.run(worker._run(str(campaign_id)))
 
-        self.assertEqual(len(sent_emails), 11)
+        self.assertEqual(len(sent_emails), 20)
         self.assertEqual(
             sum(email.endswith("@school.example") for email in sent_emails), 5
         )
         self.assertEqual(
+            sum(email.endswith("@college.example") for email in sent_emails), 4
+        )
+        self.assertEqual(
+            sum(email.endswith("@company.example") for email in sent_emails), 5
+        )
+        self.assertEqual(
             sum(email.endswith("@gmail.com") for email in sent_emails), 6
         )
-        self.assertEqual(campaign["status"], "failed")
-        self.assertEqual(len(abort_calls), 1)
-        self.assertIn("daily limit of 5 sends", abort_calls[0][1])
+        self.assertEqual(campaign["status"], "paused")
+        self.assertEqual(pause_calls, [str(campaign_id)])
         self.assertEqual(
-            sum(record["sendStatus"] == "pending" for record in records), 1
+            sum(record["sendStatus"] == "pending" for record in records), 6
         )
 
 

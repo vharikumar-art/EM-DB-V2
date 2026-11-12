@@ -16,6 +16,7 @@ from app.profiles.service import get_profile
 from app.schemas.common import PaginationParams
 from app.utils.pagination import build_paginated_response
 from app.utils.response import serialize_doc, serialize_list, to_object_id
+from app.users.unknown import UNKNOWN_EMPLOYEE_ID, resolve_unknown_employee_ids
 
 COLLECTION = "campaigns"
 logger = logging.getLogger(__name__)
@@ -126,7 +127,7 @@ async def create_campaign(
     """
     Validate, count pending emails, create the campaign document.
     The actual async send loop is started by the router via BackgroundTasks.
-    
+
     Uses dailyLimit from request (not from profile).
     """
     profile = await get_profile(payload.profileId, employee_id, is_admin)
@@ -197,7 +198,7 @@ async def create_campaign(
         "sendingOptions": profile.get("sendingOptions"),
         "promptSettings": profile.get("promptSettings"),
     }
-    
+
     # Store dailyLimit for this campaign
     doc["dailyLimit"] = daily_limit
     # Keep limitOverride for backward compatibility
@@ -239,12 +240,12 @@ async def create_scheduled_campaign(
 ) -> dict:
     """
     Create a campaign scheduled for future execution via Linux Cron.
-    
+
     The campaign will not execute immediately. It will be queued and executed
     when the scheduled_for time arrives.
     """
     from app.campaigns.schema import CampaignScheduleRequest
-    
+
     profile = await get_profile(payload.profileId, employee_id, is_admin)
 
     if not profile.get("isActive", False):
@@ -298,9 +299,9 @@ async def create_scheduled_campaign(
 
     # Simple approach: just store the provided time and recurrence settings
     # The scheduler will handle when to run based on recurrence type and days
-    
+
     now = datetime.now(timezone.utc)
-    
+
     from app.campaigns.scheduler import calculate_next_run
     utc_dt = calculate_next_run(
         recurrence_type=payload.recurrenceType,
@@ -310,7 +311,7 @@ async def create_scheduled_campaign(
         scheduled_date_local=payload.scheduledDateLocal,
         current_utc=now,
     )
-    
+
     print(f"[SCHEDULER] Local time: {payload.scheduledTimeLocal}, offset: {payload.timezoneOffsetMinutes} min, UTC: {utc_dt.isoformat()}, Recurrence: {payload.recurrenceType}, Days: {payload.recurrenceDays}")
 
     # Build campaign with scheduled_for parameter
@@ -322,7 +323,7 @@ async def create_scheduled_campaign(
         scheduled_for=utc_dt,  # This sets status to SCHEDULED
         mail_type=payload.mailType,
     )
-    
+
     # Snapshot relevant profile fields for audit trail
     doc["profileSnapshot"] = {
         "profileName": profile.get("profileName"),
@@ -333,7 +334,7 @@ async def create_scheduled_campaign(
         "sendingOptions": profile.get("sendingOptions"),
         "promptSettings": profile.get("promptSettings"),
     }
-    
+
     # Store dailyLimit and retry settings
     doc["dailyLimit"] = daily_limit
     doc["maxRetries"] = payload.maxRetries
@@ -343,12 +344,12 @@ async def create_scheduled_campaign(
     doc["reminderDelayDays"] = payload.reminderDelayDays
     if not doc["autoReminderEnabled"]:
         doc["reminderAutomationStatus"] = "disabled"
-    
+
     display_time = payload.scheduledTimeLocal
     if payload.scheduledDateLocal:
         display_time = f"{payload.scheduledDateLocal}T{payload.scheduledTimeLocal}"
     doc["scheduledForDisplay"] = display_time  # Store the display time
-    
+
     # Store recurrence settings
     doc["recurrenceType"] = payload.recurrenceType
     doc["recurrenceDays"] = payload.recurrenceDays
@@ -836,6 +837,14 @@ async def schedule_automatic_reminder_campaign(campaign_id: str) -> None:
             ),
             NotificationType.INFO,
         )
+        if reminder_delay_days == 0:
+            from app.campaigns.scheduler import dispatch_campaign_now
+
+            if not await dispatch_campaign_now(reminder_id, campaign_name):
+                logger.warning(
+                    "Immediate reminder campaign %s was not dispatched; it remains eligible for the scheduler",
+                    reminder_id,
+                )
     except Exception as exc:
         logger.exception(
             "Failed to schedule automatic reminder for campaign %s", campaign_id
@@ -983,6 +992,8 @@ async def list_campaigns(
     if employee_id is not None:
         if isinstance(employee_id, list):
             query["employeeId"] = {"$in": employee_id}
+        elif employee_id == UNKNOWN_EMPLOYEE_ID:
+            query["employeeId"] = {"$in": await resolve_unknown_employee_ids()}
         else:
             query["employeeId"] = employee_id
     normalized_status = status_filter.strip().lower() if status_filter else ""
@@ -1013,7 +1024,12 @@ async def list_campaigns(
 async def get_campaign_overview(employee_id: str) -> dict:
     """Return all campaigns and aggregate progress for one employee."""
     campaigns = get_collection(COLLECTION)
-    cursor = campaigns.find({"employeeId": employee_id}).sort("createdAt", -1)
+    owner_query = (
+        {"employeeId": {"$in": await resolve_unknown_employee_ids()}}
+        if employee_id == UNKNOWN_EMPLOYEE_ID
+        else {"employeeId": employee_id}
+    )
+    cursor = campaigns.find(owner_query).sort("createdAt", -1)
     campaign_records = [doc async for doc in cursor]
     campaign_docs = [_add_campaign_progress(doc) for doc in campaign_records]
 
@@ -1079,22 +1095,22 @@ async def update_daily_limit(
     """
     Update the daily limit for a campaign.
     Can be called while campaign is paused or running.
-    
+
     Args:
         campaign_id: Campaign to update
         new_daily_limit: New daily limit (1-10000)
         employee_id: Current user's employee ID
         is_admin: Whether current user is admin
-        
+
     Returns:
         Updated campaign document
-        
+
     Raises:
         ForbiddenException: If not owner/admin
         NotFoundException: If campaign not found
     """
     doc = await _get_campaign_owned(campaign_id, employee_id, is_admin)
-    
+
     campaigns = get_collection(COLLECTION)
     result = await campaigns.find_one_and_update(
         {"_id": to_object_id(campaign_id)},
@@ -1104,13 +1120,13 @@ async def update_daily_limit(
         }},
         return_document=True,
     )
-    
+
     await create_notification(
         employee_id=doc["employeeId"],
         message=f"Campaign '{doc['campaignName']}' daily limit updated to {new_daily_limit}.",
         type=NotificationType.INFO,
     )
-    
+
     return _serialize_campaign(result)
 
 
@@ -1119,21 +1135,21 @@ async def delete_campaign(
 ) -> None:
     """
     Delete a campaign.
-    
+
     Can only delete campaigns that are not RUNNING.
     Deleting a campaign also cleans up associated profile_emails.
-    
+
     Args:
         campaign_id: Campaign to delete
         employee_id: Current user's employee ID
         is_admin: Whether current user is admin
-        
+
     Raises:
         ForbiddenException: If not owner/admin
         BadRequestException: If campaign is RUNNING
     """
     doc = await _get_campaign_owned(campaign_id, employee_id, is_admin)
-    
+
     # Processing campaigns may already have a scheduled worker in flight.
     if doc.get("status") in {
         CampaignStatus.RUNNING.value,
@@ -1142,15 +1158,15 @@ async def delete_campaign(
         raise BadRequestException(
             "Cannot delete an active campaign. Pause it first."
         )
-    
+
     campaigns = get_collection(COLLECTION)
     await campaigns.delete_one({"_id": to_object_id(campaign_id)})
-    
+
     # Also clean up associated profile_emails (optional - keep for audit trail)
     # You can choose to keep them for history, or delete them
     # profile_emails_col = get_collection("profile_emails")
     # await profile_emails_col.delete_many({"campaignId": campaign_id})
-    
+
     await create_notification(
         employee_id=doc["employeeId"],
         message=f"Campaign '{doc['campaignName']}' has been deleted.",

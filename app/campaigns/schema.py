@@ -20,9 +20,9 @@ class CampaignStartRequest(BaseModel):
     )
     reminderDelayDays: int = Field(
         default=6,
-        ge=1,
+        ge=0,
         le=15,
-        description="Days after draft completion before the automatic reminder runs",
+        description="Days after draft completion before the automatic reminder runs; 0 starts immediately",
     )
 
     @field_validator("reminderDelayDays", mode="before")
@@ -55,9 +55,9 @@ class CampaignScheduleRequest(BaseModel):
     )
     reminderDelayDays: int = Field(
         default=6,
-        ge=1,
+        ge=0,
         le=15,
-        description="Days after draft completion before the automatic reminder runs",
+        description="Days after draft completion before the automatic reminder runs; 0 starts immediately",
     )
 
     @field_validator("reminderDelayDays", mode="before")

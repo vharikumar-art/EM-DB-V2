@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from app.email_master import service
 from app.email_master.schema import MarkReplyRequest, UpdateReplyRequest
-from app.core.exceptions import BadRequestException, ForbiddenException
+from app.core.exceptions import AlreadyExistsException, BadRequestException, ForbiddenException
 from app.schemas.common import PaginationParams
 
 
@@ -120,7 +120,12 @@ class EmailMasterReplyTests(unittest.TestCase):
         self.assertEqual(request.customReason, "Asked for a proposal")
 
     def test_mark_reply_saves_custom_reason_for_any_reason(self):
-        document = {"_id": ObjectId(), "email": "client@example.com", "hasReply": False}
+        document = {
+            "_id": ObjectId(),
+            "email": "client@example.com",
+            "hasReply": False,
+            "masterEmailId": "master-1",
+        }
         collection = FakeCollection([document])
 
         with patch.object(service, "get_collection", return_value=collection):
@@ -138,6 +143,17 @@ class EmailMasterReplyTests(unittest.TestCase):
         self.assertEqual(result["replyCustomReason"], "Asked for a proposal")
         self.assertEqual(result["replyMarkedBy"], "user-1")
         self.assertEqual(result["replyMarkedByName"], "user-1")
+
+        with patch.object(service, "get_collection", return_value=collection):
+            with self.assertRaises(AlreadyExistsException):
+                asyncio.run(
+                    service.mark_email_reply(
+                        email="client@example.com",
+                        reason="replied",
+                        custom_reason=None,
+                        marked_by="user-1",
+                    )
+                )
 
     def test_list_replies_returns_only_marked_records(self):
         documents = [
@@ -406,7 +422,7 @@ class EmailMasterReplyTests(unittest.TestCase):
         self.assertEqual(result["replyReason"], "converted")
         self.assertEqual(result["replyCustomReason"], "Asked for a proposal")
 
-    def test_delete_by_upload_month_range_uses_inclusive_month_bounds(self):
+    def test_delete_filtered_uses_inclusive_month_date_bounds(self):
         class RangeCollection:
             async def delete_many(self, query):
                 self.query = query
@@ -415,11 +431,9 @@ class EmailMasterReplyTests(unittest.TestCase):
         collection = RangeCollection()
         with patch.object(service, "get_collection", return_value=collection):
             result = asyncio.run(
-                service.delete_emails_by_upload_month_range(
-                    start_month=8,
-                    start_year=2026,
-                    end_month=9,
-                    end_year=2026,
+                service.delete_emails_filtered(
+                    start_date=date(2026, 8, 1),
+                    end_date=date(2026, 9, 30),
                 )
             )
 
@@ -432,18 +446,7 @@ class EmailMasterReplyTests(unittest.TestCase):
             },
         )
 
-    def test_delete_by_upload_month_range_rejects_reversed_range(self):
-        with self.assertRaises(BadRequestException):
-            asyncio.run(
-                service.delete_emails_by_upload_month_range(
-                    start_month=10,
-                    start_year=2026,
-                    end_month=9,
-                    end_year=2026,
-                )
-            )
-
-    def test_delete_by_upload_date_range_includes_both_selected_dates(self):
+    def test_delete_filtered_includes_both_selected_dates(self):
         class RangeCollection:
             async def delete_many(self, query):
                 self.query = query
@@ -452,7 +455,7 @@ class EmailMasterReplyTests(unittest.TestCase):
         collection = RangeCollection()
         with patch.object(service, "get_collection", return_value=collection):
             result = asyncio.run(
-                service.delete_emails_by_upload_date_range(
+                service.delete_emails_filtered(
                     start_date=date(2000, 1, 1),
                     end_date=date(2002, 1, 1),
                 )
@@ -467,14 +470,26 @@ class EmailMasterReplyTests(unittest.TestCase):
             },
         )
 
-    def test_delete_by_upload_date_range_rejects_reversed_range(self):
-        with self.assertRaises(BadRequestException):
-            asyncio.run(
-                service.delete_emails_by_upload_date_range(
+    def test_delete_filtered_reversed_dates_create_nonmatching_bounds(self):
+        class RangeCollection:
+            async def delete_many(self, query):
+                self.query = query
+                return type("DeleteResult", (), {"deleted_count": 0})()
+
+        collection = RangeCollection()
+        with patch.object(service, "get_collection", return_value=collection):
+            result = asyncio.run(
+                service.delete_emails_filtered(
                     start_date=date(2002, 1, 1),
                     end_date=date(2000, 1, 1),
                 )
             )
+
+        self.assertEqual(result["deletedCount"], 0)
+        self.assertGreater(
+            collection.query["uploadedDate"]["$gte"],
+            collection.query["uploadedDate"]["$lt"],
+        )
 
 if __name__ == "__main__":
     unittest.main()

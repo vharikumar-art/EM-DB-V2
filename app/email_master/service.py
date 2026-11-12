@@ -44,7 +44,7 @@ FILTER_DROPDOWN_ID = "global"
 
 
 # Redis dropdown cache
-_DROPDOWN_CACHE_KEY = "email_master_production:dropdown_options"
+_DROPDOWN_CACHE_KEY = "email_master:dropdown_options"
 _DROPDOWN_CACHE_TTL_SECONDS = 30 * 60
 
 
@@ -109,7 +109,7 @@ async def upload_file(
     """
     Parse CSV/XLSX, deduplicate GLOBALLY, insert into email_master.
     Email Master records are permanent and GLOBAL (all employees can see).
-    
+
     Args:
         uploaded_by_id: User ID who uploaded
         uploaded_by_name: User name who uploaded
@@ -242,14 +242,14 @@ async def list_emails(
     end_date: date | None = None,    # used when date_range == "custom"
 ) -> dict:
     """List emails from GLOBAL pool with optional filters.
-    
+
     All filter params support multi-value lists — values are combined with OR logic.
     Comma-separated strings (e.g. 'India,USA') are also accepted and split automatically.
-    
+
     Date filter:
-      date_filter=True + date_range='last_30_days'  → uploaded in last 30 days
-      date_filter=True + date_range='last_3_months' → uploaded in last 90 days
-      date_filter=True + date_range='custom'        → between start_date and end_date
+    date_filter=True + date_range='last_30_days'  → uploaded in last 30 days
+    date_filter=True + date_range='last_3_months' → uploaded in last 90 days
+    date_filter=True + date_range='custom'        → between start_date and end_date
     """
     master = get_collection(COLLECTION)
     query: dict = {}
@@ -370,11 +370,11 @@ async def list_emails(
         .limit(params.pageSize)
     )
     docs = serialize_list([d async for d in cursor])
-    
+
     docs = await _enrich_emails_with_profile_names(docs)
     # Enrich with employee names (batch lookups — no N+1)
     docs = await _enrich_emails_with_employee_names(docs)
-    
+
     return build_paginated_response(docs, total, params)
 
 
@@ -465,6 +465,9 @@ async def _enrich_emails_with_employee_names(docs: list[dict]) -> list[dict]:
 
     # ── Step 2: Batch-fetch employees and users in exactly 2 queries ──────────
     name_cache: dict[str, str] = {}
+    from app.users.unknown import resolve_unknown_employee_ids
+
+    unknown_employee_ids = set(await resolve_unknown_employee_ids())
 
     if valid_object_ids:
         # employees._id → userId mapping
@@ -488,6 +491,9 @@ async def _enrich_emails_with_employee_names(docs: list[dict]) -> list[dict]:
 
         # Build the final cache: raw id → display name
         for raw_id in all_ids:
+            if raw_id in unknown_employee_ids:
+                name_cache[raw_id] = "Unknown"
+                continue
             if not ObjectId.is_valid(raw_id):
                 name_cache[raw_id] = raw_id
                 continue
@@ -523,6 +529,12 @@ async def _enrich_emails_with_employee_names(docs: list[dict]) -> list[dict]:
                     doc["usedByEmployeeIds"].append(id_str)
                     doc["usedByEmployeeNames"].append(name_cache.get(id_str, id_str))
 
+        for index, employee_id in enumerate(doc["usedByEmployeeIds"]):
+            if str(employee_id) in unknown_employee_ids:
+                while len(doc["usedByEmployeeNames"]) <= index:
+                    doc["usedByEmployeeNames"].append("")
+                doc["usedByEmployeeNames"][index] = "Unknown"
+
     return docs
 
 
@@ -533,9 +545,9 @@ async def get_email(email_id: str) -> dict:
     if not doc:
         from app.core.exceptions import NotFoundException
         raise NotFoundException("Email record not found")
-    
+
     doc = serialize_doc(doc)
-    
+
     doc = (await _enrich_emails_with_profile_names([doc]))[0]
     # Enrich with employee name
     docs = await _enrich_emails_with_employee_names([doc])
@@ -564,22 +576,21 @@ async def mark_email_reply(
         "replyMarkedByName": marked_by_name or marked_by,
         "updatedAt": now,
     }
+    email_query = {"email": {"$regex": f"^{normalized_email}$", "$options": "i"}}
     result = await master.update_many(
-        {"email": {"$regex": f"^{normalized_email}$", "$options": "i"}},
+        {**email_query, "hasReply": {"$ne": True}},
         {"$set": update},
     )
-    verify_mail = await master.find_one({"email": {"$regex": f"^{normalized_email}$", "$options": "i"}})
-
-    if verify_mail is None:
-        from app.core.exceptions import NotFoundException
-        raise NotFoundException("Email record not found")
-
-    if verify_mail['hasReply'] == True:
+    if result.matched_count == 0:
+        verify_mail = await master.find_one(email_query)
+        if verify_mail is None:
+            from app.core.exceptions import NotFoundException
+            raise NotFoundException("Email record not found")
         from app.core.exceptions import AlreadyExistsException
         raise AlreadyExistsException("Email already marked as replied")
 
     matched_cursor = master.find(
-        {"email": {"$regex": f"^{normalized_email}$", "$options": "i"}},
+        email_query,
         {"_id": 1},
     )
     master_ids = [doc["_id"] async for doc in matched_cursor]
@@ -595,7 +606,7 @@ async def mark_email_reply(
         )
 
     doc = await master.find_one(
-        {"email": {"$regex": f"^{normalized_email}$", "$options": "i"}},
+        email_query,
         sort=[("replyMarkedAt", -1)],
     )
     return serialize_doc(doc)
@@ -982,7 +993,7 @@ async def delete_emails_filtered(
 ) -> dict:
     """Delete email-master records based on optional filters."""
     query = {}
-    
+
     if start_date or end_date:
         date_query = {}
         if start_date:
@@ -992,9 +1003,9 @@ async def delete_emails_filtered(
             end_exclusive = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=timezone.utc)
             date_query["$lt"] = end_exclusive
         query["uploadedDate"] = date_query
-        
+
     and_conditions = []
-    
+
     if uploaded_by:
         and_conditions.append({
             "$or": [
@@ -1002,7 +1013,7 @@ async def delete_emails_filtered(
                 {"uploadedByName": {"$regex": f"^{re.escape(uploaded_by)}$", "$options": "i"}}
             ]
         })
-        
+
     if domains:
         domain_list = _filter_values(domains)
         if domain_list:
@@ -1012,7 +1023,7 @@ async def delete_emails_filtered(
                     {"domain_group": {"$in": domain_list}}
                 ]
             })
-            
+
     if country:
         country_list = _filter_values(country)
         if country_list:
@@ -1026,7 +1037,7 @@ async def delete_emails_filtered(
 
     master = get_collection(COLLECTION)
     result = await master.delete_many(query)
-    
+
     return {
         "deletedCount": result.deleted_count,
         "filtersApplied": {
@@ -1159,15 +1170,15 @@ async def rebuild_dropdown_filters() -> dict:
     # """Returns dropdown options from the pre-computed filter_dropdowns collection."""
     # global _DROPDOWN_CACHE, _DROPDOWN_CACHE_AT
     # now = datetime.now(timezone.utc)
-    
+
     # if _DROPDOWN_CACHE is not None and _DROPDOWN_CACHE_AT is not None:
     #     age = (now - _DROPDOWN_CACHE_AT).total_seconds()
     #     if age < _DROPDOWN_CACHE_TTL_SECONDS:
     #         return _DROPDOWN_CACHE
-            
+
     # filter_col = get_collection(FILTER_DROPDOWN_COLLECTION)
     # doc = await filter_col.find_one({"_id": FILTER_DROPDOWN_ID})
-    
+
     # if not doc:
     #     result = {
     #         "domains": [], "countries": [], "states": [], "universities": [],
@@ -1247,7 +1258,7 @@ async def get_dropdown_options() -> dict:
 async def get_uploader_stats() -> dict:
     """Get upload contribution statistics by user."""
     master = get_collection(COLLECTION)
-    
+
     try:
         pipeline = [
             {
@@ -1261,7 +1272,7 @@ async def get_uploader_stats() -> dict:
             },
             {"$sort": {"totalEmails": -1}},
         ]
-        
+
         results = await master.aggregate(pipeline).to_list(None)
         return {
             "stats": [
@@ -1393,7 +1404,7 @@ async def query_for_profile(
     """
     Apply profile filters against GLOBAL email_master and return matching unique records.
     Skips emails already assigned to OTHER employees (doesn't count them against filter_limit).
-    
+
     Args:
         filters: Filter criteria (country, domain, domain group, university, type)
         daily_limit: Daily limit for sends (used to determine pool size)
@@ -1402,7 +1413,7 @@ async def query_for_profile(
     """
     master = get_collection(COLLECTION)
     query: dict = {"isDuplicate": False, "hasReply": {"$ne": True}}
-    
+
     # Always skip emails that are currently locked in a profile. Missing legacy
     # fields are treated as unlocked by using $ne rather than matching False.
     query["inProfileEmails"] = {"$ne": True}
@@ -1617,7 +1628,7 @@ async def release_email_locks(master_ids: list[str]) -> None:
     object_ids = [ObjectId(mid) for mid in master_ids if ObjectId.is_valid(mid)]
     if not object_ids:
         return
-        
+
     now = datetime.now(timezone.utc)
     await master.update_many(
         {"_id": {"$in": object_ids}},
@@ -1672,13 +1683,13 @@ async def mark_email_sent(master_email_id: str) -> None:
 async def clear_all_emails() -> dict:
     """ADMIN ONLY: Delete ALL emails from email_master collection. WARNING: Irreversible!"""
     master = get_collection(COLLECTION)
-    
+
     # Get count before deletion
     total_count = await master.count_documents({})
-    
+
     # Delete all documents
     result = await master.delete_many({})
-    
+
     return {
         "message": "Email master table cleared",
         "deletedCount": result.deleted_count,

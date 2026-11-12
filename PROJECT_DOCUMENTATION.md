@@ -275,6 +275,12 @@ Service methods:
 Key behavior:
 - The app supports super-admin, admin, and employee-level access
 - Initial admin/super-admin creation is handled separately to bootstrap the system
+- Deleting a user disables/removes the account but preserves their owned records.
+  The records are grouped under a shared **Unknown** dropdown option, scoped to
+  the deleting user's branch/admin assignment. Profile ownership labels and
+  email-master uploader attribution display as **Unknown**. Admins can reassign
+  a retained profile to an active employee; associated campaigns and profile
+  email rows follow that reassignment.
 
 ---
 

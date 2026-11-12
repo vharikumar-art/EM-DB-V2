@@ -31,6 +31,11 @@ class FakeCollection:
             if document.get("userId") != query.get("userId")
         ]
 
+    async def update_many(self, query, update):
+        for document in self.documents:
+            if document.get("assignedToAdmin") == query.get("assignedToAdmin"):
+                document.update(update["$set"])
+
 
 class UserDeleteNotificationTests(unittest.TestCase):
     def test_delete_user_notifies_before_employee_cascade(self):
@@ -43,16 +48,26 @@ class UserDeleteNotificationTests(unittest.TestCase):
             {"_id": employee_id, "userId": str(user_id), "assignedToAdmin": "admin-1"}
         ])
         notification = AsyncMock()
+        preserve_data = AsyncMock()
 
         def get_collection(name):
             return users if name == "users" else employees
 
         with patch.object(service, "get_collection", side_effect=get_collection), patch(
             "app.notifications.service.create_notification", notification
+        ), patch.object(
+            service, "preserve_deleted_user_data", preserve_data
         ):
             asyncio.run(service.delete_user(str(user_id), actor_role="admin"))
 
         notification.assert_awaited_once()
+        preserve_data.assert_awaited_once_with(
+            user_id=str(user_id),
+            employee_id=str(employee_id),
+            deleted_name="Deleted User",
+            branch=None,
+            assigned_to_admin="admin-1",
+        )
         args = notification.await_args.args
         self.assertEqual(args[0], str(employee_id))
         self.assertEqual(args[1], "User Deleted User was deleted.")

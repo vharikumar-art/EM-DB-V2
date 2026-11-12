@@ -109,6 +109,28 @@ async def resolve_employee_context(
                 branch = (user_doc or {}).get("branch")
             return branch
 
+        if employee_id_param == "000000000000000000000002":
+            from app.users.unknown import resolve_unknown_employee_ids
+
+            if current_user.access_level == "partial":
+                unknown_ids = await resolve_unknown_employee_ids(
+                    assigned_to_admin=employee_id,
+                    include_all=False,
+                )
+            else:
+                unknown_ids = await resolve_unknown_employee_ids(
+                    branch=await _get_admin_branch(),
+                    include_all=False,
+                )
+            unknown_ids = [
+                owner_id
+                for owner_id in unknown_ids
+                if owner_id != "000000000000000000000002"
+            ]
+            if not unknown_ids:
+                raise ForbiddenException("You do not have access to Unknown user data")
+            return unknown_ids, True
+
         if employee_id_param:
             if employee_id_param == employee_id:
                 return employee_id, True
@@ -159,6 +181,23 @@ async def resolve_employee_context(
                     subordinates = []
                     
             allowed_ids = [employee_id] + [str(sub["_id"]) for sub in subordinates if str(sub["_id"]) != employee_id]
+            from app.users.unknown import resolve_unknown_employee_ids
+
+            if current_user.access_level == "partial":
+                unknown_ids = await resolve_unknown_employee_ids(
+                    assigned_to_admin=employee_id,
+                    include_all=False,
+                )
+            else:
+                unknown_ids = await resolve_unknown_employee_ids(
+                    branch=await _get_admin_branch(),
+                    include_all=False,
+                )
+            allowed_ids.extend(
+                owner_id
+                for owner_id in unknown_ids
+                if owner_id != "000000000000000000000002"
+            )
             return allowed_ids, True
             
     return employee_id, False

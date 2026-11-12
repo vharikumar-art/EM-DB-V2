@@ -99,6 +99,7 @@ def test_resolve_employee_context_full_admin_branch_fallback():
         mock_emp_col.find = MagicMock(return_value=mock_cursor)
 
         with patch("app.employees.service.get_employee_by_user_id", new=AsyncMock(return_value=mock_admin_emp)), \
+             patch("app.users.unknown.resolve_unknown_employee_ids", new=AsyncMock(return_value=["000000000000000000000002"])), \
              patch("app.database.mongodb.get_collection") as mock_get_col:
             def side_effect(col_name):
                 if col_name == "users":

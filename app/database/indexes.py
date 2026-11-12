@@ -11,6 +11,11 @@ async def create_indexes() -> None:
     await db["employees"].create_index("userId", unique=True)
     await db["employees"].create_index("employeeCode", unique=True, sparse=True)
 
+    # ── deleted-user ownership mappings ──────────────────────────────────────
+    await db["deleted_user_mappings"].create_index("employeeId")
+    await db["deleted_user_mappings"].create_index("assignedToAdmin")
+    await db["deleted_user_mappings"].create_index("branch")
+
     # ── email_master (permanent lead database) ───────────────────────────────
     await db["email_master"].create_index("email")
     await db["email_master"].create_index("employeeId")
