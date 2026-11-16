@@ -60,7 +60,7 @@ class EmailMasterFilterQuery(BaseModel):
     includeDuplicates: bool = False
 
 
-ReplyReason = Literal["replied", "converted", "other"]
+ReplyReason = Literal["replied", "converted", "other", "Interested" , "Not Interested"]
 
 
 class MarkReplyRequest(BaseModel):
@@ -93,3 +93,11 @@ class EmailMasterUpdate(BaseModel):
     linkedin: str | None = None
     citation: str | None = None
     mailSource: str | None = None
+
+
+class FilterValueUpdate(BaseModel):
+    sourceField: Literal["country", "state", "domain", "city", "university"]
+    sourceValue: str = Field(min_length=1, max_length=200)
+    targetField: Literal["country", "state", "domain", "city", "university"]
+    targetValue: str | None = Field(default=None, max_length=200)
+    overwrite: bool = False

@@ -1,7 +1,16 @@
 from datetime import datetime, timezone
+import os
+from pathlib import Path
+from uuid import uuid4
 
-from app.core.exceptions import ConflictException, ForbiddenException, NotFoundException
-from app.core.security import encrypt_password, hash_password, verify_password
+from app.core.config import settings
+from app.core.exceptions import (
+    BadRequestException,
+    ConflictException,
+    ForbiddenException,
+    NotFoundException,
+)
+from app.core.security import hash_password, verify_password
 from app.database.mongodb import get_collection
 from app.users.model import AdminAccessLevel, UserRole, build_user_document
 from app.users.schema import UserCreate, UserUpdate, PasswordUpdate
@@ -12,9 +21,156 @@ from app.users.unknown import (
     UNKNOWN_USER_ID,
     preserve_deleted_user_data,
 )
-from app.utils.response import serialize_doc, serialize_user_with_password, serialize_list_users_with_password, to_object_id
+from app.utils.response import serialize_doc, serialize_user, serialize_list_users, to_object_id
 
 COLLECTION = "users"
+PROFILE_PICTURE_MAX_BYTES = 5 * 1024 * 1024
+_PROFILE_PICTURE_TYPES = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+)
+
+
+def _profile_picture_media_type(contents: bytes) -> str | None:
+    for signature, media_type in _PROFILE_PICTURE_TYPES:
+        if contents.startswith(signature):
+            return media_type
+    if len(contents) >= 12 and contents[:4] == b"RIFF" and contents[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def _profile_picture_path(user_id: str) -> Path:
+    return settings.profile_picture_storage_path / str(to_object_id(user_id))
+
+
+def _profile_picture_url(user_id: str) -> str | None:
+    if not _profile_picture_path(user_id).is_file():
+        return None
+    return f"/users/{to_object_id(user_id)}/profile-picture"
+
+
+async def get_my_profile(user_id: str) -> dict:
+    doc = await get_collection(COLLECTION).find_one(
+        {"_id": to_object_id(user_id)},
+        {
+            "_id": 1,
+            "name": 1,
+            "email": 1,
+            "phoneNumber": 1,
+            "phone": 1,
+            "branch": 1,
+            "role": 1,
+            "accessLevel": 1,
+            "status": 1,
+            "createdAt": 1,
+            "updatedAt": 1,
+            "systemAccount": 1,
+        },
+    )
+    if not doc or doc.get("systemAccount") == UNKNOWN_MARKER:
+        raise NotFoundException("User not found")
+
+    picture_path = _profile_picture_path(user_id)
+    employee = await get_collection("employees").find_one(
+        {"userId": str(doc["_id"])},
+        {"branch": 1},
+    )
+    profile = serialize_doc(doc)
+    profile.pop("systemAccount", None)
+    profile.pop("password", None)
+    profile.pop("passwordEncrypted", None)
+    profile["phoneNumber"] = doc.get("phoneNumber") or doc.get("phone")
+    profile["branch"] = (employee or {}).get("branch") or doc.get("branch")
+    profile.setdefault("name", "")
+    profile.setdefault("email", "")
+    profile.setdefault("role", UserRole.EMPLOYEE.value)
+    profile.setdefault("accessLevel", AdminAccessLevel.FULL.value)
+    profile.setdefault("status", "active")
+    profile["profilePictureUrl"] = (
+        "/users/me/profile-picture" if picture_path.is_file() else None
+    )
+    return profile
+
+
+async def save_profile_picture(user_id: str, contents: bytes) -> None:
+    user_oid = to_object_id(user_id)
+    users = get_collection(COLLECTION)
+    user = await users.find_one(
+        {"_id": user_oid},
+        {"systemAccount": 1},
+    )
+    if not user or user.get("systemAccount") == UNKNOWN_MARKER:
+        raise NotFoundException("User not found")
+    if len(contents) > PROFILE_PICTURE_MAX_BYTES:
+        raise BadRequestException("Profile picture must be 5 MB or smaller")
+    if not _profile_picture_media_type(contents):
+        raise BadRequestException("Profile picture must be a JPEG, PNG, or WebP image")
+
+    storage_dir = settings.profile_picture_storage_path
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    destination = storage_dir / str(user_oid)
+    temporary_path = storage_dir / f".{user_oid}.{uuid4().hex}.tmp"
+    try:
+        temporary_path.write_bytes(contents)
+        os.replace(temporary_path, destination)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
+
+
+async def remove_profile_picture(user_id: str) -> None:
+    user = await get_collection(COLLECTION).find_one(
+        {"_id": to_object_id(user_id)},
+        {"systemAccount": 1},
+    )
+    if not user or user.get("systemAccount") == UNKNOWN_MARKER:
+        raise NotFoundException("User not found")
+
+    picture_path = _profile_picture_path(user_id)
+    if picture_path.is_file():
+        picture_path.unlink()
+
+
+def get_profile_picture(user_id: str) -> tuple[Path, str]:
+    path = _profile_picture_path(user_id)
+    if not path.is_file():
+        raise NotFoundException("Profile picture not found")
+    with path.open("rb") as picture_file:
+        media_type = _profile_picture_media_type(picture_file.read(12))
+    if not media_type:
+        raise BadRequestException("Stored profile picture has an unsupported format")
+    return path, media_type
+
+
+async def get_admin_user_profile_picture(
+    user_id: str,
+    current_user: CurrentUser,
+) -> tuple[Path, str]:
+    user_oid = to_object_id(user_id)
+    user = await get_collection(COLLECTION).find_one(
+        {"_id": user_oid},
+        {"role": 1, "systemAccount": 1},
+    )
+    if not user or user.get("systemAccount") == UNKNOWN_MARKER:
+        raise NotFoundException("User not found")
+
+    if current_user.role == "admin" and user_id != current_user.user_id:
+        if user.get("role") != UserRole.EMPLOYEE.value:
+            raise ForbiddenException("You do not have access to this user's picture")
+
+        employee = await get_collection("employees").find_one(
+            {"userId": user_id},
+            {"_id": 1},
+        )
+        if not employee:
+            raise ForbiddenException("You do not have access to this user's picture")
+
+        from app.core.dependencies import resolve_employee_context
+
+        await resolve_employee_context(current_user, str(employee["_id"]))
+
+    return get_profile_picture(user_id)
 
 
 async def create_user(payload: UserCreate, current_user: CurrentUser | None = None) -> dict:
@@ -55,7 +211,6 @@ async def create_user(payload: UserCreate, current_user: CurrentUser | None = No
         access_level=access_level,
         hashed_password=hash_password(payload.password),
         role=UserRole(payload.role),
-        encrypted_password=encrypt_password(payload.password),
         branch=payload.branch,
         status=payload.status,
     )
@@ -73,7 +228,7 @@ async def create_user(payload: UserCreate, current_user: CurrentUser | None = No
         employees = get_collection("employees")
         await employees.insert_one(emp_doc)
 
-    return serialize_user_with_password(created)
+    return serialize_user(created)
 
 
 async def create_initial_super_admin(payload: UserCreate) -> dict:
@@ -123,7 +278,7 @@ async def get_user_by_id(user_id: str) -> dict:
     doc = await users.find_one({"_id": to_object_id(user_id)})
     if not doc or doc.get("systemAccount") == UNKNOWN_MARKER:
         raise NotFoundException("User not found")
-    return serialize_user_with_password(doc)
+    return serialize_user(doc)
 
 
 async def list_users(current_user: CurrentUser) -> list[dict]:
@@ -184,7 +339,9 @@ async def list_users(current_user: CurrentUser) -> list[dict]:
     # ── 1. Fetch scoped users ────────────────────────────────────────────────────
     docs = [d async for d in users_col.find(query)]
     docs = [doc for doc in docs if doc.get("systemAccount") != UNKNOWN_MARKER]
-    users = serialize_list_users_with_password(docs)
+    users = serialize_list_users(docs)
+    for user in users:
+        user["profilePictureUrl"] = _profile_picture_url(user["id"])
     user_ids = [u["id"] for u in users]
 
     if not user_ids:
@@ -274,6 +431,11 @@ async def update_user(user_id: str, payload: UserUpdate, current_user: CurrentUs
         raise NotFoundException("User not found")
     if target.get("systemAccount") == UNKNOWN_MARKER:
         raise ForbiddenException("The Unknown system account cannot be modified")
+    if current_user.role == "employee":
+        if str(target["_id"]) != current_user.user_id:
+            raise ForbiddenException("You can only access your own account")
+        if update_data:
+            raise ForbiddenException("Employee account details are read-only")
 
     if "accessLevel" in update_data or "role" in update_data:
         requested_role = update_data.get("role", target.get("role"))
@@ -408,7 +570,7 @@ async def update_user(user_id: str, payload: UserUpdate, current_user: CurrentUs
                     {"$set": {"assignedAdmin": admin_name}},
                 )
 
-    return serialize_user_with_password(result)
+    return serialize_user(result)
 
 
 async def delete_user(
@@ -498,9 +660,15 @@ async def delete_user(
     await employees.delete_many({"userId": user_id})
 
 
-async def update_password(user_id: str, payload: PasswordUpdate) -> dict:
-    from app.core.exceptions import BadRequestException
-    from datetime import datetime, timezone
+async def update_password(
+    user_id: str,
+    payload: PasswordUpdate,
+    current_user: CurrentUser,
+) -> dict:
+    if current_user.role == "employee":
+        raise ForbiddenException("Employees cannot change their password")
+    if user_id != current_user.user_id:
+        raise ForbiddenException("Use the admin password reset endpoint for other accounts")
 
     users = get_collection(COLLECTION)
     user_doc = await users.find_one({"_id": to_object_id(user_id)})
@@ -513,24 +681,54 @@ async def update_password(user_id: str, payload: PasswordUpdate) -> dict:
     if not verify_password(payload.old_password, user_doc.get("password", "")):
         raise BadRequestException("Old password is incorrect")
 
-    # Hash and encrypt new password
+    # Store only a one-way password hash.
     hashed = hash_password(payload.new_password)
-    encrypted = encrypt_password(payload.new_password)
-
-    # Update password
     result = await users.find_one_and_update(
         {"_id": to_object_id(user_id)},
         {
             "$set": {
                 "password": hashed,
-                "passwordEncrypted": encrypted,
                 "updatedAt": datetime.now(timezone.utc)
-            }
+            },
+            "$unset": {"passwordEncrypted": ""},
         },
         return_document=True
     )
 
-    return serialize_user_with_password(result)
+    return serialize_user(result)
+
+
+async def reset_user_password(
+    user_id: str,
+    new_password: str,
+    current_user: CurrentUser,
+) -> dict:
+    if current_user.role not in {"admin", "super_admin"}:
+        raise ForbiddenException("Admin access is required to reset passwords")
+    if current_user.role != "super_admin" and user_id != current_user.user_id:
+        raise ForbiddenException("Only super admins can reset another user's password")
+
+    users = get_collection(COLLECTION)
+    user_doc = await users.find_one({"_id": to_object_id(user_id)})
+    if not user_doc:
+        raise NotFoundException("User not found")
+    if user_doc.get("systemAccount") == UNKNOWN_MARKER:
+        raise ForbiddenException("The Unknown system account cannot be modified")
+
+    result = await users.find_one_and_update(
+        {"_id": to_object_id(user_id)},
+        {
+            "$set": {
+                "password": hash_password(new_password),
+                "updatedAt": datetime.now(timezone.utc),
+            },
+            "$unset": {"passwordEncrypted": ""},
+        },
+        return_document=True,
+    )
+    if not result:
+        raise NotFoundException("User not found")
+    return serialize_user(result)
 
 
 async def migrate_add_branch() -> dict:
@@ -599,7 +797,7 @@ async def get_user_details(
     if not doc or doc.get("systemAccount") == UNKNOWN_MARKER:
         raise NotFoundException("User not found")
 
-    user = serialize_user_with_password(doc)
+    user = serialize_user(doc)
     employee_id = await _resolve_employee_id_for_user(user_id)
     if user_id == UNKNOWN_USER_ID:
         if current_user and current_user.role == "admin":

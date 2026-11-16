@@ -16,6 +16,7 @@ class FilterDropdownTests(unittest.TestCase):
                 "domain": "gmail.com",
                 "domain_group": ["IT", "Agriculture"],
                 "country": "USA",
+                "city": "CHENNAI",
                 "mailSource": "Campaign A",
             },
             {
@@ -32,19 +33,30 @@ class FilterDropdownTests(unittest.TestCase):
         self.assertEqual(query, {"_id": "global"})
         self.assertEqual(update["$addToSet"]["domains"], {"$each": ["gmail.com"]})
         self.assertEqual(update["$addToSet"]["countries"], {"$each": ["USA"]})
+        self.assertEqual(update["$addToSet"]["cities"], {"$each": ["CHENNAI"]})
         self.assertEqual(update["$addToSet"]["uploaders"], {"id": "user-1", "name": "Uploader"})
 
     def test_get_dropdown_options_reads_document_without_distinct(self):
         collection = type(
             "Collection",
             (),
-            {"find_one": AsyncMock(return_value={"_id": "global", "domains": ["gmail.com"], "internal": ["ignored"]})},
+            {
+                "find_one": AsyncMock(
+                    return_value={
+                        "_id": "global",
+                        "domains": ["gmail.com"],
+                        "cities": ["CHENNAI"],
+                        "internal": ["ignored"],
+                    }
+                )
+            },
         )()
 
         with patch.object(service, "get_collection", return_value=collection):
             result = asyncio.run(service.get_dropdown_options())
 
         self.assertEqual(result["domains"], ["gmail.com"])
+        self.assertEqual(result["cities"], ["CHENNAI"])
         self.assertNotIn("internal", result)
         collection.find_one.assert_awaited_once_with({"_id": "global"})
 
@@ -52,7 +64,13 @@ class FilterDropdownTests(unittest.TestCase):
         aggregate_cursor = type(
             "AggregateCursor",
             (),
-            {"to_list": AsyncMock(return_value=[{"domains": ["gmail.com"]}])},
+            {
+                "to_list": AsyncMock(
+                    return_value=[
+                        {"domains": ["gmail.com"], "cities": ["CHENNAI"]}
+                    ]
+                )
+            },
         )()
 
         class MasterCollection:
@@ -70,6 +88,12 @@ class FilterDropdownTests(unittest.TestCase):
                 return documents()
 
         class FilterCollection:
+            async def find_one(self, query, projection=None):
+                return {
+                    "_id": query["_id"],
+                    "usedByEmployees": ["employee-1"],
+                }
+
             async def replace_one(self, query, replacement, upsert=False):
                 self.replacement = replacement
 
@@ -84,9 +108,13 @@ class FilterDropdownTests(unittest.TestCase):
 
         group_fields = master.pipeline[0]["$group"]
         self.assertIn("domains", group_fields)
+        self.assertIn("cities", group_fields)
         self.assertNotIn("domain_groups", group_fields)
         self.assertEqual(filters.replacement["domains"], ["gmail.com"])
+        self.assertEqual(filters.replacement["cities"], ["CHENNAI"])
+        self.assertEqual(filters.replacement["usedByEmployees"], ["employee-1"])
         self.assertEqual(result["domains"], 1)
+        self.assertEqual(result["cities"], 1)
 
 
 if __name__ == "__main__":

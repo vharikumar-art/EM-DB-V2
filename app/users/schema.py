@@ -38,6 +38,24 @@ class UserOut(BaseModel):
     updatedAt: str | None = None
 
 
+class UserProfileOut(BaseModel):
+    id: str
+    name: str
+    email: EmailStr
+    phoneNumber: str | None = None
+    branch: str | None = None
+    role: UserRole
+    accessLevel: AdminAccessLevel = AdminAccessLevel.FULL
+    status: UserStatus
+    profilePictureUrl: str | None = None
+    createdAt: str | None = None
+    updatedAt: str | None = None
+
+
 class PasswordUpdate(BaseModel):
     old_password: str = Field(min_length=8, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class PasswordReset(BaseModel):
     new_password: str = Field(min_length=8, max_length=128)

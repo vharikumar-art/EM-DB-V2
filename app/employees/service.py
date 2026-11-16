@@ -2,7 +2,6 @@ from datetime import datetime, timezone
 
 from app.core.dependencies import CurrentUser
 from app.core.exceptions import ConflictException, NotFoundException, ForbiddenException
-from app.core.security import decrypt_password
 from app.database.mongodb import get_collection
 from app.employees.model import build_employee_document
 from app.employees.schema import EmployeeCreate, EmployeeUpdate
@@ -52,7 +51,7 @@ async def create_employee(payload: EmployeeCreate, current_user: CurrentUser) ->
         raise
 
 
-async def _attach_user_info(employee_doc: dict, include_password: bool = False) -> dict:
+async def _attach_user_info(employee_doc: dict) -> dict:
     users = get_collection("users")
     user = await users.find_one({"_id": to_object_id(employee_doc["userId"])})
     employee_doc["name"] = user["name"] if user else None
@@ -60,8 +59,6 @@ async def _attach_user_info(employee_doc: dict, include_password: bool = False) 
     employee_doc["userStatus"] = user["status"] if user else None
     if not employee_doc.get("branch") and user and user.get("branch"):
         employee_doc["branch"] = user["branch"]
-    if include_password and user and user.get("passwordEncrypted"):
-        employee_doc["password"] = decrypt_password(user["passwordEncrypted"])
     return employee_doc
 
 
@@ -117,8 +114,7 @@ async def list_employees(current_user: CurrentUser | None = None) -> list[dict]:
             query = {"_id": "none"}
     cursor = employees.find(query)
     docs = [serialize_doc(d) async for d in cursor]
-    # include_password=True so the frontend Accounts table can display it
-    return [await _attach_user_info(d, include_password=True) for d in docs]
+    return [await _attach_user_info(d) for d in docs]
 
 
 
@@ -163,7 +159,7 @@ async def get_employee(employee_id: str, current_user: CurrentUser | None = None
         except NotFoundException:
             pass
 
-    return await _attach_user_info(serialize_doc(doc), include_password=True)
+    return await _attach_user_info(serialize_doc(doc))
 
 
 async def get_employee_by_user_id(user_id: str) -> dict:

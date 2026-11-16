@@ -1,8 +1,12 @@
 .venv/
 __pycache__/
 *.pyc
-.env   
+.env
+uploads/profile-pictures-test/
+uploads/profile-pictures-production/
 documents
 !documents/
 documents/*
 !documents/BACKEND_PROJECT_OVERVIEW.md
+academic_domain_normalization_cross_verified.json
+domain_name_mapping.json

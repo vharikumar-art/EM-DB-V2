@@ -20,38 +20,25 @@ def serialize_doc(doc: dict[str, Any] | None) -> dict[str, Any] | None:
     return result
 
 
-def serialize_user_with_password(doc: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Serialize user document and include decrypted password."""
+def serialize_user(doc: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Serialize a user without exposing stored password credentials."""
     if doc is None:
         return None
-    
-    from app.core.security import decrypt_password
-    
+
     result = serialize_doc(doc)
-    
+
     if result:
-        # Keep the response stable for legacy users that may store the field as
-        # `phone` or do not have a phone number yet.
         result.setdefault("phoneNumber", result.get("phone"))
         if result.get("role") == "admin":
             result.setdefault("accessLevel", "full")
         result.pop("password", None)
-        
-        if "passwordEncrypted" in result:
-            try:
-                decrypted_pwd = decrypt_password(result["passwordEncrypted"])
-                result["password"] = decrypted_pwd
-            except Exception:
-                result["password"] = None
-        
         result.pop("passwordEncrypted", None)
-    
+
     return result
 
 
-def serialize_list_users_with_password(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Serialize list of user documents with decrypted passwords."""
-    return [serialize_user_with_password(d) for d in docs]
+def serialize_list_users(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [serialize_user(d) for d in docs]
 
 
 def serialize_list(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:

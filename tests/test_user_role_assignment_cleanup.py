@@ -72,7 +72,7 @@ def test_demoting_admin_unassigns_subordinate_employees(monkeypatch):
         "get_collection",
         lambda name: users if name == "users" else employees,
     )
-    monkeypatch.setattr(service, "serialize_user_with_password", lambda doc: doc)
+    monkeypatch.setattr(service, "serialize_user", lambda doc: doc)
 
     asyncio.run(
         service.update_user(
@@ -102,7 +102,7 @@ def test_promoting_employee_to_admin_clears_its_admin_assignment(monkeypatch):
         "get_collection",
         lambda name: users if name == "users" else employees,
     )
-    monkeypatch.setattr(service, "serialize_user_with_password", lambda doc: doc)
+    monkeypatch.setattr(service, "serialize_user", lambda doc: doc)
 
     asyncio.run(
         service.update_user(
@@ -129,7 +129,7 @@ def test_promoting_employee_to_admin_with_access_level(monkeypatch):
         "get_collection",
         lambda name: users if name == "users" else employees,
     )
-    monkeypatch.setattr(service, "serialize_user_with_password", lambda doc: doc)
+    monkeypatch.setattr(service, "serialize_user", lambda doc: doc)
 
     asyncio.run(
         service.update_user(
@@ -181,7 +181,7 @@ def test_changing_employee_admin_refreshes_profile_admin_name(monkeypatch):
             "profiles": profiles,
         }[name],
     )
-    monkeypatch.setattr(service, "serialize_user_with_password", lambda doc: doc)
+    monkeypatch.setattr(service, "serialize_user", lambda doc: doc)
 
     async def resolve_admin_name(admin_id):
         assert admin_id == admin_employee_id

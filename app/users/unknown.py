@@ -36,7 +36,6 @@ async def ensure_unknown_identity() -> tuple[str, str]:
             "phoneNumber": None,
             "accessLevel": "full",
             "password": hash_password(password),
-            "passwordEncrypted": "",
             "role": "employee",
             "status": "inactive",
             "branch": None,

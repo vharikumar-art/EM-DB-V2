@@ -177,3 +177,4 @@ def test_partial_admin_lists_themselves_and_assigned_employees(monkeypatch):
         str(admin_user_id),
         str(assigned_user_id),
     }
+    assert all(user["profilePictureUrl"] is None for user in result)

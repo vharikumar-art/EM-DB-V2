@@ -14,7 +14,13 @@ from starlette.background import BackgroundTask
 from app.core.dependencies import CurrentUser, get_current_user, require_admin, require_full_admin, require_super_admin, require_write_access
 from app.core.exceptions import BadRequestException
 from app.email_master import service
-from app.email_master.schema import EmailMasterUpdate, MarkReplyRequest, UpdateReplyRequest, UploadResult
+from app.email_master.schema import (
+    EmailMasterUpdate,
+    FilterValueUpdate,
+    MarkReplyRequest,
+    UpdateReplyRequest,
+    UploadResult,
+)
 from app.schemas.common import ApiResponse, PaginationParams
 from app.utils.pagination import pagination_params
 
@@ -379,6 +385,21 @@ async def rebuild_dropdowns(
         data=result,
     )
 
+
+@router.post("/admin/update-filter-value", response_model=ApiResponse)
+async def update_filter_value(
+    payload: FilterValueUpdate,
+    current_user: CurrentUser = Depends(require_full_admin),
+):
+    """Rename or move a country, state, city, domain, or university value."""
+    result = await service.update_filter_value(payload.model_dump())
+    message = (
+        f"Filter update completed: {result['changed']} changed, "
+        f"{result['skipped']} skipped."
+    )
+    if result["overwritten"]:
+        message += f" {result['overwritten']} existing values overwritten."
+    return ApiResponse(message=message, data=result)
 
 
 @router.get("", response_model=ApiResponse)

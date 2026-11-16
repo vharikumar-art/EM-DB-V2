@@ -86,6 +86,28 @@ curl -X POST http://localhost:8000/auth/logout \
 
 > All endpoints require `Authorization: Bearer <admin_access_token>`
 
+### GET /users/me — Get My Account Profile
+
+Returns the authenticated user's read-only account details and an optional profile-picture URL. Passwords are never included.
+
+### PUT /users/me/profile-picture — Upload or Replace My Profile Picture
+
+Send a JPEG, PNG, or WebP image as multipart form field `file` (maximum 5 MB). Images are stored in the directory configured by `PROFILE_PICTURE_STORAGE_DIR`; configure a separate persistent directory for each environment.
+
+### DELETE /users/me/profile-picture — Remove My Profile Picture
+
+Removes the authenticated user's profile picture from disk. Repeated requests succeed even if no picture is present.
+
+### GET /users/me/profile-picture — Get My Profile Picture
+
+Returns the authenticated user's profile picture. Each user can access only their own image.
+
+The admin-only `GET /users` response includes a `profilePictureUrl` for users with an uploaded picture. Admins can fetch pictures only for themselves and employees within their existing access scope; super admins can fetch any listed user's picture using `GET /users/{user_id}/profile-picture`.
+
+### POST /users/{user_id}/password-reset — Admin Password Reset
+
+Full admins can reset their own password; only super admins can reset another user's password. The new password is never returned by the API.
+
 ### POST /employees — Create Employee
 
 **cURL:**
@@ -307,12 +329,52 @@ curl -X POST http://localhost:8000/email-master/count-filtered \
 
 ### GET /email-master/dropdown-options — Get Filter Dropdown Values
 
-Returns distinct values for country, domain, industry, company.
+Returns distinct values for country, state, city, domain, university, and other filter fields.
 
 **cURL:**
 ```bash
 curl http://localhost:8000/email-master/dropdown-options \
   -H "Authorization: Bearer <token>"
+```
+
+---
+
+### POST /email-master/admin/update-filter-value — Rename or Move Filter Values (Full Admin)
+
+Updates matching `email_master` records and linked `profile_emails` copies, then rebuilds the filter dropdowns.
+
+- `sourceField` and `targetField` can each be `country`, `state`, `city`, `domain`, or `university`.
+- Use the same source and target field to rename a value, such as `TAMILNADU` to `TAMIL NADU`. `targetValue` is required.
+- Use different fields to move a value. If omitted, `targetValue` defaults to `sourceValue`.
+- When moving between fields, a populated destination is skipped unless `overwrite` is `true`. A successful move clears the source field.
+- Matching is exact, case-insensitive, and ignores surrounding whitespace. Target values are stored uppercase.
+- The response reports matched, changed, skipped, unchanged, overwritten, and linked profile-copy counts.
+
+**cURL — rename a state value:**
+```bash
+curl -X POST http://localhost:8000/email-master/admin/update-filter-value \
+  -H "Authorization: Bearer <super_admin_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sourceField": "state",
+    "sourceValue": "TAMILNADU",
+    "targetField": "state",
+    "targetValue": "TAMIL NADU",
+    "overwrite": false
+  }'
+```
+
+**cURL — move Country to State and overwrite occupied State values:**
+```bash
+curl -X POST http://localhost:8000/email-master/admin/update-filter-value \
+  -H "Authorization: Bearer <super_admin_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sourceField": "country",
+    "sourceValue": "TAMIL NADU",
+    "targetField": "state",
+    "overwrite": true
+  }'
 ```
 
 ---

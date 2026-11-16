@@ -1,4 +1,5 @@
 from pandas import date_range
+from pymongo import UpdateOne
 import uuid
 import re
 from datetime import date, datetime, time, timedelta, timezone
@@ -26,6 +27,8 @@ from redis.exceptions import RedisError
 COLLECTION = "email_master"
 FILTER_DROPDOWN_COLLECTION = "filter_dropdowns"
 FILTER_DROPDOWN_ID = "global"
+FILTER_EDITABLE_FIELDS = {"country", "state", "city", "domain", "university"}
+FILTER_UPDATE_BATCH_SIZE = 500
 
 # ── In-memory cache for dropdown options ─────────────────────────────────────
 # These values rarely change (only when a new CSV is uploaded), so we cache
@@ -45,6 +48,7 @@ FILTER_DROPDOWN_ID = "global"
 
 # Redis dropdown cache
 _DROPDOWN_CACHE_KEY = "email_master_production:dropdown_options"
+# _DROPDOWN_CACHE_KEY = "email_master:dropdown_options"
 _DROPDOWN_CACHE_TTL_SECONDS = 30 * 60
 
 
@@ -982,6 +986,199 @@ async def update_email(email_id: str, update_data: dict) -> dict:
     return serialize_doc(updated)
 
 
+def _has_filter_value(value: Any) -> bool:
+    return value is not None and (
+        not isinstance(value, str) or bool(value.strip())
+    )
+
+
+def _expected_field_value(doc: dict, field: str) -> dict:
+    if field not in doc:
+        return {"$exists": False}
+    return {"$exists": True, "$eq": doc[field]}
+
+
+async def update_filter_value(update_data: dict) -> dict:
+    source_field = update_data.get("sourceField")
+    target_field = update_data.get("targetField")
+    if source_field not in FILTER_EDITABLE_FIELDS or target_field not in FILTER_EDITABLE_FIELDS:
+        raise BadRequestException(
+            "Only country, state, city, domain, and university fields can be changed"
+        )
+
+    source_value = str(update_data.get("sourceValue") or "").strip()
+    if not source_value:
+        raise BadRequestException("sourceValue cannot be empty")
+
+    requested_target_value = update_data.get("targetValue")
+    if source_field == target_field and requested_target_value is None:
+        raise BadRequestException(
+            "targetValue is required when renaming a value in the same field"
+        )
+    target_value = str(
+        requested_target_value
+        if requested_target_value is not None
+        else source_value
+    ).strip().upper()
+    if not target_value:
+        raise BadRequestException("targetValue cannot be empty")
+
+    overwrite = bool(update_data.get("overwrite", False))
+    source_pattern = re.compile(
+        rf"^\s*{re.escape(source_value)}\s*$",
+        re.IGNORECASE,
+    )
+    source_query = {source_field: source_pattern}
+    master = get_collection(COLLECTION)
+    profile_emails = get_collection("profile_emails")
+
+    matched = 0
+    changed = 0
+    skipped = 0
+    overwritten = 0
+    profile_emails_changed = 0
+
+    async def process_batch(batch: list[dict]) -> None:
+        nonlocal matched, changed, skipped, overwritten, profile_emails_changed
+        matched += len(batch)
+        master_ids = [str(doc["_id"]) for doc in batch]
+        profile_query = {
+            "masterEmailId": {"$in": master_ids},
+            source_field: source_pattern,
+        }
+        projection = {"masterEmailId": 1, source_field: 1, target_field: 1}
+        profile_docs_by_master: dict[str, list[dict]] = {}
+        async for profile_doc in profile_emails.find(profile_query, projection):
+            profile_docs_by_master.setdefault(
+                profile_doc.get("masterEmailId", ""),
+                [],
+            ).append(profile_doc)
+
+        conflict_ids: set[str] = set()
+        if source_field != target_field and not overwrite:
+            for doc in batch:
+                master_id = str(doc["_id"])
+                if _has_filter_value(doc.get(target_field)):
+                    conflict_ids.add(master_id)
+                if any(
+                    _has_filter_value(profile_doc.get(target_field))
+                    for profile_doc in profile_docs_by_master.get(master_id, [])
+                ):
+                    conflict_ids.add(master_id)
+
+        master_operations = []
+        profile_operations = []
+        for doc in batch:
+            master_id = str(doc["_id"])
+            if master_id in conflict_ids:
+                skipped += 1
+                continue
+            if source_field == target_field and doc.get(source_field) == target_value:
+                continue
+
+            if (
+                source_field != target_field
+                and overwrite
+                and _has_filter_value(doc.get(target_field))
+                and str(doc.get(target_field)).strip() != target_value
+            ):
+                overwritten += 1
+
+            master_filter = {
+                "_id": doc["_id"],
+                source_field: source_pattern,
+            }
+            update_fields = {target_field: target_value}
+            if source_field != target_field:
+                master_filter[target_field] = _expected_field_value(doc, target_field)
+                update_fields[source_field] = ""
+            master_operations.append(
+                UpdateOne(master_filter, {"$set": update_fields})
+            )
+
+            for profile_doc in profile_docs_by_master.get(master_id, []):
+                if (
+                    source_field == target_field
+                    and profile_doc.get(source_field) == target_value
+                ):
+                    continue
+                profile_filter = {
+                    "_id": profile_doc["_id"],
+                    "masterEmailId": master_id,
+                    source_field: source_pattern,
+                }
+                profile_updates = {target_field: target_value}
+                if source_field != target_field:
+                    profile_filter[target_field] = _expected_field_value(
+                        profile_doc, target_field
+                    )
+                    profile_updates[source_field] = ""
+                profile_operations.append(
+                    UpdateOne(profile_filter, {"$set": profile_updates})
+                )
+
+        if master_operations:
+            result = await master.bulk_write(master_operations, ordered=False)
+            if result.matched_count != len(master_operations):
+                raise RuntimeError(
+                    "Some email records changed concurrently; "
+                    "profile-email updates were not applied for this batch"
+                )
+            changed += result.modified_count
+
+        if profile_operations:
+            result = await profile_emails.bulk_write(
+                profile_operations,
+                ordered=False,
+            )
+            if result.matched_count != len(profile_operations):
+                raise RuntimeError(
+                    "Some profile-email copies changed concurrently; "
+                    "review the linked records before retrying"
+                )
+            profile_emails_changed += result.modified_count
+
+    last_id = None
+    while True:
+        page_query = source_query
+        if last_id is not None:
+            page_query = {
+                "$and": [
+                    source_query,
+                    {"_id": {"$gt": last_id}},
+                ]
+            }
+        batch = await master.find(
+            page_query,
+            {"_id": 1, source_field: 1, target_field: 1},
+        ).sort("_id", 1).limit(FILTER_UPDATE_BATCH_SIZE).to_list(
+            length=FILTER_UPDATE_BATCH_SIZE
+        )
+        if not batch:
+            break
+        await process_batch(batch)
+        last_id = batch[-1]["_id"]
+
+    dropdown_counts = None
+    if changed:
+        dropdown_counts = await rebuild_dropdown_filters()
+
+    return {
+        "sourceField": source_field,
+        "sourceValue": source_value,
+        "targetField": target_field,
+        "targetValue": target_value,
+        "overwrite": overwrite,
+        "matched": matched,
+        "changed": changed,
+        "skipped": skipped,
+        "unchanged": matched - changed - skipped,
+        "overwritten": overwritten,
+        "profileEmailsChanged": profile_emails_changed,
+        "dropdowns": dropdown_counts,
+    }
+
+
 
 
 async def delete_emails_filtered(
@@ -1068,6 +1265,7 @@ async def _update_dropdown_filters(docs_to_insert: list[dict], uploaded_by_id: s
             "domains": values_for("domain"),
             "countries": values_for("country"),
             "states": values_for("state"),
+            "cities": values_for("city"),
             "universities": values_for("university"),
             "designations": values_for("designation"),
             "mailSources": values_for("mailSource"),
@@ -1097,6 +1295,10 @@ async def rebuild_dropdown_filters() -> dict:
     stale country/domain/state options."""
     master = get_collection(COLLECTION)
     filter_col = get_collection(FILTER_DROPDOWN_COLLECTION)
+    existing_filter_doc = await filter_col.find_one(
+        {"_id": FILTER_DROPDOWN_ID},
+        {"usedByEmployees": 1},
+    )
 
     pipeline = [
         {
@@ -1104,6 +1306,7 @@ async def rebuild_dropdown_filters() -> dict:
                 "_id": None,
                 "countries":      {"$addToSet": "$country"},
                 "states":         {"$addToSet": "$state"},
+                "cities":         {"$addToSet": "$city"},
                 "universities":   {"$addToSet": "$university"},
                 "designations":   {"$addToSet": "$designation"},
                 "mailSources":    {"$addToSet": "$mailSource"},
@@ -1122,11 +1325,12 @@ async def rebuild_dropdown_filters() -> dict:
         all_domains = _clean(row.get("domains"))
         countries    = _clean(row.get("countries"))
         states       = _clean(row.get("states"))
+        cities       = _clean(row.get("cities"))
         universities = _clean(row.get("universities"))
         designations = _clean(row.get("designations"))
         mail_sources = _clean(row.get("mailSources"))
     else:
-        all_domains = countries = states = universities = designations = mail_sources = []
+        all_domains = countries = states = cities = universities = designations = mail_sources = []
 
     # Rebuild unique uploader list
     uploaders: list[dict] = []
@@ -1142,12 +1346,13 @@ async def rebuild_dropdown_filters() -> dict:
         "_id":             FILTER_DROPDOWN_ID,
         "countries":       countries,
         "states":          states,
+        "cities":          cities,
         "universities":    universities,
         "designations":    designations,
         "mailSources":     mail_sources,
         "domains":         all_domains,
         "uploaders":       uploaders,
-        "usedByEmployees": [],
+        "usedByEmployees": (existing_filter_doc or {}).get("usedByEmployees", []),
         "lastUpdated":     datetime.now(timezone.utc),
     }
 
@@ -1158,6 +1363,7 @@ async def rebuild_dropdown_filters() -> dict:
     return {
         "countries":    len(countries),
         "states":       len(states),
+        "cities":       len(cities),
         "universities": len(universities),
         "designations": len(designations),
         "mailSources":  len(mail_sources),
@@ -1220,6 +1426,7 @@ async def get_dropdown_options() -> dict:
             "domains": [],
             "countries": [],
             "states": [],
+            "cities": [],
             "universities": [],
             "designations": [],
             "mailSources": [],
@@ -1233,6 +1440,7 @@ async def get_dropdown_options() -> dict:
                 "domains",
                 "countries",
                 "states",
+                "cities",
                 "universities",
                 "designations",
                 "mailSources",
