@@ -440,10 +440,40 @@ async def _run(campaign_id: str) -> None:
 
             original_message_id = None
             references = None
+            reminder_stage = 1
             if mail_type == "reminder":
-                payload["subject"] = pe["draftSubject"]
-                original_message_id = pe.get("draftMessageId") or pe.get("messageId")
-                references = original_message_id
+                reminder_stage = int(campaign.get("reminderStage") or 1)
+                payload["subject"] = (
+                    pe.get("reminderSubject") or pe["draftSubject"]
+                    if reminder_stage == 2
+                    else pe["draftSubject"]
+                )
+                if reminder_stage == 2:
+                    original_message_id = pe.get("reminderMessageId")
+                    if not original_message_id:
+                        await pe_service.mark_failed(
+                            pe_id,
+                            "Reminder 1 message ID is missing; cannot thread Reminder 2.",
+                        )
+                        await campaign_service.increment_counters(
+                            campaign_id,
+                            failed=1,
+                        )
+                        total_failed += 1
+                        continue
+                    references = " ".join(
+                        message_id
+                        for message_id in (
+                            pe.get("draftMessageId"),
+                            original_message_id,
+                        )
+                        if message_id
+                    )
+                else:
+                    original_message_id = (
+                        pe.get("draftMessageId") or pe.get("messageId")
+                    )
+                    references = original_message_id
 
             # ----------------------------------------------------------
             # Send
@@ -476,13 +506,25 @@ async def _run(campaign_id: str) -> None:
                 sent_subject = payload.get("subject")
                 if not isinstance(sent_subject, str):
                     sent_subject = subject_text
+                mark_sent_kwargs = {
+                    "template_id": selected_template_id,
+                    "mail_type": mail_type,
+                    "subject": sent_subject,
+                }
+                if mail_type == "reminder":
+                    mark_sent_kwargs["reminder_stage"] = reminder_stage
+                sent_thread_id = result.thread_id
+                if mail_type == "reminder":
+                    sent_thread_id = (
+                        pe.get("draftMessageId")
+                        or pe.get("threadId")
+                        or result.thread_id
+                    )
                 await pe_service.mark_sent(
                     pe_id,
-                    result.thread_id,
+                    sent_thread_id,
                     result.message_id,
-                    template_id=selected_template_id,
-                    mail_type=mail_type,
-                    subject=sent_subject,
+                    **mark_sent_kwargs,
                 )
                 if pe.get("masterEmailId"):
                     await mark_email_sent(pe["masterEmailId"])

@@ -413,6 +413,7 @@ async def list_emails(
     mailSource: List[str] = Query(default=[]),
     search: str | None = Query(default=None),
     includeDuplicates: bool = Query(default=True),
+    # uploadedDate: str | None = Query(default=None, description="Filter by upload date: last_30_days | last_3_months | custom"),
     # ── Date filter ─────────────────────────────────────────────────────────
     dateFilter: bool = Query(default=False, description="Enable upload-date filtering"),
     dateRange: str | None = Query(
@@ -439,11 +440,20 @@ async def list_emails(
     # Parse custom date strings if provided
     parsed_start: date | None = None
     parsed_end: date | None = None
-    if dateFilter and dateRange == "custom":
-        if startDate:
+    if dateFilter:
+        if dateRange not in {"last_30_days", "last_3_months", "custom"}:
+            raise BadRequestException(
+                "dateRange must be last_30_days, last_3_months, or custom when dateFilter is true"
+            )
+        if dateRange == "custom":
+            if not startDate or not endDate:
+                raise BadRequestException(
+                    "startDate and endDate are required when dateRange is custom"
+                )
             parsed_start = _parse_date_range_param(startDate, "startDate")
-        if endDate:
             parsed_end = _parse_date_range_param(endDate, "endDate")
+            if parsed_start > parsed_end:
+                raise BadRequestException("startDate must be on or before endDate")
 
     result = await service.list_emails(
         params,

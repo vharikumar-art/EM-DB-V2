@@ -10,7 +10,7 @@ from app.core.exceptions import (
     ForbiddenException,
     NotFoundException,
 )
-from app.core.security import hash_password, verify_password
+from app.core.security import encrypt_password, hash_password, verify_password
 from app.database.mongodb import get_collection
 from app.users.model import AdminAccessLevel, UserRole, build_user_document
 from app.users.schema import UserCreate, UserUpdate, PasswordUpdate
@@ -21,7 +21,12 @@ from app.users.unknown import (
     UNKNOWN_USER_ID,
     preserve_deleted_user_data,
 )
-from app.utils.response import serialize_doc, serialize_user, serialize_list_users, to_object_id
+from app.utils.response import (
+    serialize_doc,
+    serialize_list_users_with_password,
+    serialize_user,
+    to_object_id,
+)
 
 COLLECTION = "users"
 PROFILE_PICTURE_MAX_BYTES = 5 * 1024 * 1024
@@ -81,7 +86,7 @@ async def get_my_profile(user_id: str) -> dict:
     profile.pop("password", None)
     profile.pop("passwordEncrypted", None)
     profile["phoneNumber"] = doc.get("phoneNumber") or doc.get("phone")
-    profile["branch"] = (employee or {}).get("branch") or doc.get("branch")
+    profile["branch"] = doc.get("branch") or (employee or {}).get("branch")
     profile.setdefault("name", "")
     profile.setdefault("email", "")
     profile.setdefault("role", UserRole.EMPLOYEE.value)
@@ -143,32 +148,14 @@ def get_profile_picture(user_id: str) -> tuple[Path, str]:
     return path, media_type
 
 
-async def get_admin_user_profile_picture(
-    user_id: str,
-    current_user: CurrentUser,
-) -> tuple[Path, str]:
+async def get_user_profile_picture(user_id: str) -> tuple[Path, str]:
     user_oid = to_object_id(user_id)
     user = await get_collection(COLLECTION).find_one(
         {"_id": user_oid},
-        {"role": 1, "systemAccount": 1},
+        {"systemAccount": 1},
     )
     if not user or user.get("systemAccount") == UNKNOWN_MARKER:
         raise NotFoundException("User not found")
-
-    if current_user.role == "admin" and user_id != current_user.user_id:
-        if user.get("role") != UserRole.EMPLOYEE.value:
-            raise ForbiddenException("You do not have access to this user's picture")
-
-        employee = await get_collection("employees").find_one(
-            {"userId": user_id},
-            {"_id": 1},
-        )
-        if not employee:
-            raise ForbiddenException("You do not have access to this user's picture")
-
-        from app.core.dependencies import resolve_employee_context
-
-        await resolve_employee_context(current_user, str(employee["_id"]))
 
     return get_profile_picture(user_id)
 
@@ -211,6 +198,7 @@ async def create_user(payload: UserCreate, current_user: CurrentUser | None = No
         access_level=access_level,
         hashed_password=hash_password(payload.password),
         role=UserRole(payload.role),
+        encrypted_password=encrypt_password(payload.password),
         branch=payload.branch,
         status=payload.status,
     )
@@ -339,7 +327,7 @@ async def list_users(current_user: CurrentUser) -> list[dict]:
     # ── 1. Fetch scoped users ────────────────────────────────────────────────────
     docs = [d async for d in users_col.find(query)]
     docs = [doc for doc in docs if doc.get("systemAccount") != UNKNOWN_MARKER]
-    users = serialize_list_users(docs)
+    users = serialize_list_users_with_password(docs)
     for user in users:
         user["profilePictureUrl"] = _profile_picture_url(user["id"])
     user_ids = [u["id"] for u in users]
@@ -547,6 +535,8 @@ async def update_user(user_id: str, payload: UserUpdate, current_user: CurrentUs
     if assigned_to_admin is not None or branch is not None:
         employees = get_collection("employees")
         emp_update = {"updatedAt": datetime.now(timezone.utc)}
+        if branch is not None:
+            emp_update["branch"] = branch
         if assigned_to_admin is not None:
             # If empty string, treat as unassign (None)
             emp_update["assignedToAdmin"] = assigned_to_admin if assigned_to_admin else None
@@ -665,36 +655,83 @@ async def update_password(
     payload: PasswordUpdate,
     current_user: CurrentUser,
 ) -> dict:
+    users, user_doc = await _get_authorized_password_target(user_id, current_user)
+    if user_id == current_user.user_id:
+        if not payload.old_password:
+            raise BadRequestException("Old password is required")
+        if not verify_password(payload.old_password, user_doc.get("password", "")):
+            raise BadRequestException("Old password is incorrect")
+
+    return await _save_user_password(users, user_id, payload.new_password)
+
+
+async def _get_authorized_password_target(
+    user_id: str,
+    current_user: CurrentUser,
+):
     if current_user.role == "employee":
         raise ForbiddenException("Employees cannot change their password")
-    if user_id != current_user.user_id:
-        raise ForbiddenException("Use the admin password reset endpoint for other accounts")
+    if current_user.role not in {"admin", "super_admin"}:
+        raise ForbiddenException("Admin access is required to change passwords")
 
     users = get_collection(COLLECTION)
-    user_doc = await users.find_one({"_id": to_object_id(user_id)})
+    target_id = to_object_id(user_id)
+    user_doc = await users.find_one({"_id": target_id})
     if not user_doc:
         raise NotFoundException("User not found")
     if user_doc.get("systemAccount") == UNKNOWN_MARKER:
         raise ForbiddenException("The Unknown system account cannot be modified")
 
-    # Verify old password
-    if not verify_password(payload.old_password, user_doc.get("password", "")):
-        raise BadRequestException("Old password is incorrect")
+    if user_id == current_user.user_id or current_user.role == "super_admin":
+        return users, user_doc
 
-    # Store only a one-way password hash.
-    hashed = hash_password(payload.new_password)
+    if current_user.access_level != "full":
+        raise ForbiddenException("Full access is required to change employee passwords")
+    if user_doc.get("role") != "employee":
+        raise ForbiddenException("Admins can only change passwords for branch employees")
+
+    employees = get_collection("employees")
+    admin_employee = await employees.find_one({"userId": current_user.user_id})
+    target_employee = await employees.find_one({"userId": user_id})
+    admin_user = await users.find_one(
+        {"_id": to_object_id(current_user.user_id)},
+        {"branch": 1},
+    )
+    admin_branch = (
+        (admin_employee or {}).get("branch")
+        or (admin_user or {}).get("branch")
+        or ""
+    )
+    target_branch = (
+        (target_employee or {}).get("branch")
+        or user_doc.get("branch")
+        or ""
+    )
+    if (
+        not admin_branch
+        or not target_branch
+        or str(admin_branch).strip().casefold()
+        != str(target_branch).strip().casefold()
+    ):
+        raise ForbiddenException("You can only change passwords for employees in your branch")
+
+    return users, user_doc
+
+
+async def _save_user_password(users, user_id: str, new_password: str) -> dict:
     result = await users.find_one_and_update(
         {"_id": to_object_id(user_id)},
         {
             "$set": {
-                "password": hashed,
-                "updatedAt": datetime.now(timezone.utc)
+                "password": hash_password(new_password),
+                "passwordEncrypted": encrypt_password(new_password),
+                "updatedAt": datetime.now(timezone.utc),
             },
-            "$unset": {"passwordEncrypted": ""},
         },
-        return_document=True
+        return_document=True,
     )
-
+    if not result:
+        raise NotFoundException("User not found")
     return serialize_user(result)
 
 
@@ -703,32 +740,8 @@ async def reset_user_password(
     new_password: str,
     current_user: CurrentUser,
 ) -> dict:
-    if current_user.role not in {"admin", "super_admin"}:
-        raise ForbiddenException("Admin access is required to reset passwords")
-    if current_user.role != "super_admin" and user_id != current_user.user_id:
-        raise ForbiddenException("Only super admins can reset another user's password")
-
-    users = get_collection(COLLECTION)
-    user_doc = await users.find_one({"_id": to_object_id(user_id)})
-    if not user_doc:
-        raise NotFoundException("User not found")
-    if user_doc.get("systemAccount") == UNKNOWN_MARKER:
-        raise ForbiddenException("The Unknown system account cannot be modified")
-
-    result = await users.find_one_and_update(
-        {"_id": to_object_id(user_id)},
-        {
-            "$set": {
-                "password": hash_password(new_password),
-                "updatedAt": datetime.now(timezone.utc),
-            },
-            "$unset": {"passwordEncrypted": ""},
-        },
-        return_document=True,
-    )
-    if not result:
-        raise NotFoundException("User not found")
-    return serialize_user(result)
+    users, _ = await _get_authorized_password_target(user_id, current_user)
+    return await _save_user_password(users, user_id, new_password)
 
 
 async def migrate_add_branch() -> dict:

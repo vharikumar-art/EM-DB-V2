@@ -200,6 +200,17 @@ async def update_employee(employee_id: str, payload: EmployeeUpdate, current_use
     if not result:
         raise NotFoundException("Employee not found")
 
+    if "branch" in update_data and existing.get("userId"):
+        await get_collection("users").update_one(
+            {"_id": to_object_id(existing["userId"])},
+            {
+                "$set": {
+                    "branch": update_data["branch"],
+                    "updatedAt": update_data["updatedAt"],
+                }
+            },
+        )
+
     # If assignedToAdmin changed, cascade to all profiles for this employee
     if "assignedToAdmin" in update_data:
         new_admin_emp_id = str(update_data["assignedToAdmin"] or "")

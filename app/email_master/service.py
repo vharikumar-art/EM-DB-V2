@@ -146,7 +146,7 @@ async def upload_file(
 
     docs_to_insert: list[dict] = []
     seen_in_batch: set[str] = set()
-    duplicate_existing_ids: set[Any] = set()
+    # duplicate_existing_ids: set[Any] = set()
     unique_count = 0
     duplicate_count = 0
 
@@ -155,8 +155,8 @@ async def upload_file(
         is_dup = email_addr in existing_emails or email_addr in seen_in_batch
         if is_dup:
             duplicate_count += 1
-            if email_addr in existing_emails:
-                duplicate_existing_ids.add(existing_emails[email_addr])
+            # if email_addr in existing_emails:
+            #     duplicate_existing_ids.add(existing_emails[email_addr])
             if not insert_duplicates:
                 continue
         else:
@@ -176,17 +176,17 @@ async def upload_file(
                 row=row,
             )
         )
-    if duplicate_existing_ids:
-        await master.update_many(
-            {"_id": {"$in": list(duplicate_existing_ids)}},
-            {
-                "$set": {
-                    "uploadedDate": datetime.now(timezone.utc),
-                    "uploadedBy": uploaded_by_id,
-                    "uploadedByName": uploaded_by_name,
-                }
-            },
-        )
+    # if duplicate_existing_ids:
+    #     await master.update_many(
+    #         {"_id": {"$in": list(duplicate_existing_ids)}},
+    #         {
+    #             "$set": {
+    #                 "uploadedDate": datetime.now(timezone.utc),
+    #                 "uploadedBy": uploaded_by_id,
+    #                 "uploadedByName": uploaded_by_name,
+    #             }
+    #         },
+    #     )
     if docs_to_insert:
         await master.insert_many(docs_to_insert)
         await _update_dropdown_filters(docs_to_insert, uploaded_by_id, uploaded_by_name)
@@ -351,9 +351,10 @@ async def list_emails(
                     0, 0, 0, tzinfo=timezone.utc
                 )
             if end_date:
-                date_query["$lte"] = datetime(
-                    end_date.year, end_date.month, end_date.day,
-                    23, 59, 59, tzinfo=timezone.utc
+                date_query["$lt"] = datetime.combine(
+                    end_date + timedelta(days=1),
+                    time.min,
+                    tzinfo=timezone.utc,
                 )
             if date_query:
                 query["uploadedDate"] = date_query

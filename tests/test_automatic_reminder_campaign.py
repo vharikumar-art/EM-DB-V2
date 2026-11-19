@@ -29,7 +29,7 @@ class AsyncDocs:
 @pytest.mark.parametrize(
     ("reminder_delay_days", "expected_scheduled_for"),
     [
-        (None, datetime(2026, 11, 7, 9, 30, tzinfo=timezone.utc)),
+        (None, datetime(2026, 11, 2, 9, 30, tzinfo=timezone.utc)),
         (0, datetime(2026, 11, 1, 9, 30, tzinfo=timezone.utc)),
         (2, datetime(2026, 11, 3, 9, 30, tzinfo=timezone.utc)),
     ],
@@ -49,6 +49,9 @@ async def test_completed_draft_campaign_schedules_reminder_after_configured_dela
         "mailType": "draft",
         "status": "completed",
         "completedAt": completed_at,
+        "autoReminder2Enabled": True,
+        "reminder2DelayDays": 3,
+        "reminder2AutomationStatus": "pending",
     }
     if reminder_delay_days is not None:
         source_campaign["reminderDelayDays"] = reminder_delay_days
@@ -112,6 +115,9 @@ async def test_completed_draft_campaign_schedules_reminder_after_configured_dela
     assert reminder_campaign["status"] == "scheduled"
     assert reminder_campaign["totalEmails"] == 2
     assert reminder_campaign["scheduledFor"] == expected_scheduled_for
+    assert reminder_campaign["reminderStage"] == 1
+    assert reminder_campaign["autoReminder2Enabled"] is True
+    assert reminder_campaign["reminder2DelayDays"] == 3
     assert claim_queries[0]["reminderAutomationStatus"] == {
         "$in": [None, "skipped", "failed"]
     }
@@ -137,6 +143,142 @@ async def test_completed_draft_campaign_schedules_reminder_after_configured_dela
         )
     else:
         dispatch_campaign_now.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_completed_reminder1_schedules_reminder2_once_from_completion_time():
+    reminder1_id = ObjectId()
+    reminder2_id = ObjectId()
+    completed_at = datetime(2026, 11, 1, 9, 30, tzinfo=timezone.utc)
+    source_campaign = {
+        "_id": reminder1_id,
+        "campaignName": "Initial campaign - Reminder",
+        "profileId": "profile1",
+        "employeeId": "employee1",
+        "mailType": "reminder",
+        "reminderStage": 1,
+        "sourceCampaignId": str(ObjectId()),
+        "status": "completed",
+        "completedAt": completed_at,
+        "autoReminder2Enabled": True,
+        "reminder2DelayDays": 3,
+        "reminder2AutomationStatus": "pending",
+        "dailyLimit": 25,
+        "profileSnapshot": {"reminderTemplates": [{"body": "Checking in"}]},
+    }
+    inserted_documents = []
+
+    class FakeCampaigns:
+        async def update_one(self, query, update):
+            if query["_id"] == reminder1_id:
+                status_condition = query.get("reminder2AutomationStatus")
+                status_filter = (
+                    status_condition.get("$in")
+                    if isinstance(status_condition, dict)
+                    else None
+                )
+                if status_filter:
+                    if (
+                        source_campaign["status"] != query["status"]
+                        or source_campaign["reminder2AutomationStatus"]
+                        not in status_filter
+                    ):
+                        return SimpleNamespace(modified_count=0)
+                    source_campaign.update(update["$set"])
+                    return SimpleNamespace(modified_count=1)
+                if (
+                    status_condition
+                    and source_campaign["reminder2AutomationStatus"]
+                    != status_condition
+                ):
+                    return SimpleNamespace(modified_count=0)
+                source_campaign.update(update["$set"])
+                return SimpleNamespace(modified_count=1)
+
+            campaign = next(
+                doc for doc in inserted_documents if doc["_id"] == query["_id"]
+            )
+            campaign.update(update["$set"])
+            return SimpleNamespace(modified_count=1)
+
+        async def find_one(self, query, _projection=None):
+            if query.get("_id") == reminder1_id:
+                return source_campaign
+            return next(
+                (
+                    doc
+                    for doc in inserted_documents
+                    if doc.get("sourceReminderCampaignId")
+                    == query.get("sourceReminderCampaignId")
+                ),
+                None,
+            )
+
+        async def insert_one(self, document):
+            inserted = {**document, "_id": reminder2_id}
+            inserted_documents.append(inserted)
+            return SimpleNamespace(inserted_id=reminder2_id)
+
+    class FakeProfileEmails:
+        async def count_documents(self, query):
+            if query["campaignId"] == str(reminder1_id):
+                return 2
+            return 2
+
+    campaigns = FakeCampaigns()
+    profile_emails = FakeProfileEmails()
+    queue_recipients = AsyncMock(return_value=2)
+
+    with (
+        patch.object(
+            service,
+            "get_collection",
+            side_effect=lambda name: (
+                campaigns if name == "campaigns" else profile_emails
+            ),
+        ),
+        patch.object(
+            service,
+            "get_profile",
+            new_callable=AsyncMock,
+            return_value={
+                "isActive": True,
+                "profileName": "Demo",
+                "reminderTemplates": [{"body": "Checking in"}],
+                "sendingOptions": {"dailyLimit": 25},
+            },
+        ),
+        patch.object(
+            profile_email_service,
+            "queue_sent_reminders_for_second_campaign",
+            queue_recipients,
+        ),
+        patch.object(service, "create_notification", new_callable=AsyncMock),
+    ):
+        await service.schedule_automatic_second_reminder_campaign(
+            str(reminder1_id)
+        )
+        await service.schedule_automatic_second_reminder_campaign(
+            str(reminder1_id)
+        )
+
+    assert len(inserted_documents) == 1
+    reminder2 = inserted_documents[0]
+    assert reminder2["mailType"] == "reminder"
+    assert reminder2["reminderStage"] == 2
+    assert reminder2["sourceReminderCampaignId"] == str(reminder1_id)
+    assert reminder2["scheduledFor"] == datetime(
+        2026, 11, 4, 9, 30, tzinfo=timezone.utc
+    )
+    assert reminder2["totalEmails"] == 2
+    assert source_campaign["reminder2AutomationStatus"] == "scheduled"
+    assert source_campaign["reminder2CampaignId"] == str(reminder2_id)
+    assert source_campaign["reminder2ScheduledFor"] == reminder2["scheduledFor"]
+    queue_recipients.assert_awaited_once_with(
+        profile_id="profile1",
+        reminder1_campaign_id=str(reminder1_id),
+        reminder2_campaign_id=str(reminder2_id),
+    )
 
 
 @pytest.mark.anyio
@@ -628,7 +770,7 @@ async def test_completed_campaign_with_legacy_rows_schedules_recovered_reminders
     assert reminder_campaign["status"] == "scheduled"
     assert reminder_campaign["totalEmails"] == 6
     assert reminder_campaign["scheduledFor"] == datetime(
-        2026, 11, 7, 9, 30, tzinfo=timezone.utc
+        2026, 11, 2, 9, 30, tzinfo=timezone.utc
     )
     assert source_campaign["reminderAutomationStatus"] == "scheduled"
     assert source_campaign["reminderCampaignId"] == str(reminder_id)

@@ -5,6 +5,8 @@ import pytest
 
 from app.core.dependencies import CurrentUser
 from app.core.exceptions import ForbiddenException
+from app.employees import service as employee_service
+from app.employees.schema import EmployeeUpdate
 from app.users.model import UserRole
 from app.users.schema import UserUpdate
 from app.users import service
@@ -200,3 +202,98 @@ def test_changing_employee_admin_refreshes_profile_admin_name(monkeypatch):
 
     assert employee_doc["assignedToAdmin"] == admin_employee_id
     assert profile_doc["assignedAdmin"] == "Updated Admin"
+
+
+def test_updating_user_branch_updates_employee_branch(monkeypatch):
+    user_id = ObjectId()
+    employee_doc = {
+        "_id": ObjectId(),
+        "userId": str(user_id),
+        "branch": "Vellore",
+    }
+    users = FakeUsersCollection({
+        "_id": user_id,
+        "role": UserRole.EMPLOYEE.value,
+        "branch": "Vellore",
+    })
+    employees = FakeEmployeesCollection([employee_doc])
+    monkeypatch.setattr(
+        service,
+        "get_collection",
+        lambda name: users if name == "users" else employees,
+    )
+    monkeypatch.setattr(service, "serialize_user", lambda doc: doc)
+
+    asyncio.run(
+        service.update_user(
+            str(user_id),
+            UserUpdate(branch="Chennai"),
+            CurrentUser("super-admin", "super_admin", "full"),
+        )
+    )
+
+    assert users.doc["branch"] == "Chennai"
+    assert employee_doc["branch"] == "Chennai"
+
+
+def test_updating_employee_branch_updates_user_branch(monkeypatch):
+    user_id = ObjectId()
+    employee_doc = {
+        "_id": ObjectId(),
+        "userId": str(user_id),
+        "branch": "Vellore",
+    }
+    user_doc = {
+        "_id": user_id,
+        "name": "Test User",
+        "email": "test@example.com",
+        "branch": "Vellore",
+        "status": "active",
+    }
+
+    class BranchUsersCollection:
+        async def find_one(self, query, _projection=None):
+            return user_doc if query.get("_id") == user_id else None
+
+        async def update_one(self, query, update):
+            assert query == {"_id": user_id}
+            user_doc.update(update["$set"])
+
+    class BranchEmployeesCollection:
+        async def find_one(self, query, _projection=None):
+            if query.get("_id") == employee_doc["_id"]:
+                return employee_doc
+            if query.get("userId") == employee_doc["userId"]:
+                return employee_doc
+            return None
+
+        async def find_one_and_update(
+            self,
+            query,
+            update,
+            return_document=True,
+        ):
+            assert query == {"_id": employee_doc["_id"]}
+            employee_doc.update(update["$set"])
+            return employee_doc
+
+    collections = {
+        "users": BranchUsersCollection(),
+        "employees": BranchEmployeesCollection(),
+    }
+    monkeypatch.setattr(
+        employee_service,
+        "get_collection",
+        lambda name: collections[name],
+    )
+
+    asyncio.run(
+        employee_service.update_employee(
+            str(employee_doc["_id"]),
+            EmployeeUpdate(branch="Chennai"),
+            CurrentUser("super-admin", "super_admin", "full"),
+        )
+    )
+
+    assert employee_doc["branch"] == "Chennai"
+    assert user_doc["branch"] == "Chennai"

@@ -19,7 +19,7 @@ class CampaignStartRequest(BaseModel):
         description="Automatically schedule a reminder after a draft campaign completes",
     )
     reminderDelayDays: int = Field(
-        default=6,
+        default=1,
         ge=0,
         le=15,
         description="Days after draft completion before the automatic reminder runs; 0 starts immediately",
@@ -29,7 +29,25 @@ class CampaignStartRequest(BaseModel):
     @classmethod
     def default_empty_reminder_delay(cls, value):
         if value is None or (isinstance(value, str) and not value.strip()):
-            return 6
+            return 1
+        return value
+
+    autoReminder2Enabled: bool = Field(
+        default=False,
+        description="Automatically schedule a second reminder after the first reminder completes",
+    )
+    reminder2DelayDays: int = Field(
+        default=1,
+        ge=0,
+        le=15,
+        description="Days after the first reminder completes before the second reminder runs",
+    )
+
+    @field_validator("reminder2DelayDays", mode="before")
+    @classmethod
+    def default_empty_reminder2_delay(cls, value):
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return 1
         return value
 
 
@@ -54,7 +72,7 @@ class CampaignScheduleRequest(BaseModel):
         description="Automatically schedule a reminder after a draft campaign completes",
     )
     reminderDelayDays: int = Field(
-        default=6,
+        default=1,
         ge=0,
         le=15,
         description="Days after draft completion before the automatic reminder runs; 0 starts immediately",
@@ -64,7 +82,25 @@ class CampaignScheduleRequest(BaseModel):
     @classmethod
     def default_empty_reminder_delay(cls, value):
         if value is None or (isinstance(value, str) and not value.strip()):
-            return 6
+            return 1
+        return value
+
+    autoReminder2Enabled: bool = Field(
+        default=False,
+        description="Automatically schedule a second reminder after the first reminder completes",
+    )
+    reminder2DelayDays: int = Field(
+        default=1,
+        ge=0,
+        le=15,
+        description="Days after the first reminder completes before the second reminder runs",
+    )
+
+    @field_validator("reminder2DelayDays", mode="before")
+    @classmethod
+    def default_empty_reminder2_delay(cls, value):
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return 1
         return value
 
 
@@ -122,11 +158,17 @@ class CampaignOut(BaseModel):
     retryCount: int = 0
     maxRetries: int = 3
     autoReminderEnabled: bool = True
-    reminderDelayDays: int = 6
+    reminderDelayDays: int = 1
     reminderAutomationStatus: str | None = None
     reminderAutomationError: str | None = None
     reminderCampaignId: str | None = None
     reminderScheduledFor: str | None = None
+    autoReminder2Enabled: bool = False
+    reminder2DelayDays: int = 1
+    reminder2AutomationStatus: str | None = None
+    reminder2AutomationError: str | None = None
+    reminder2CampaignId: str | None = None
+    reminder2ScheduledFor: str | None = None
     # Recurrence fields
     recurrenceType: str = "once"
     recurrenceDays: list[int] = []

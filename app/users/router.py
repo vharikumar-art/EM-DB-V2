@@ -55,15 +55,9 @@ async def get_my_profile_picture(current_user: CurrentUser = Depends(get_current
     )
 
 
-@router.get("/{user_id}/profile-picture", dependencies=[Depends(require_admin)])
-async def get_user_profile_picture(
-    user_id: str,
-    current_user: CurrentUser = Depends(get_current_user),
-):
-    path, media_type = await service.get_admin_user_profile_picture(
-        user_id,
-        current_user,
-    )
+@router.get("/{user_id}/profile-picture", dependencies=[Depends(get_current_user)])
+async def get_user_profile_picture(user_id: str):
+    path, media_type = await service.get_user_profile_picture(user_id)
     return FileResponse(
         path,
         media_type=media_type,

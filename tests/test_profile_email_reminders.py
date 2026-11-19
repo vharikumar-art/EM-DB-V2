@@ -104,6 +104,84 @@ async def test_convert_sent_drafts_only_queues_rows_with_original_thread_data():
 
 
 @pytest.mark.anyio
+async def test_second_reminder_queues_only_sent_threadable_reminder1_recipients():
+    rows = [
+        {
+            "_id": "sent",
+            "profileId": "profile1",
+            "campaignId": "reminder1",
+            "mailType": "reminder",
+            "sendStatus": "sent",
+            "reminderMessageId": "<reminder1@example.test>",
+            "reminderSubject": "Original subject",
+            "reminderSentDate": "first-send-date",
+        },
+        {
+            "_id": "failed",
+            "profileId": "profile1",
+            "campaignId": "reminder1",
+            "mailType": "reminder",
+            "sendStatus": "failed",
+            "reminderMessageId": "<failed@example.test>",
+        },
+        {
+            "_id": "unsent",
+            "profileId": "profile1",
+            "campaignId": "reminder1",
+            "mailType": "reminder",
+            "sendStatus": "pending",
+        },
+        {
+            "_id": "missing-message-id",
+            "profileId": "profile1",
+            "campaignId": "reminder1",
+            "mailType": "reminder",
+            "sendStatus": "sent",
+        },
+    ]
+
+    class QueueCollection:
+        async def update_many(self, query, update):
+            eligible = [
+                row
+                for row in rows
+                if row["profileId"] == query["profileId"]
+                and row["campaignId"] == query["campaignId"]
+                and row["mailType"] == query["mailType"]
+                and row["sendStatus"] == query["sendStatus"]
+                and isinstance(row.get("reminderMessageId"), str)
+                and bool(row["reminderMessageId"])
+            ]
+            for row in eligible:
+                row.update(update["$set"])
+            return SimpleNamespace(modified_count=len(eligible))
+
+    with patch.object(
+        service,
+        "get_collection",
+        return_value=QueueCollection(),
+    ):
+        queued = await service.queue_sent_reminders_for_second_campaign(
+            profile_id="profile1",
+            reminder1_campaign_id="reminder1",
+            reminder2_campaign_id="reminder2",
+        )
+
+    assert queued == 1
+    assert rows[0]["campaignId"] == "reminder2"
+    assert rows[0]["sendStatus"] == "pending"
+    assert rows[0]["reminderMessageId"] == "<reminder1@example.test>"
+    assert rows[0]["reminderSubject"] == "Original subject"
+    assert rows[0]["reminderSentDate"] == "first-send-date"
+    assert rows[1]["sendStatus"] == "failed"
+    assert rows[1]["campaignId"] == "reminder1"
+    assert rows[2]["sendStatus"] == "pending"
+    assert rows[2]["campaignId"] == "reminder1"
+    assert rows[3]["sendStatus"] == "sent"
+    assert rows[3]["campaignId"] == "reminder1"
+
+
+@pytest.mark.anyio
 async def test_reminder_pending_batch_is_ordered_by_original_draft_sent_date():
     rows = [
         {
@@ -280,7 +358,39 @@ def test_reminder_mime_message_keeps_exact_subject_and_reply_headers():
 
 
 @pytest.mark.anyio
-async def test_reminder_campaign_uses_saved_subject_and_threading_headers(monkeypatch):
+@pytest.mark.parametrize(
+    (
+        "reminder_stage",
+        "reminder1_message_id",
+        "expected_subject",
+        "expected_in_reply_to",
+        "expected_references",
+    ),
+    [
+        (
+            1,
+            None,
+            "Exact subject from the draft",
+            "<original@example.test>",
+            "<original@example.test>",
+        ),
+        (
+            2,
+            "<reminder1@example.test>",
+            "Exact Reminder 1 subject",
+            "<reminder1@example.test>",
+            "<original@example.test> <reminder1@example.test>",
+        ),
+    ],
+)
+async def test_reminder_campaign_uses_saved_subject_and_stage_threading_headers(
+    monkeypatch,
+    reminder_stage,
+    reminder1_message_id,
+    expected_subject,
+    expected_in_reply_to,
+    expected_references,
+):
     from bson import ObjectId
 
     campaign_id = str(ObjectId())
@@ -291,6 +401,7 @@ async def test_reminder_campaign_uses_saved_subject_and_threading_headers(monkey
         "employeeId": "employee1",
         "status": CampaignStatus.PROCESSING.value,
         "mailType": "reminder",
+        "reminderStage": reminder_stage,
         "dailyLimit": 1,
         "recurrenceType": "once",
     }
@@ -312,6 +423,8 @@ async def test_reminder_campaign_uses_saved_subject_and_threading_headers(monkey
         "mailType": "reminder",
         "draftSubject": "Exact subject from the draft",
         "draftMessageId": "<original@example.test>",
+        "reminderSubject": "Exact Reminder 1 subject",
+        "reminderMessageId": reminder1_message_id,
     }
     campaigns_collection = SimpleNamespace(
         find_one=AsyncMock(return_value=campaign)
@@ -379,14 +492,17 @@ async def test_reminder_campaign_uses_saved_subject_and_threading_headers(monkey
         profile_id, worker.BATCH_SIZE, mail_type="reminder"
     )
     send_email.assert_awaited_once()
-    assert send_email.await_args.kwargs["subject"] == "Exact subject from the draft"
+    assert send_email.await_args.kwargs["subject"] == expected_subject
     assert send_email.await_args.kwargs["body_plain"] == (
         "Hello there, this is a reminder."
     )
-    assert send_email.await_args.kwargs["in_reply_to"] == "<original@example.test>"
-    assert send_email.await_args.kwargs["references"] == "<original@example.test>"
+    assert send_email.await_args.kwargs["in_reply_to"] == expected_in_reply_to
+    assert send_email.await_args.kwargs["references"] == expected_references
+    assert mark_sent.await_args.args[1] == "<original@example.test>"
+    assert mark_sent.await_args.args[2] == "<reminder@example.test>"
     assert mark_sent.await_args.kwargs["mail_type"] == "reminder"
-    assert mark_sent.await_args.kwargs["subject"] == "Exact subject from the draft"
+    assert mark_sent.await_args.kwargs["reminder_stage"] == reminder_stage
+    assert mark_sent.await_args.kwargs["subject"] == expected_subject
 
 
 @pytest.mark.anyio
@@ -629,3 +745,36 @@ async def test_mark_sent_persists_message_id_as_thread_fallback():
     assert record["messageId"] == "<draft@example.test>"
     assert record["draftMessageId"] == "<draft@example.test>"
     assert record["draftSubject"] == "Original subject"
+
+
+@pytest.mark.anyio
+async def test_mark_sent_stores_reminder2_details_without_overwriting_reminder1():
+    profile_email_id = ObjectId()
+    reminder1_sent_date = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    record = {
+        "reminderSubject": "Original subject",
+        "reminderMessageId": "<reminder1@example.test>",
+        "reminderSentDate": reminder1_sent_date,
+    }
+
+    class FakeProfileEmails:
+        async def update_one(self, query, update):
+            assert query["_id"] == profile_email_id
+            record.update(update["$set"])
+            return SimpleNamespace(modified_count=1)
+
+    with patch.object(service, "get_collection", return_value=FakeProfileEmails()):
+        await service.mark_sent(
+            str(profile_email_id),
+            thread_id="<reminder2@example.test>",
+            message_id="<reminder2@example.test>",
+            mail_type="reminder",
+            reminder_stage=2,
+            subject="Original subject",
+        )
+
+    assert record["reminderMessageId"] == "<reminder1@example.test>"
+    assert record["reminderSentDate"] == reminder1_sent_date
+    assert record["reminder2MessageId"] == "<reminder2@example.test>"
+    assert record["reminder2Subject"] == "Original subject"
+    assert isinstance(record["reminder2SentDate"], datetime)

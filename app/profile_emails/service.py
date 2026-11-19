@@ -316,6 +316,33 @@ async def convert_campaign_sent_drafts_to_reminders(
     )
 
 
+async def queue_sent_reminders_for_second_campaign(
+    profile_id: str,
+    reminder1_campaign_id: str,
+    reminder2_campaign_id: str,
+) -> int:
+    """Queue only successfully sent, threadable Reminder 1 recipients."""
+    now = datetime.now(timezone.utc)
+    result = await get_collection(COLLECTION).update_many(
+        {
+            "profileId": profile_id,
+            "campaignId": reminder1_campaign_id,
+            "mailType": ProfileEmailType.REMINDER.value,
+            "sendStatus": SendStatus.SENT.value,
+            "reminderMessageId": {"$type": "string", "$ne": ""},
+        },
+        {
+            "$set": {
+                "campaignId": reminder2_campaign_id,
+                "sendStatus": SendStatus.PENDING.value,
+                "errorMessage": None,
+                "updatedAt": now,
+            }
+        },
+    )
+    return result.modified_count
+
+
 async def _convert_sent_drafts_to_reminders(
     profile_id: str,
     employee_id: str,
@@ -735,6 +762,7 @@ async def mark_sent(
     template_id: str | None = None,
     mail_type: str = ProfileEmailType.DRAFT.value,
     subject: str | None = None,
+    reminder_stage: int = 1,
 ) -> None:
     col = get_collection(COLLECTION)
     now = datetime.now(timezone.utc)
@@ -754,6 +782,14 @@ async def mark_sent(
                 "draftSubject": subject,
                 "draftMessageId": persisted_message_id,
                 "draftSentDate": now,
+            }
+        )
+    elif reminder_stage == 2:
+        update_fields.update(
+            {
+                "reminder2Subject": subject,
+                "reminder2MessageId": persisted_message_id,
+                "reminder2SentDate": now,
             }
         )
     else:

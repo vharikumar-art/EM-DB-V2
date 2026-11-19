@@ -11,7 +11,7 @@ from app.core.exceptions import BadRequestException, ForbiddenException, NotFoun
 from app.database.mongodb import get_collection
 from app.notifications.schema import NotificationType
 from app.notifications.service import create_notification
-from app.profile_emails.model import SendStatus
+from app.profile_emails.model import ProfileEmailType, SendStatus
 from app.profiles.service import get_profile
 from app.schemas.common import PaginationParams
 from app.utils.pagination import build_paginated_response
@@ -209,6 +209,14 @@ async def create_campaign(
     doc["reminderDelayDays"] = payload.reminderDelayDays
     if not doc["autoReminderEnabled"]:
         doc["reminderAutomationStatus"] = "disabled"
+    doc["autoReminder2Enabled"] = (
+        payload.autoReminder2Enabled
+        and payload.autoReminderEnabled
+        and payload.mailType == "draft"
+    )
+    doc["reminder2DelayDays"] = payload.reminder2DelayDays
+    if not doc["autoReminder2Enabled"]:
+        doc["reminder2AutomationStatus"] = "disabled"
 
     result = await campaigns.insert_one(doc)
     created = await campaigns.find_one({"_id": result.inserted_id})
@@ -344,6 +352,14 @@ async def create_scheduled_campaign(
     doc["reminderDelayDays"] = payload.reminderDelayDays
     if not doc["autoReminderEnabled"]:
         doc["reminderAutomationStatus"] = "disabled"
+    doc["autoReminder2Enabled"] = (
+        payload.autoReminder2Enabled
+        and payload.autoReminderEnabled
+        and payload.mailType == "draft"
+    )
+    doc["reminder2DelayDays"] = payload.reminder2DelayDays
+    if not doc["autoReminder2Enabled"]:
+        doc["reminder2AutomationStatus"] = "disabled"
 
     display_time = payload.scheduledTimeLocal
     if payload.scheduledDateLocal:
@@ -601,6 +617,30 @@ async def finalize_campaign(campaign_id: str) -> None:
                 "Campaign %s completed, but automatic reminder scheduling failed",
                 campaign_id,
             )
+    elif (
+        doc.get("mailType") == ProfileEmailType.REMINDER.value
+        and doc.get("reminderStage") == 1
+        and doc.get("autoReminder2Enabled") is True
+    ):
+        try:
+            await schedule_automatic_second_reminder_campaign(campaign_id)
+        except Exception:
+            logger.exception(
+                "Campaign %s completed, but Reminder 2 scheduling failed",
+                campaign_id,
+            )
+            await get_collection(COLLECTION).update_one(
+                {"_id": to_object_id(campaign_id)},
+                {
+                    "$set": {
+                        "reminder2AutomationStatus": "failed",
+                        "reminder2AutomationError": (
+                            "Reminder 2 scheduling failed; retry the automation."
+                        ),
+                        "updatedAt": datetime.now(timezone.utc),
+                    }
+                },
+            )
 
     # Also log completion
     from app.logs.model import LogAction, build_log_document
@@ -627,7 +667,7 @@ async def finalize_campaign(campaign_id: str) -> None:
 
 
 async def schedule_automatic_reminder_campaign(campaign_id: str) -> None:
-    """Queue this completed draft campaign's eligible recipients for follow-up in 3 days."""
+    """Queue eligible recipients for the first reminder after its configured delay."""
     campaigns = get_collection(COLLECTION)
     campaign_oid = to_object_id(campaign_id)
     claim = await campaigns.update_one(
@@ -736,8 +776,11 @@ async def schedule_automatic_reminder_campaign(campaign_id: str) -> None:
             completed_at = completed_at.replace(tzinfo=timezone.utc)
         reminder_delay_days = source.get("reminderDelayDays")
         if reminder_delay_days is None or reminder_delay_days == "":
-            reminder_delay_days = 6
+            reminder_delay_days = 1
         scheduled_for = completed_at + timedelta(days=reminder_delay_days)
+        reminder2_delay_days = source.get("reminder2DelayDays")
+        if reminder2_delay_days is None or reminder2_delay_days == "":
+            reminder2_delay_days = 1
 
         campaign_name = f"{source['campaignName']} - Reminder"
         reminder_doc = build_campaign_document(
@@ -751,10 +794,22 @@ async def schedule_automatic_reminder_campaign(campaign_id: str) -> None:
         reminder_doc.update(
             {
                 "sourceCampaignId": campaign_id,
+                "reminderStage": 1,
                 "dailyLimit": (profile.get("sendingOptions") or {}).get(
                     "dailyLimit"
                 )
                 or 100,
+                "autoReminderEnabled": False,
+                "autoReminder2Enabled": source.get(
+                    "autoReminder2Enabled", False
+                )
+                is True,
+                "reminder2DelayDays": reminder2_delay_days,
+                "reminder2AutomationStatus": (
+                    "pending"
+                    if source.get("autoReminder2Enabled") is True
+                    else "disabled"
+                ),
                 "maxRetries": 3,
                 "scheduledForDisplay": scheduled_for.strftime("%Y-%m-%dT%H:%M"),
                 "recurrenceType": "once",
@@ -868,6 +923,259 @@ async def schedule_automatic_reminder_campaign(campaign_id: str) -> None:
         await notify(
             (
                 f"Automatic reminder for '{source['campaignName']}' could not be "
+                f"scheduled: {str(exc)[:300]}"
+            ),
+            NotificationType.ERROR,
+        )
+
+
+async def schedule_automatic_second_reminder_campaign(
+    reminder1_campaign_id: str,
+) -> None:
+    """Schedule Reminder 2 from successfully sent recipients of Reminder 1."""
+    campaigns = get_collection(COLLECTION)
+    reminder1_oid = to_object_id(reminder1_campaign_id)
+    claim = await campaigns.update_one(
+        {
+            "_id": reminder1_oid,
+            "status": CampaignStatus.COMPLETED.value,
+            "mailType": ProfileEmailType.REMINDER.value,
+            "reminderStage": 1,
+            "sourceCampaignId": {"$exists": True},
+            "autoReminder2Enabled": True,
+            "reminder2AutomationStatus": {
+                "$in": [None, "pending", "skipped", "failed"]
+            },
+        },
+        {
+            "$set": {
+                "reminder2AutomationStatus": "processing",
+                "updatedAt": datetime.now(timezone.utc),
+            }
+        },
+    )
+    if claim.modified_count == 0:
+        return
+
+    source = await campaigns.find_one({"_id": reminder1_oid})
+    if not source:
+        return
+
+    async def finish_automation(status: str, **fields: object) -> None:
+        await campaigns.update_one(
+            {
+                "_id": reminder1_oid,
+                "reminder2AutomationStatus": "processing",
+            },
+            {
+                "$set": {
+                    "reminder2AutomationStatus": status,
+                    "updatedAt": datetime.now(timezone.utc),
+                    **fields,
+                }
+            },
+        )
+
+    async def notify(message: str, notification_type: NotificationType) -> None:
+        try:
+            await create_notification(
+                employee_id=source["employeeId"],
+                message=message,
+                type=notification_type,
+            )
+        except Exception:
+            logger.exception(
+                "Could not notify employee %s about Reminder 2 for campaign %s",
+                source["employeeId"],
+                reminder1_campaign_id,
+            )
+
+    reminder2_id: str | None = None
+    try:
+        profile = await get_profile(source["profileId"], source["employeeId"], True)
+        templates = [
+            template
+            for template in profile.get("reminderTemplates", [])
+            if str(template.get("body") or "").strip()
+        ]
+        if not profile.get("isActive", False):
+            reason = "The profile is inactive; no second reminder was scheduled."
+            await finish_automation("skipped", reminder2AutomationError=reason)
+            await notify(
+                f"Reminder 2 for '{source['campaignName']}' was not scheduled. {reason}",
+                NotificationType.WARNING,
+            )
+            return
+        if not templates:
+            reason = "Add at least one reminder template to the profile."
+            await finish_automation("skipped", reminder2AutomationError=reason)
+            await notify(
+                f"Reminder 2 for '{source['campaignName']}' was not scheduled. {reason}",
+                NotificationType.WARNING,
+            )
+            return
+
+        completed_at = source.get("completedAt")
+        if not isinstance(completed_at, datetime):
+            raise ValueError("Completed Reminder 1 campaign is missing completedAt")
+        if completed_at.tzinfo is None:
+            completed_at = completed_at.replace(tzinfo=timezone.utc)
+        delay_days = source.get("reminder2DelayDays")
+        if delay_days is None or delay_days == "":
+            delay_days = 1
+        scheduled_for = completed_at + timedelta(days=int(delay_days))
+
+        profile_emails = get_collection("profile_emails")
+        reminder2_campaign = await campaigns.find_one(
+            {"sourceReminderCampaignId": reminder1_campaign_id},
+            {"_id": 1},
+        )
+        if reminder2_campaign:
+            reminder2_id = str(reminder2_campaign["_id"])
+        else:
+            eligible_count = await profile_emails.count_documents(
+                {
+                    "profileId": source["profileId"],
+                    "campaignId": reminder1_campaign_id,
+                    "mailType": ProfileEmailType.REMINDER.value,
+                    "sendStatus": SendStatus.SENT.value,
+                    "reminderMessageId": {"$type": "string", "$ne": ""},
+                }
+            )
+            if eligible_count == 0:
+                reason = "No successfully sent Reminder 1 recipients with a message ID were found."
+                await finish_automation(
+                    "skipped",
+                    reminder2AutomationError=reason,
+                )
+                await notify(
+                    f"Reminder 2 for '{source['campaignName']}' was not scheduled. {reason}",
+                    NotificationType.INFO,
+                )
+                return
+
+            campaign_name = f"{source['campaignName']} - Reminder 2"
+            reminder2_doc = build_campaign_document(
+                profile_id=source["profileId"],
+                employee_id=source["employeeId"],
+                campaign_name=campaign_name,
+                total_emails=eligible_count,
+                mail_type=ProfileEmailType.REMINDER.value,
+            )
+            reminder2_doc.update(
+                {
+                    "sourceCampaignId": source.get("sourceCampaignId"),
+                    "sourceReminderCampaignId": reminder1_campaign_id,
+                    "reminderStage": 2,
+                    "autoReminderEnabled": False,
+                    "autoReminder2Enabled": False,
+                    "reminderAutomationStatus": "disabled",
+                    "reminder2AutomationStatus": "disabled",
+                    "reminderDelayDays": 1,
+                    "reminder2DelayDays": 1,
+                    "dailyLimit": source.get("dailyLimit")
+                    or (profile.get("sendingOptions") or {}).get("dailyLimit")
+                    or 100,
+                    "maxRetries": 3,
+                    "scheduledFor": scheduled_for,
+                    "scheduledForDisplay": scheduled_for.strftime("%Y-%m-%dT%H:%M"),
+                    "recurrenceType": "once",
+                    "recurrenceDays": [],
+                    "recurrenceEndDate": None,
+                    "timezoneOffsetMinutes": 0,
+                    "profileSnapshot": source.get("profileSnapshot") or {},
+                }
+            )
+            result = await campaigns.insert_one(reminder2_doc)
+            reminder2_id = str(result.inserted_id)
+
+        from app.profile_emails import service as profile_email_service
+
+        await profile_email_service.queue_sent_reminders_for_second_campaign(
+            profile_id=source["profileId"],
+            reminder1_campaign_id=reminder1_campaign_id,
+            reminder2_campaign_id=reminder2_id,
+        )
+        queued_count = await profile_emails.count_documents(
+            {
+                "profileId": source["profileId"],
+                "campaignId": reminder2_id,
+                "mailType": ProfileEmailType.REMINDER.value,
+                "sendStatus": SendStatus.PENDING.value,
+            }
+        )
+        if queued_count == 0:
+            reason = "Eligible Reminder 1 recipients were no longer available."
+            await finish_automation(
+                "skipped",
+                reminder2AutomationError=reason,
+            )
+            await notify(
+                f"Reminder 2 for '{source['campaignName']}' was not scheduled. {reason}",
+                NotificationType.INFO,
+            )
+            return
+
+        await campaigns.update_one(
+            {"_id": to_object_id(reminder2_id)},
+            {
+                "$set": {
+                    "status": CampaignStatus.SCHEDULED.value,
+                    "scheduledFor": scheduled_for,
+                    "scheduledForDisplay": scheduled_for.strftime("%Y-%m-%dT%H:%M"),
+                    "totalEmails": queued_count,
+                    "pending": queued_count,
+                    "updatedAt": datetime.now(timezone.utc),
+                }
+            },
+        )
+        await finish_automation(
+            "scheduled",
+            reminder2CampaignId=reminder2_id,
+            reminder2ScheduledFor=scheduled_for,
+            reminder2AutomationError=None,
+        )
+        campaign_name = f"{source['campaignName']} - Reminder 2"
+        await notify(
+            (
+                f"Reminder 2 campaign '{campaign_name}' scheduled for "
+                f"{format_utc_datetime_12_hour(scheduled_for)} with "
+                f"{queued_count} recipient(s)."
+            ),
+            NotificationType.INFO,
+        )
+        if int(delay_days) == 0:
+            from app.campaigns.scheduler import dispatch_campaign_now
+
+            if not await dispatch_campaign_now(reminder2_id, campaign_name):
+                logger.warning(
+                    "Immediate Reminder 2 campaign %s was not dispatched; it remains eligible for the scheduler",
+                    reminder2_id,
+                )
+    except Exception as exc:
+        logger.exception(
+            "Failed to schedule Reminder 2 for Reminder 1 campaign %s",
+            reminder1_campaign_id,
+        )
+        if reminder2_id:
+            await campaigns.update_one(
+                {"_id": to_object_id(reminder2_id)},
+                {
+                    "$set": {
+                        "status": CampaignStatus.FAILED.value,
+                        "errorMessage": "Automatic Reminder 2 setup did not complete.",
+                        "completedAt": datetime.now(timezone.utc),
+                        "updatedAt": datetime.now(timezone.utc),
+                    }
+                },
+            )
+        await finish_automation(
+            "failed",
+            reminder2AutomationError=str(exc)[:500],
+        )
+        await notify(
+            (
+                f"Reminder 2 for '{source['campaignName']}' could not be "
                 f"scheduled: {str(exc)[:300]}"
             ),
             NotificationType.ERROR,

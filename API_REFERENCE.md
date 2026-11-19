@@ -102,7 +102,7 @@ Removes the authenticated user's profile picture from disk. Repeated requests su
 
 Returns the authenticated user's profile picture. Each user can access only their own image.
 
-The admin-only `GET /users` response includes a `profilePictureUrl` for users with an uploaded picture. Admins can fetch pictures only for themselves and employees within their existing access scope; super admins can fetch any listed user's picture using `GET /users/{user_id}/profile-picture`.
+Any authenticated user can fetch another user's image using `GET /users/{user_id}/profile-picture`. The admin-only `GET /users` response includes a `profilePictureUrl` for users with an uploaded picture and the decrypted `password` field requested for the users list. Passwords created before reversible password storage was restored may be `null` until reset.
 
 ### POST /users/{user_id}/password-reset — Admin Password Reset
 
@@ -305,6 +305,22 @@ curl "http://localhost:8000/email-master?country=India&domain=gmail.com&mailSour
 | `includeDuplicates` | `true` (default) or `false` |
 | `page` | Page number (1-indexed) |
 | `pageSize` | Items per page (default 20, max 100) |
+
+**Upload-date filters:**
+| Param | Description |
+|---|---|
+| `dateFilter` | Set to `true` to enable upload-date filtering |
+| `dateRange` | `last_30_days`, `last_3_months`, or `custom` |
+| `startDate` | Required for `custom`; `YYYY-MM-DD` or `DD-MM-YYYY` |
+| `endDate` | Required for `custom`; inclusive, `YYYY-MM-DD` or `DD-MM-YYYY` |
+
+**Postman test (custom range):**
+1. Select **GET** and enter `{{baseUrl}}/email-master`.
+2. In **Params**, add `dateFilter=true`, `dateRange=custom`, `startDate=2026-01-01`, and `endDate=2026-03-31`.
+3. In **Authorization**, select **Bearer Token** and paste a valid access token.
+4. Send the request. The response's `data.data` contains matching email records; `data.total` is the matching count.
+
+For a preset range, use `dateFilter=true` and `dateRange=last_30_days` (or `last_3_months`) and omit `startDate` / `endDate`.
 
 ---
 
@@ -1070,6 +1086,54 @@ curl "http://localhost:8000/dashboard/admin?preset=last_7_days" \
 curl http://localhost:8000/dashboard/dropdown-options \
   -H "Authorization: Bearer <admin_token>"
 ```
+
+---
+
+### GET /achievements/leaderboard — Monthly Achievement Leaderboard
+
+Admins and super admins receive the live leaderboard for the current office
+month (26th through 25th). Optional inclusive `startDate` and `endDate` values
+can instead filter the live leaderboard to a custom period. The current and
+previous monthly top-three lists remain on their respective monthly periods.
+Employees receive the current-period top three and unfiltered combined live
+leaderboard for their own branch. Period display dates use the campaign
+12-hour format without a timezone suffix. Closed-period awards are archived
+automatically and include each participant's number of top-three achievements
+for that metric and scope.
+Participants include employee, admin, and super-admin accounts; uploads and
+conversions are attributed to the account that performed each action.
+
+**Global leaderboard (super admin):**
+```bash
+curl "http://localhost:8000/achievements/leaderboard?metric=both&scope=global" \
+  -H "Authorization: Bearer <super_admin_token>"
+```
+
+**Branch leaderboard:**
+```bash
+curl "http://localhost:8000/achievements/leaderboard?metric=convert&scope=branch&branch=Vellore" \
+  -H "Authorization: Bearer <admin_token>"
+```
+
+**Query parameters:**
+| Param | Description |
+|---|---|
+| `metric` | `mail` (100 uploads = 1 point), `convert` (1 converted reply = 5 points), or `both` (sum of the weighted points). Defaults to `mail` for admins and super admins; employees always receive `both`. |
+| `scope` | `branch` or `global`. Super admins may select either; admins are restricted to their own branch. Employees always receive their own branch. |
+| `branch` | Branch name; required for a super-admin branch leaderboard. |
+| `startDate` | Optional inclusive start date for the live leaderboard (`YYYY-MM-DD`). Must be supplied with `endDate`. |
+| `endDate` | Optional inclusive end date for the live leaderboard (`YYYY-MM-DD`). Must be on or after `startDate`. |
+
+Employees cannot pass leaderboard filters and receive `scope`, `branch`,
+`metric`, `livePeriod`, `liveLeaderboard`, `currentPeriod`, and `currentTop3`.
+They do not receive previous-period winners. Admin and super-admin responses
+also include `data.currentPeriod`, `data.currentTop3` for the current month's
+top three, and `data.previousTop3` for the archived winners from the last
+completed period. Rankings include upload, conversion, combined score, rank,
+and `timesAchieved`. Participants are ordered by score, then name, for
+deterministic ties. Scores may include two decimal places (for example, 70
+uploads = 0.7 points). The legacy `employeeId` and `employeeName` response
+fields also identify admin and super-admin participants.
 
 ---
 

@@ -41,6 +41,19 @@ def serialize_list_users(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [serialize_user(d) for d in docs]
 
 
+def serialize_list_users_with_password(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Serialize users for the admin users list, including its legacy password field."""
+    from app.core.security import decrypt_password
+
+    users = [serialize_user(doc) for doc in docs]
+    for user, doc in zip(users, docs):
+        encrypted_password = doc.get("passwordEncrypted")
+        user["password"] = (
+            decrypt_password(encrypted_password) if encrypted_password else None
+        )
+    return users
+
+
 def serialize_list(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [serialize_doc(d) for d in docs]
 

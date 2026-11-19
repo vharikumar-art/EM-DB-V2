@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,6 +8,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from app.auth.router import router as auth_router
+from app.achievements.router import router as achievements_router
 from app.campaigns.router import router as campaigns_router
 from app.core.config import settings
 from app.core.rate_limit import limiter
@@ -36,10 +38,24 @@ from app.database.redis_client import connect_redis, close_redis
 async def _scheduler_loop() -> None:
     """Background task: check and fire due scheduled campaigns every 60 seconds."""
     from app.campaigns.scheduler import process_scheduled_campaigns
+    last_achievement_archive_date = None
     while True:
         try:
             await asyncio.sleep(60)
             await process_scheduled_campaigns()
+            today = datetime.now(timezone.utc).date()
+            if last_achievement_archive_date != today:
+                try:
+                    from app.achievements.service import archive_previous_achievement_period
+
+                    await archive_previous_achievement_period()
+                    last_achievement_archive_date = today
+                except Exception:
+                    import logging
+
+                    logging.getLogger("scheduler_loop").exception(
+                        "Achievement period archive failed"
+                    )
         except asyncio.CancelledError:
             break
         except Exception as exc:
@@ -95,6 +111,7 @@ register_exception_handlers(app)
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(auth_router)
+app.include_router(achievements_router)
 app.include_router(users_router)
 app.include_router(employees_router)
 

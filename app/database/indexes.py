@@ -110,6 +110,12 @@ async def create_indexes() -> None:
     await db["campaigns"].create_index("status")
     await db["campaigns"].create_index("createdAt")
     await db["campaigns"].create_index(
+        "sourceReminderCampaignId",
+        unique=True,
+        sparse=True,
+        name="unique_source_reminder_campaign",
+    )
+    await db["campaigns"].create_index(
         [("profileId", 1), ("status", 1)]
     )
     await db["campaigns"].create_index(
@@ -124,6 +130,22 @@ async def create_indexes() -> None:
     # Compound index for efficient query: find scheduled campaigns due for execution
     await db["campaigns"].create_index(
         [("status", 1), ("scheduledFor", 1), ("retryCount", 1)]
+    )
+
+    # ── achievements ──────────────────────────────────────────────────────────
+    await db["achievement_periods"].create_index("periodKey", unique=True)
+    await db["achievement_awards"].create_index(
+        [
+            ("periodKey", 1),
+            ("scope", 1),
+            ("branchKey", 1),
+            ("metric", 1),
+            ("employeeId", 1),
+        ],
+        unique=True,
+    )
+    await db["achievement_awards"].create_index(
+        [("scope", 1), ("branchKey", 1), ("metric", 1), ("employeeId", 1)]
     )
 
     # ── templates ────────────────────────────────────────────────────────────

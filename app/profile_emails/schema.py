@@ -31,6 +31,9 @@ class ProfileEmailOut(BaseModel):
     reminderSubject: str | None = None
     reminderMessageId: str | None = None
     reminderSentDate: str | None = None
+    reminder2Subject: str | None = None
+    reminder2MessageId: str | None = None
+    reminder2SentDate: str | None = None
     sentDate: str | None = None
     errorMessage: str | None = None
     notes: str = ""

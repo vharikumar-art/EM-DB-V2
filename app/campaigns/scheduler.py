@@ -258,6 +258,33 @@ async def _record_reminder_schedule_failure(
         )
 
 
+async def _record_second_reminder_schedule_failure(
+    campaign_id: str,
+    error: Exception,
+) -> None:
+    """Persist Reminder 2 setup failures so completed campaigns are diagnosable."""
+    try:
+        await get_collection(COLLECTION).update_one(
+            {
+                "_id": to_object_id(campaign_id),
+                "status": CampaignStatus.COMPLETED.value,
+                "reminder2AutomationStatus": {"$ne": "scheduled"},
+            },
+            {
+                "$set": {
+                    "reminder2AutomationStatus": "failed",
+                    "reminder2AutomationError": str(error)[:500],
+                    "updatedAt": datetime.now(timezone.utc),
+                }
+            },
+        )
+    except Exception:
+        logger.exception(
+            "Could not persist Reminder 2 failure for campaign %s",
+            campaign_id,
+        )
+
+
 async def finalize_campaign_execution(
     campaign_id: str,
     success: bool,
@@ -355,6 +382,27 @@ async def finalize_campaign_execution(
                             campaign_id,
                         )
                         await _record_reminder_schedule_failure(campaign_id, exc)
+                elif (
+                    campaign.get("mailType") == "reminder"
+                    and campaign.get("reminderStage") == 1
+                    and campaign.get("autoReminder2Enabled") is True
+                ):
+                    from app.campaigns.service import (
+                        schedule_automatic_second_reminder_campaign,
+                    )
+
+                    try:
+                        await schedule_automatic_second_reminder_campaign(
+                            campaign_id
+                        )
+                    except Exception as exc:
+                        logger.exception(
+                            "Campaign %s completed, but Reminder 2 scheduling failed",
+                            campaign_id,
+                        )
+                        await _record_second_reminder_schedule_failure(
+                            campaign_id, exc
+                        )
                 await create_notification(
                     employee_id=campaign.get("employeeId"),
                     message=f"Campaign '{campaign['campaignName']}' completed because all pending emails have been sent.",
@@ -442,6 +490,25 @@ async def finalize_campaign_execution(
                     campaign_id,
                 )
                 await _record_reminder_schedule_failure(campaign_id, exc)
+        elif (
+            campaign.get("mailType") == "reminder"
+            and campaign.get("reminderStage") == 1
+            and campaign.get("autoReminder2Enabled") is True
+        ):
+            from app.campaigns.service import (
+                schedule_automatic_second_reminder_campaign,
+            )
+
+            try:
+                await schedule_automatic_second_reminder_campaign(campaign_id)
+            except Exception as exc:
+                logger.exception(
+                    "Campaign %s completed, but Reminder 2 scheduling failed",
+                    campaign_id,
+                )
+                await _record_second_reminder_schedule_failure(
+                    campaign_id, exc
+                )
 
         # Send success notification
         await create_notification(

@@ -34,13 +34,13 @@ async def employee_dashboard(
     else:
         employee = await get_employee_by_user_id(current_user.user_id)
         target_employee_id = employee["id"]
-    
+
     # Get current user details
     from app.database.mongodb import get_collection
     users = get_collection("users")
     from bson import ObjectId
     user_doc = await users.find_one({"_id": ObjectId(current_user.user_id)})
-    
+
     user_info = {
         "userId": current_user.user_id,
         "email": user_doc.get("email", "N/A") if user_doc else "N/A",
@@ -48,7 +48,7 @@ async def employee_dashboard(
         "role": current_user.role,
         "loginTime": datetime.now(timezone.utc).isoformat(),
     }
-        
+
     data = await service.get_employee_dashboard(target_employee_id, query)
     data["currentUser"] = user_info
     return ApiResponse(message="Employee dashboard fetched", data=data)
@@ -64,7 +64,7 @@ async def admin_dashboard(
     users = get_collection("users")
     from bson import ObjectId
     user_doc = await users.find_one({"_id": ObjectId(current_user.user_id)})
-    
+
     user_info = {
         "userId": current_user.user_id,
         "email": user_doc.get("email", "N/A") if user_doc else "N/A",
@@ -72,7 +72,7 @@ async def admin_dashboard(
         "role": current_user.role,
         "loginTime": datetime.now(timezone.utc).isoformat(),
     }
-    
+
     # Route based on role
     if is_super_admin_role(current_user.role):
         # Global admin dashboard for super_admin
@@ -84,7 +84,7 @@ async def admin_dashboard(
         # Fallback (should not happen due to require_admin dependency)
         from app.core.exceptions import ForbiddenException
         raise ForbiddenException("User role not authorized for admin dashboard")
-    
+
     data["currentUser"] = user_info
     return ApiResponse(message="Admin dashboard fetched", data=data)
 
@@ -101,7 +101,7 @@ async def upload_history(
     query: DashboardQuery = Depends(_dashboard_query),
     employeeId: str | None = Query(default=None),
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=1, le=100),
+    page_size: int = Query(default=20, ge=1, le=500),
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Get paginated upload history for all (or a specific) active employee."""

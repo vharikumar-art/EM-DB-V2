@@ -4,12 +4,13 @@ from datetime import datetime
 import pytest
 from bson import ObjectId
 
-from app.core.dependencies import CurrentUser
+from app.core.dependencies import CurrentUser, get_current_user, require_admin
 from app.core.exceptions import BadRequestException, ForbiddenException
-from app.core.security import verify_password
+from app.core.security import decrypt_password, encrypt_password, verify_password
 from app.users import service
-from app.users.schema import PasswordUpdate, UserProfileOut, UserUpdate
-from app.utils.response import serialize_user
+from app.users.router import get_user_profile_picture, router as users_router
+from app.users.schema import PasswordUpdate, UserCreate, UserProfileOut, UserUpdate
+from app.utils.response import serialize_list_users_with_password, serialize_user
 
 
 class FakeUsersCollection:
@@ -39,6 +40,68 @@ def test_user_serialization_never_exposes_passwords():
 
     assert "password" not in user
     assert "passwordEncrypted" not in user
+
+
+def test_admin_user_list_includes_decrypted_password_only_in_list_serializer():
+    docs = [
+        {
+            "_id": ObjectId(),
+            "name": "Legacy-compatible user",
+            "password": "hashed-password",
+            "passwordEncrypted": encrypt_password("visible-to-admin-list"),
+        },
+        {
+            "_id": ObjectId(),
+            "name": "Hash-only user",
+            "password": "hashed-password",
+        },
+    ]
+
+    users = serialize_list_users_with_password(docs)
+
+    assert users[0]["password"] == "visible-to-admin-list"
+    assert users[1]["password"] is None
+    assert "passwordEncrypted" not in users[0]
+    assert "password" not in serialize_user(docs[0])
+
+
+def test_new_user_document_keeps_encrypted_password_for_admin_list(monkeypatch):
+    payload = UserCreate(
+        name="New User",
+        email="new@example.com",
+        password="a-strong-password",
+    )
+    captured = {}
+
+    class FakeUsersCollection:
+        async def find_one(self, query):
+            return None
+
+        async def insert_one(self, doc):
+            captured.update(doc)
+            captured["_id"] = ObjectId()
+            return type("InsertResult", (), {"inserted_id": captured["_id"]})()
+
+    class FakeEmployeesCollection:
+        async def insert_one(self, _doc):
+            return None
+
+    class FakeUserCollectionForRead(FakeUsersCollection):
+        async def find_one(self, query):
+            if query.get("_id") == captured.get("_id"):
+                return captured
+            return None
+
+    collections = {
+        "users": FakeUserCollectionForRead(),
+        "employees": FakeEmployeesCollection(),
+    }
+    monkeypatch.setattr(service, "get_collection", lambda name: collections[name])
+
+    created = asyncio.run(service.create_user(payload))
+
+    assert created.get("password") is None
+    assert serialize_list_users_with_password([captured])[0]["password"] == payload.password
 
 
 def test_employee_cannot_edit_read_only_account_fields(monkeypatch):
@@ -74,7 +137,7 @@ def test_employee_cannot_change_password(monkeypatch):
         )
 
 
-def test_admin_password_reset_stores_only_hash(monkeypatch):
+def test_admin_password_reset_stores_hash_and_encrypted_value(monkeypatch):
     user_id = ObjectId()
     user = {
     "_id": user_id,
@@ -93,8 +156,152 @@ def test_admin_password_reset_stores_only_hash(monkeypatch):
     )
 
     assert verify_password(new_password, user["password"])
-    assert "passwordEncrypted" not in user
+    assert decrypt_password(user["passwordEncrypted"]) == new_password
     assert "password" not in result
+
+
+def test_super_admin_can_change_another_users_password_without_old_password(monkeypatch):
+    user_id = ObjectId()
+    target = {
+        "_id": user_id,
+        "role": "employee",
+        "password": "old-hash",
+    }
+
+    class UsersCollection(FakeUsersCollection):
+        async def find_one(self, query, projection=None):
+            return target if query.get("_id") == user_id else None
+
+    monkeypatch.setattr(
+        service,
+        "get_collection",
+        lambda _name: UsersCollection(target),
+    )
+    new_password = "new-secure-password"
+
+    result = asyncio.run(
+        service.update_password(
+            str(user_id),
+            PasswordUpdate(new_password=new_password),
+            CurrentUser(str(ObjectId()), "super_admin"),
+        )
+    )
+
+    assert verify_password(new_password, target["password"])
+    assert "password" not in result
+
+
+def test_full_admin_can_change_password_for_same_branch_employee(monkeypatch):
+    admin_id = str(ObjectId())
+    target_id = str(ObjectId())
+    target_object_id = ObjectId(target_id)
+    target = {
+        "_id": target_object_id,
+        "role": "employee",
+        "branch": "Chennai",
+        "password": "old-hash",
+    }
+
+    class UsersCollection:
+        async def find_one(self, query, projection=None):
+            if query.get("_id") == target_object_id:
+                return target
+            if query.get("_id") == ObjectId(admin_id):
+                return {"branch": "Chennai"}
+            return None
+
+        async def find_one_and_update(self, query, update, return_document=False):
+            assert query["_id"] == target_object_id
+            target.update(update["$set"])
+            return target
+
+    class EmployeesCollection:
+        async def find_one(self, query):
+            return None
+
+    monkeypatch.setattr(
+        service,
+        "get_collection",
+        lambda name: UsersCollection() if name == "users" else EmployeesCollection(),
+    )
+    new_password = "new-secure-password"
+
+    asyncio.run(
+        service.update_password(
+            target_id,
+            PasswordUpdate(new_password=new_password),
+            CurrentUser(admin_id, "admin", access_level="full"),
+        )
+    )
+
+    assert verify_password(new_password, target["password"])
+
+
+def test_full_admin_cannot_change_password_outside_own_branch(monkeypatch):
+    admin_id = str(ObjectId())
+    target_id = str(ObjectId())
+    target = {
+        "_id": ObjectId(target_id),
+        "role": "employee",
+        "branch": "Vellore",
+        "password": "old-hash",
+    }
+
+    class UsersCollection:
+        async def find_one(self, query, projection=None):
+            if query.get("_id") == ObjectId(target_id):
+                return target
+            if query.get("_id") == ObjectId(admin_id):
+                return {"branch": "Chennai"}
+            return None
+
+    class EmployeesCollection:
+        async def find_one(self, _query):
+            return None
+
+    monkeypatch.setattr(
+        service,
+        "get_collection",
+        lambda name: UsersCollection() if name == "users" else EmployeesCollection(),
+    )
+
+    with pytest.raises(ForbiddenException, match="in your branch"):
+        asyncio.run(
+            service.update_password(
+                target_id,
+                PasswordUpdate(new_password="new-secure-password"),
+                CurrentUser(admin_id, "admin", access_level="full"),
+            )
+        )
+
+
+def test_partial_admin_cannot_change_another_users_password(monkeypatch):
+    admin_id = str(ObjectId())
+    target_id = str(ObjectId())
+    target = {
+        "_id": ObjectId(target_id),
+        "role": "employee",
+        "branch": "Chennai",
+    }
+
+    class UsersCollection:
+        async def find_one(self, query, projection=None):
+            return target if query.get("_id") == ObjectId(target_id) else None
+
+    monkeypatch.setattr(
+        service,
+        "get_collection",
+        lambda _name: UsersCollection(),
+    )
+
+    with pytest.raises(ForbiddenException, match="Full access"):
+        asyncio.run(
+            service.update_password(
+                target_id,
+                PasswordUpdate(new_password="new-secure-password"),
+                CurrentUser(admin_id, "admin", access_level="partial"),
+            )
+        )
 
 
 def test_my_profile_returns_read_only_fields_without_credentials(monkeypatch, tmp_path):
@@ -129,6 +336,40 @@ def test_my_profile_returns_read_only_fields_without_credentials(monkeypatch, tm
     assert validated.createdAt.endswith("Z")
     assert "password" not in profile
     assert "passwordEncrypted" not in profile
+
+
+def test_my_profile_uses_users_branch_when_employee_copy_is_stale(
+    monkeypatch,
+    tmp_path,
+):
+    user_id = ObjectId()
+    user = {
+        "_id": user_id,
+        "name": "Test User",
+        "email": "test@example.com",
+        "branch": "Chennai",
+        "role": "employee",
+    }
+
+    class FakeEmployeesCollection:
+        async def find_one(self, query, _projection=None):
+            assert query == {"userId": str(user_id)}
+            return {"branch": "Vellore"}
+
+    collections = {
+        "users": FakeUsersCollection(user),
+        "employees": FakeEmployeesCollection(),
+    }
+    monkeypatch.setattr(
+        service,
+        "get_collection",
+        lambda name: collections[name],
+    )
+    monkeypatch.setattr(service.settings, "PROFILE_PICTURE_STORAGE_DIR", str(tmp_path))
+
+    profile = asyncio.run(service.get_my_profile(str(user_id)))
+
+    assert profile["branch"] == "Chennai"
 
 
 def test_profile_picture_is_stored_in_configured_directory(monkeypatch, tmp_path):
@@ -183,57 +424,38 @@ def test_profile_picture_url_is_derived_from_file_and_user_id(monkeypatch, tmp_p
     )
 
 
-def test_admin_can_fetch_picture_for_an_employee_in_scope(monkeypatch, tmp_path):
-    admin_id = ObjectId()
+def test_other_user_picture_route_requires_authentication_without_admin_role():
+    route = next(
+        route
+        for route in users_router.routes
+        if route.endpoint is get_user_profile_picture
+    )
+
+    assert any(
+        dependency.call is get_current_user
+        for dependency in route.dependant.dependencies
+    )
+    assert all(
+        dependency.call is not require_admin
+        for dependency in route.dependant.dependencies
+    )
+
+
+@pytest.mark.parametrize("target_role", ["employee", "admin", "super_admin"])
+def test_authenticated_users_can_fetch_other_profile_pictures(
+    monkeypatch,
+    tmp_path,
+    target_role,
+):
     user_id = ObjectId()
-    employee_id = ObjectId()
-    users = FakeUsersCollection({"_id": user_id, "role": "employee"})
+    users = FakeUsersCollection({"_id": user_id, "role": target_role})
     (tmp_path / str(user_id)).write_bytes(b"\x89PNG\r\n\x1a\ntest-image")
     monkeypatch.setattr(service.settings, "PROFILE_PICTURE_STORAGE_DIR", str(tmp_path))
-
-    class FakeEmployeesCollection:
-        async def find_one(self, query, projection=None):
-            assert query == {"userId": str(user_id)}
-            return {"_id": employee_id}
-
-    def fake_get_collection(name):
-        if name == "users":
-            return users
-        if name == "employees":
-            return FakeEmployeesCollection()
-        raise AssertionError(f"Unexpected collection: {name}")
-
-    async def allow_scoped_employee(_current_user, requested_employee_id):
-        assert requested_employee_id == str(employee_id)
-
-    monkeypatch.setattr(service, "get_collection", fake_get_collection)
-    monkeypatch.setattr(
-        "app.core.dependencies.resolve_employee_context",
-        allow_scoped_employee,
-    )
-    result = asyncio.run(
-        service.get_admin_user_profile_picture(
-            str(user_id),
-            CurrentUser(str(admin_id), "admin"),
-        )
-    )
-
-    assert result == (tmp_path / str(user_id), "image/png")
-
-
-def test_admin_cannot_fetch_picture_for_another_admin(monkeypatch):
-    admin_id = ObjectId()
-    other_admin_id = ObjectId()
-    users = FakeUsersCollection({"_id": other_admin_id, "role": "admin"})
     monkeypatch.setattr(service, "get_collection", lambda _name: users)
 
-    with pytest.raises(ForbiddenException, match="access to this user's picture"):
-        asyncio.run(
-            service.get_admin_user_profile_picture(
-                str(other_admin_id),
-                CurrentUser(str(admin_id), "admin"),
-            )
-        )
+    result = asyncio.run(service.get_user_profile_picture(str(user_id)))
+
+    assert result == (tmp_path / str(user_id), "image/png")
 
 
 @pytest.mark.parametrize(
