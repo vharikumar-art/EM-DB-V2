@@ -1,0 +1,11 @@
+fullName,email,domain,fieldCategory,university,country,industry,designation
+"Test User 1","test1@example.com","IT","IT","ABC University","India","IT","Engineer"
+"Test User 2","test2@example.com","Data Science","IT, Data Science","XYZ Institute","USA","Data Science","Analyst"
+"Test User 3","test3@example.com","Agriculture","IT; Agriculture","Green College","Canada","Agriculture","Researcher"
+"Test User 4","test4@example.com","Engineering","Data Science / Agriculture","Tech University","UK","Engineering","Developer"
+"Test User 5","test5@example.com","Business","IT & Agriculture","Business School","Australia","Business","Manager"
+"Test User 6","test6@example.com","Medical","it; agri","Med School","Germany","Medicine","Doctor"
+"Test User 7","test7@example.com","Computer Science","unknown / Data Science","CS Institute","France","Computer Science","Scientist"
+"Test User 8","test8@example.com","Electronics","IT, IT, Data Science","Electronics Institute","Japan","Electronics","Engineer"
+"Test User 9","test9@example.com","Medicine","Health & Engineering","Medical University","India","Medicine","Professor"
+"Test User 10","test10@example.com","IT","computer science|business","AI Academy","Singapore","IT","Consultant"

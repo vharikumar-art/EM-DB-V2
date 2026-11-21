@@ -3,7 +3,8 @@ from datetime import date, datetime, timezone
 from fastapi import APIRouter, Depends, Query
 
 from app.core.dependencies import CurrentUser, get_current_user, require_admin
-from app.dashboard import service
+from . import service
+from app.dashboard.roles import is_admin_dashboard_role, is_super_admin_role
 from app.dashboard.schema import DashboardQuery, DateRangePreset
 from app.employees.service import get_employee_by_user_id
 from app.schemas.common import ApiResponse
@@ -25,7 +26,7 @@ async def employee_dashboard(
     query: DashboardQuery = Depends(_dashboard_query),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    if current_user.role == "admin":
+    if is_admin_dashboard_role(current_user.role):
         if not employeeId:
             from app.core.exceptions import BadRequestException
             raise BadRequestException("Admins must provide employeeId to view an employee dashboard, or use /dashboard/admin")
@@ -33,13 +34,13 @@ async def employee_dashboard(
     else:
         employee = await get_employee_by_user_id(current_user.user_id)
         target_employee_id = employee["id"]
-    
+
     # Get current user details
     from app.database.mongodb import get_collection
     users = get_collection("users")
     from bson import ObjectId
     user_doc = await users.find_one({"_id": ObjectId(current_user.user_id)})
-    
+
     user_info = {
         "userId": current_user.user_id,
         "email": user_doc.get("email", "N/A") if user_doc else "N/A",
@@ -47,7 +48,7 @@ async def employee_dashboard(
         "role": current_user.role,
         "loginTime": datetime.now(timezone.utc).isoformat(),
     }
-        
+
     data = await service.get_employee_dashboard(target_employee_id, query)
     data["currentUser"] = user_info
     return ApiResponse(message="Employee dashboard fetched", data=data)
@@ -63,7 +64,7 @@ async def admin_dashboard(
     users = get_collection("users")
     from bson import ObjectId
     user_doc = await users.find_one({"_id": ObjectId(current_user.user_id)})
-    
+
     user_info = {
         "userId": current_user.user_id,
         "email": user_doc.get("email", "N/A") if user_doc else "N/A",
@@ -71,8 +72,19 @@ async def admin_dashboard(
         "role": current_user.role,
         "loginTime": datetime.now(timezone.utc).isoformat(),
     }
-    
-    data = await service.get_admin_dashboard(query)
+
+    # Route based on role
+    if is_super_admin_role(current_user.role):
+        # Global admin dashboard for super_admin
+        data = await service.get_admin_dashboard(query)
+    elif is_admin_dashboard_role(current_user.role):
+        # Scoped admin dashboard for admin (own uploads + assigned employees)
+        data = await service.get_admin_scoped_dashboard(current_user.user_id, query)
+    else:
+        # Fallback (should not happen due to require_admin dependency)
+        from app.core.exceptions import ForbiddenException
+        raise ForbiddenException("User role not authorized for admin dashboard")
+
     data["currentUser"] = user_info
     return ApiResponse(message="Admin dashboard fetched", data=data)
 
@@ -80,7 +92,7 @@ async def admin_dashboard(
 @router.get("/dropdown-options", response_model=ApiResponse, dependencies=[Depends(require_admin)])
 async def get_dropdown_options(current_user: CurrentUser = Depends(get_current_user)):
     """Get dropdown options for admins: employees, profiles, campaigns, and admin users."""
-    data = await service.get_dropdown_options()
+    data = await service.get_dropdown_options(current_user=current_user)
     return ApiResponse(message="Dropdown options fetched", data=data)
 
 
@@ -89,9 +101,15 @@ async def upload_history(
     query: DashboardQuery = Depends(_dashboard_query),
     employeeId: str | None = Query(default=None),
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=1, le=100),
+    page_size: int = Query(default=20, ge=1, le=500),
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Get paginated upload history for all (or a specific) active employee."""
-    data = await service.get_upload_history(query, employee_id=employeeId, page=page, page_size=page_size)
+    data = await service.get_upload_history(
+        query,
+        employee_id=employeeId,
+        page=page,
+        page_size=page_size,
+        current_user=current_user,
+    )
     return ApiResponse(message="Upload history fetched", data=data)

@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 
-from app.profile_emails.model import SendStatus
+from app.profile_emails.model import ProfileEmailType, SendStatus
 
 
 class ProfileEmailOut(BaseModel):
@@ -8,10 +8,11 @@ class ProfileEmailOut(BaseModel):
     profileId: str
     employeeId: str
     campaignId: str | None = None
+    mailType: ProfileEmailType = ProfileEmailType.DRAFT
     masterEmailId: str
     fullName: str = ""
     email: str
-    company: str = ""
+    university: str = ""
     website: str = ""
     country: str = ""
     state: str = ""
@@ -24,6 +25,15 @@ class ProfileEmailOut(BaseModel):
     sendStatus: SendStatus = SendStatus.PENDING
     threadId: str | None = None
     messageId: str | None = None
+    draftSubject: str | None = None
+    draftMessageId: str | None = None
+    draftSentDate: str | None = None
+    reminderSubject: str | None = None
+    reminderMessageId: str | None = None
+    reminderSentDate: str | None = None
+    reminder2Subject: str | None = None
+    reminder2MessageId: str | None = None
+    reminder2SentDate: str | None = None
     sentDate: str | None = None
     errorMessage: str | None = None
     notes: str = ""
@@ -35,7 +45,7 @@ class ProfileEmailOut(BaseModel):
 class ProfileEmailUpdate(BaseModel):
     """Fields an employee can manually edit on a profile email row."""
     fullName: str | None = None
-    company: str | None = None
+    university: str | None = None
     country: str | None = None
     notes: str | None = None
     sendStatus: SendStatus | None = None
@@ -47,13 +57,20 @@ class GenerateListRequest(BaseModel):
     If omitted, profile's stored filters are used.
     """
     overrideFilters: dict | None = None
-    limitOverride: int | None = Field(default=None, ge=1, le=50000)
+    allowUsed: bool = Field(
+        default=False,
+        description="If True, allow fetching emails that have been previously used (usageCount > 0) but are not currently locked in a profile"
+    )
 
 
-class ProfileEmailStats(BaseModel):
+class ProfileEmailTypeStats(BaseModel):
     total: int
     pending: int
+    sending: int
     sent: int
     failed: int
     skipped: int
-    sending: int
+
+
+class ProfileEmailStats(ProfileEmailTypeStats):
+    byType: dict[ProfileEmailType, ProfileEmailTypeStats]

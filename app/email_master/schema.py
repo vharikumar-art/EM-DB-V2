@@ -1,4 +1,6 @@
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import BaseModel, EmailStr, Field
 
 
 class EmailMasterOut(BaseModel):
@@ -8,12 +10,13 @@ class EmailMasterOut(BaseModel):
     isDuplicate: bool
     fullName: str = ""
     email: str
-    company: str = ""
+    university: str = ""
     website: str = ""
     country: str = ""
     state: str = ""
     city: str = ""
     domain: str = ""
+    domain_group: list[str] = Field(default_factory=list)
     industry: str = ""
     designation: str = ""
     phone: str = ""
@@ -22,11 +25,21 @@ class EmailMasterOut(BaseModel):
     mailSource: str = ""
     # Employee usage tracking
     uploadedByName: str | None = None
-    usedByEmployeeId: str | None = None
-    usedByEmployeeName: str | None = None
+    usedByEmployeeIds: list[str] = Field(default_factory=list)
+    usedByEmployeeNames: list[str] = Field(default_factory=list)
     inProfileEmails: bool = False
+    profileNames: list[str] = Field(default_factory=list)
+    usageCount: int = 0
+    lastUsedAt: str | None = None
     assignedDate: str | None = None
     assignedProfiles: list[dict] = Field(default_factory=list)
+    hasReply: bool = False
+    replyReason: str | None = None
+    replyCustomReason: str | None = None
+    phone_no: str | None = None
+    replyMarkedAt: str | None = None
+    replyMarkedBy: str | None = None
+    replyMarkedByName: str | None = None
     createdAt: str | None = None
     updatedAt: str | None = None
 
@@ -37,11 +50,54 @@ class UploadResult(BaseModel):
     duplicate: int
     failed: int
     uploadBatch: str
+    failedEmails: list[dict] = Field(default_factory=list)
 
 
 class EmailMasterFilterQuery(BaseModel):
     country: list[str] | None = None
     domain: list[str] | None = None
-    industry: list[str] | None = None
-    company: list[str] | None = None
+    university: list[str] | None = None
     includeDuplicates: bool = False
+
+
+ReplyReason = Literal["replied", "converted", "other", "Interested" , "Not Interested"]
+
+
+class MarkReplyRequest(BaseModel):
+    email: EmailStr
+    reason: ReplyReason
+    phone_no : str | None = None
+    customReason: str | None = None
+
+
+class UpdateReplyRequest(BaseModel):
+    hasReply: bool | None = None
+    reason: ReplyReason | None = None
+    phone_no : str | None = None
+    customReason: str | None = None
+
+
+class EmailMasterUpdate(BaseModel):
+    """Editable contact fields on an email_master record. Email address cannot be changed."""
+    fullName: str | None = None
+    university: str | None = None
+    website: str | None = None
+    country: str | None = None
+    state: str | None = None
+    city: str | None = None
+    domain: str | None = None
+    domain_group: list[str] | None = None
+    industry: str | None = None
+    designation: str | None = None
+    phone: str | None = None
+    linkedin: str | None = None
+    citation: str | None = None
+    mailSource: str | None = None
+
+
+class FilterValueUpdate(BaseModel):
+    sourceField: Literal["country", "state", "domain", "city", "university"]
+    sourceValue: str = Field(min_length=1, max_length=200)
+    targetField: Literal["country", "state", "domain", "city", "university"]
+    targetValue: str | None = Field(default=None, max_length=200)
+    overwrite: bool = False

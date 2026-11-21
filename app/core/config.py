@@ -12,6 +12,7 @@ class Settings(BaseSettings):
 
     APP_NAME: str = "Email Marketing Management System"
     ENV: str = "development"
+    PROFILE_PICTURE_STORAGE_DIR: str = "./uploads/profile-pictures-test"
 
     MONGO_URI: str = "mongodb://localhost:27017"
     MONGO_DB_NAME: str = "email_marketing_db"
@@ -21,12 +22,21 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
-    CORS_ORIGINS: str = "http://localhost:3000"
+    CORS_ORIGINS: str = "http://localhost:5173"
+    EMAIL_MASTER_DROPDOWN_CACHE_KEY: str = "email_master:dropdown_options"
+    EMAIL_MASTER_DROPDOWN_CACHE_TTL_SECONDS: int = 1800
 
 
     PASSWORD_ENCRYPTION_KEY: str = "dev-password-encryption-key-123456"
 
     RATE_LIMIT_PER_MINUTE: int = 100
+
+    @property
+    def profile_picture_storage_path(self) -> Path:
+        path = Path(self.PROFILE_PICTURE_STORAGE_DIR)
+        if path.is_absolute():
+            return path
+        return _ENV_FILE.parent / path
 
     # LLM settings removed - using simple placeholder replacement only
 

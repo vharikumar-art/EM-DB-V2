@@ -1,7 +1,10 @@
-from datetime import datetime, timezone
+from calendar import monthrange
+from datetime import date, datetime, timezone
 import logging
+import random
 
 from fastapi import UploadFile
+from app.campaign_engine.sender import SMTPCredentials, send_email
 from app.core.exceptions import (
     BadRequestException,
     ConflictException,
@@ -9,10 +12,13 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.database.mongodb import get_collection
+from app.email_accounts.service import get_credentials_for_send
 from app.notifications.schema import NotificationType
 from app.notifications.service import create_notification
 from app.profiles.model import MAX_PROFILES_PER_EMPLOYEE, build_profile_document
-from app.profiles.schema import ProfileCreate, ProfileUpdate
+from app.profiles.schema import ProfileCreate, ProfileTestEmailRequest, ProfileUpdate
+from app.users.unknown import UNKNOWN_EMPLOYEE_ID, resolve_unknown_employee_ids
+
 from app.utils.response import serialize_doc, serialize_list, to_object_id
 
 COLLECTION = "profiles"
@@ -20,8 +26,89 @@ COLLECTION = "profiles"
 logger = logging.getLogger(__name__)
 
 
+def _add_months(value: date, months: int) -> date:
+    month_index = value.month - 1 + months
+    year = value.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(value.day, monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def _format_profile_age(created_at: datetime | None, today: date | None = None) -> str | None:
+    if not isinstance(created_at, datetime):
+        return None
+
+    created_date = (
+        created_at.astimezone(timezone.utc).date()
+        if created_at.tzinfo is not None
+        else created_at.date()
+    )
+    current_date = today or datetime.now(timezone.utc).date()
+    if created_date > current_date:
+        return "0 days"
+
+    total_months = (current_date.year - created_date.year) * 12
+    total_months += current_date.month - created_date.month
+    if _add_months(created_date, total_months) > current_date:
+        total_months -= 1
+
+    years, months = divmod(total_months, 12)
+    remaining_days = (current_date - _add_months(created_date, total_months)).days
+    parts = []
+    for value, unit in (
+        (years, "year"),
+        (months, "month"),
+        (remaining_days, "day"),
+    ):
+        if value:
+            parts.append(f"{value} {unit}{'' if value == 1 else 's'}")
+    return ", ".join(parts) or "0 days"
+
+
 def _default_filters() -> dict:
-    return {"country": [], "domain": [], "industry": [], "company": [], "type": []}
+    return {
+        "country": [],
+        "domain": [],
+        "domainGroup": [],
+        "university": [],
+        "type": [],
+        "oldestFirst": False,
+    }
+
+
+async def _resolve_admin_name(admin_employee_id: str) -> str:
+    """Resolve an admin employee ID to the admin's display name.
+
+    admin_employee_id is the _id of a document in the employees collection.
+    We follow: employees._id → employees.userId → users.name
+    Handles userId stored as either a plain str or an ObjectId.
+    """
+    if not admin_employee_id:
+        return ""
+    try:
+        from bson import ObjectId as BsonObjectId
+        employees_col = get_collection("employees")
+        users_col = get_collection("users")
+
+        admin_emp = await employees_col.find_one(
+            {"_id": BsonObjectId(admin_employee_id)},
+            {"userId": 1},
+        )
+        if not admin_emp or not admin_emp.get("userId"):
+            return ""
+
+        uid = admin_emp["userId"]
+        # userId may be stored as a plain string or already an ObjectId
+        uid_obj = BsonObjectId(str(uid)) if BsonObjectId.is_valid(str(uid)) else None
+        user_doc = None
+        if uid_obj:
+            user_doc = await users_col.find_one({"_id": uid_obj}, {"name": 1, "email": 1})
+        if not user_doc:
+            # Fallback: try raw value as-is
+            user_doc = await users_col.find_one({"_id": uid}, {"name": 1, "email": 1})
+        return (user_doc or {}).get("name") or (user_doc or {}).get("email") or ""
+    except Exception:
+        return ""
 
 
 def _default_sending_options() -> dict:
@@ -39,10 +126,15 @@ def _default_prompt_settings() -> dict:
 
 
 async def _assert_owns_profile_or_admin(
-    profile: dict, employee_id: str, is_admin: bool
+    profile: dict, employee_id: str | list[str] | None, is_admin: bool
 ) -> None:
-    if not is_admin and profile["employeeId"] != employee_id:
-        raise ForbiddenException("You do not have access to this profile")
+    if not is_admin:
+        profile_owner = profile.get("employeeId")
+        if isinstance(employee_id, list):
+            if profile_owner not in employee_id:
+                raise ForbiddenException("You do not have access to this profile")
+        elif profile_owner != employee_id:
+            raise ForbiddenException("You do not have access to this profile")
 
 
 async def create_profile(employee_id: str, payload: ProfileCreate) -> dict:
@@ -62,18 +154,49 @@ async def create_profile(employee_id: str, payload: ProfileCreate) -> dict:
             "A profile with this name already exists for this employee"
         )
 
+    gmail_account = str(payload.gmailAccount).strip().lower()
+    existing_account = await profiles.find_one(
+        {"gmailAccount": {"$regex": f"^{gmail_account}$", "$options": "i"}}
+    )
+    if existing_account:
+        raise ConflictException(
+            "A profile already exists using this Gmail account"
+
+        )
+    # 1. Fetch the employee document from the employees collection
+    employees_collection = get_collection("employees")
+    employee_doc = await employees_collection.find_one({"_id": to_object_id(employee_id)})
+    admin_emp_id = str(employee_doc.get("assignedToAdmin") or "") if employee_doc else ""
+
+    # 2. Resolve the employee's display name and the admin's display name
+    employee_name = ""
+    if employee_doc and employee_doc.get("userId"):
+        user_collection = get_collection("users")
+        user_doc = await user_collection.find_one(
+            {"_id": to_object_id(str(employee_doc["userId"]))},
+            {"name": 1, "email": 1},
+        )
+        if user_doc:
+            employee_name = user_doc.get("name") or user_doc.get("email") or ""
+    assigned_admin = await _resolve_admin_name(admin_emp_id)
+
     doc = build_profile_document(
         employee_id=employee_id,
         profile_name=payload.profileName,
-        gmail_account=str(payload.gmailAccount),
+        gmail_account=gmail_account,
         signature=payload.signature,
         templates=[t.model_dump() for t in payload.templates],
+        reminder_templates=[
+            t.model_dump() for t in payload.reminderTemplates
+        ],
         attachments=[a.model_dump() for a in payload.attachments] if payload.attachments else [],
         filters=payload.filters.model_dump(),
         filter_limit=payload.filterLimit,
         sending_options=payload.sendingOptions.model_dump(),
         prompt_settings=payload.promptSettings.model_dump(),
-    )
+        employee_name=employee_name,
+        assigned_admin=assigned_admin,
+        )
     result = await profiles.insert_one(doc)
     created = await profiles.find_one({"_id": result.inserted_id})
 
@@ -86,11 +209,25 @@ async def create_profile(employee_id: str, payload: ProfileCreate) -> dict:
     return serialize_doc(created)
 
 
-async def list_profiles(employee_id: str | None) -> list[dict]:
+async def list_profiles(employee_id: str | list[str] | None) -> list[dict]:
     profiles = get_collection(COLLECTION)
-    query = {"employeeId": employee_id} if employee_id else {}
+    if employee_id is None:
+        query = {}
+    elif isinstance(employee_id, list):
+        query = {"employeeId": {"$in": employee_id}}
+    else:
+        employee_ids = (
+            await resolve_unknown_employee_ids()
+            if employee_id == UNKNOWN_EMPLOYEE_ID
+            else [employee_id]
+        )
+        query = {"employeeId": {"$in": employee_ids}}
     cursor = profiles.find(query).sort("createdAt", -1)
-    return serialize_list([d async for d in cursor])
+    documents = [document async for document in cursor]
+    results = serialize_list(documents)
+    for document, profile in zip(documents, results):
+        profile["profileAge"] = _format_profile_age(document.get("createdAt"))
+    return results
 
 
 async def get_profile(profile_id: str, employee_id: str, is_admin: bool) -> dict:
@@ -102,6 +239,7 @@ async def get_profile(profile_id: str, employee_id: str, is_admin: bool) -> dict
     await _assert_owns_profile_or_admin(doc, employee_id, is_admin)
     # Back-fill defaults for older documents that predate new fields
     doc.setdefault("signature", "")
+    doc.setdefault("reminderTemplates", [])
     doc.setdefault("filters", _default_filters())
     doc.setdefault("filterLimit", 0)
     doc.setdefault("sendingOptions", _default_sending_options())
@@ -123,14 +261,47 @@ async def update_profile(
     update_data: dict = {}
     raw = payload.model_dump(exclude_unset=True)
 
+    if "filterLimit" in raw and raw["filterLimit"] is not None and raw["filterLimit"] < 0:
+        raise BadRequestException("Filter limit cannot be negative")
+
+    if "sendingOptions" in raw and raw["sendingOptions"] is not None:
+        sending_options = raw["sendingOptions"]
+        if isinstance(sending_options, dict) and sending_options.get("dailyLimit") is not None:
+            daily_limit = sending_options["dailyLimit"]
+            if daily_limit < 0:
+                raise BadRequestException("Daily limit cannot be negative")
+
+    if "gmailAccount" in raw and raw["gmailAccount"] is not None:
+        gmail_account = str(raw["gmailAccount"]).strip().lower()
+        duplicate_account = await profiles.find_one(
+            {
+                "_id": {"$ne": to_object_id(profile_id)},
+                "gmailAccount": {"$regex": f"^{gmail_account}$", "$options": "i"},
+            }
+        )
+        if duplicate_account:
+            raise ConflictException(
+                "A profile already exists using this Gmail account"
+            )
+        raw["gmailAccount"] = gmail_account
+
     for key, val in raw.items():
         if val is not None:
             # Handle templates specially - convert to list of dicts
-            if key == "templates" and val:
+            if key in {"templates", "reminderTemplates"} and val:
                 update_data[key] = [t if isinstance(t, dict) else t.model_dump() for t in val]
             else:
                 # nested pydantic objects come back as dicts via model_dump
                 update_data[key] = val
+
+    if "employeeId" in update_data:
+        if not is_admin:
+            raise ForbiddenException("Only admins can reassign a profile")
+        target_employee = await get_collection("employees").find_one(
+            {"_id": to_object_id(update_data["employeeId"])}
+        )
+        if not target_employee:
+            raise NotFoundException("Target employee not found")
 
     if not update_data:
         return serialize_doc(existing)
@@ -141,7 +312,186 @@ async def update_profile(
         {"$set": update_data},
         return_document=True,
     )
+
+    # Cascade the employeeId change to campaigns, profile_emails, and the linked email account
+    if "employeeId" in update_data and update_data["employeeId"] != existing.get("employeeId"):
+        new_emp_id = update_data["employeeId"]
+        now = datetime.now(timezone.utc)
+        await get_collection("campaigns").update_many(
+            {"profileId": profile_id},
+            {"$set": {"employeeId": new_emp_id, "updatedAt": now}}
+        )
+        await get_collection("profile_emails").update_many(
+            {"profileId": profile_id},
+            {"$set": {"employeeId": new_emp_id, "updatedAt": now}}
+        )
+        # Also move the associated email account to the new employee
+        if existing.get("gmailAccount"):
+            await get_collection("email_accounts").update_many(
+                {"email": existing["gmailAccount"]},
+                {"$set": {"employeeId": new_emp_id, "updatedAt": now}}
+            )
+
+        # Sync employeeName + assignedAdmin on the profile from the new employee
+        new_emp_doc = await get_collection("employees").find_one({"_id": to_object_id(new_emp_id)})
+        if new_emp_doc:
+            admin_emp_id = str(new_emp_doc.get("assignedToAdmin") or "")
+            new_assigned_admin = await _resolve_admin_name(admin_emp_id)
+            new_employee_name = ""
+            if new_emp_doc.get("userId"):
+                user_doc = await get_collection("users").find_one(
+                    {"_id": to_object_id(str(new_emp_doc["userId"]))},
+                    {"name": 1, "email": 1},
+                )
+                if user_doc:
+                    new_employee_name = user_doc.get("name") or user_doc.get("email") or ""
+            await profiles.update_one(
+                {"_id": to_object_id(profile_id)},
+                {"$set": {
+                    "employeeName": new_employee_name,
+                    "assignedAdmin": new_assigned_admin,
+                    "updatedAt": now,
+                }},
+            )
+            # Re-fetch result with the updated fields
+            result = await profiles.find_one({"_id": to_object_id(profile_id)})
+
     return serialize_doc(result)
+
+
+async def send_test_email(
+    profile_id: str,
+    employee_id: str,
+    is_admin: bool,
+    payload: ProfileTestEmailRequest,
+) -> dict:
+    """Send a real test email for a profile using that profile's configured sender and template."""
+    profiles = get_collection(COLLECTION)
+    existing = await profiles.find_one({"_id": to_object_id(profile_id)})
+    if not existing:
+        raise NotFoundException("Profile not found")
+    await _assert_owns_profile_or_admin(serialize_doc(existing), employee_id, is_admin)
+
+    is_reminder = payload.mailType == "reminder"
+    templates = existing.get(
+        "reminderTemplates" if is_reminder else "templates"
+    ) or []
+    if not templates:
+        template_type = "reminder templates" if is_reminder else "templates"
+        raise BadRequestException(f"This profile has no {template_type} configured")
+
+    template = None
+    if payload.templateId is not None:
+        requested_template = str(payload.templateId).strip()
+
+        # Support both persisted template IDs and array indexes (0, 1, 2, ...).
+        for item in templates:
+            if item.get("id") is not None and str(item["id"]) == requested_template:
+                template = item
+                break
+
+        if template is None and requested_template.isdigit():
+            template_index = int(requested_template)
+            if template_index < len(templates):
+                template = templates[template_index]
+
+        if template is None:
+            raise BadRequestException(
+                f"Template '{payload.templateId}' was not found in this profile"
+            )
+    else:
+        template = random.choice(templates)
+
+    sender_email = str(existing.get("gmailAccount") or "").strip()
+    if not sender_email:
+        raise BadRequestException("This profile does not have a sender email configured")
+
+    credentials = await get_credentials_for_send(sender_email)
+    if is_reminder:
+        # Reminder templates contain only a body; use a draft subject for the test.
+        draft_templates = existing.get("templates") or []
+        draft_subject = next(
+            (str(item.get("subject") or "") for item in draft_templates if item.get("subject")),
+            "Test reminder",
+        )
+        subject = _replace_placeholders(
+            draft_subject, {"name": "Test", "fullName": "Test"}
+        )
+    else:
+        subject = _replace_placeholders(
+            str(template.get("subject") or ""),
+            {"name": "Test", "fullName": "Test"},
+        )
+    body = _replace_placeholders(str(template.get("body") or ""), {"name": "Test", "fullName": "Test"})
+    signature = str(existing.get("signature") or "")
+    html_body = f"{body.replace(chr(10), '<br>')}<br><br>{signature}"
+
+    attachments = []
+    for item in (existing.get("attachments") or []):
+        attachments.append({
+            "filename": item.get("filename", "attachment"),
+            "filepath": item.get("filepath"),
+        })
+    for item in (template.get("attachments") or []):
+        attachments.append({
+            "filename": item.get("filename", "attachment"),
+            "filepath": item.get("filepath"),
+        })
+
+    seen = set()
+    unique_attachments = []
+    for item in attachments:
+        key = (item.get("filepath"), item.get("filename"))
+        if key in seen or not item.get("filepath"):
+            continue
+        seen.add(key)
+        unique_attachments.append(item)
+
+    smtp_credentials = SMTPCredentials(
+        email=credentials["email"],
+        password=credentials["password"],
+        display_name=credentials.get("displayName", credentials["email"]),
+        smtp_host=credentials["smtpHost"],
+        smtp_port=credentials["smtpPort"],
+        use_tls=bool(credentials.get("useTls", True)),
+    )
+
+    result = await send_email(
+        credentials=smtp_credentials,
+        to=str(payload.toEmail),
+        subject=subject,
+        body_plain=body,
+        body_html=html_body,
+        attachments=unique_attachments,
+    )
+
+    return {
+        "success": bool(result.success),
+        "message": "Test email sent successfully" if result.success else (result.error or "Test email failed"),
+        "fromEmail": credentials["email"],
+        "toEmail": str(payload.toEmail),
+        "mailType": payload.mailType,
+        "templateId": str(template.get("id")) if template.get("id") is not None else None,
+        "subject": subject,
+        "messageId": result.message_id,
+        "attachments": unique_attachments,
+        "error": result.error,
+    }
+
+
+def _replace_placeholders(text: str, lead: dict) -> str:
+    """Simple [placeholder] substitution for preview and test sends."""
+    replacements = {
+        "[name]": lead.get("fullName") or lead.get("name") or "there",
+        "[university]": lead.get("university", "your university"),
+        "[industry]": lead.get("industry", "your industry"),
+        "[designation]": lead.get("designation", ""),
+        "[country]": lead.get("country", ""),
+        "[domain]": lead.get("domain", ""),
+    }
+    for placeholder, value in replacements.items():
+        text = text.replace(placeholder, value.strip() if isinstance(value, str) else value)
+    return text
 
 
 async def set_active_status(
@@ -171,10 +521,10 @@ async def delete_profile(profile_id: str, employee_id: str, is_admin: bool) -> N
     await _assert_owns_profile_or_admin(
         serialize_doc(existing), employee_id, is_admin
     )
-    
+
     # Delete the profile
     await profiles.delete_one({"_id": to_object_id(profile_id)})
-    
+
     # Also delete all profile_emails records for this profile (cleanup orphaned records)
     profile_emails = get_collection("profile_emails")
     await profile_emails.delete_many({"profileId": profile_id})
@@ -191,11 +541,11 @@ async def add_template(
     await _assert_owns_profile_or_admin(
         serialize_doc(existing), employee_id, is_admin
     )
-    
+
     # Generate unique template ID
     import uuid
     template_id = str(uuid.uuid4())[:8]
-    
+
     new_template = {
         "id": template_id,
         "name": template_data.get("name", f"Template {template_id}"),
@@ -203,7 +553,7 @@ async def add_template(
         "body": template_data.get("body", ""),
         "weight": template_data.get("weight", 1),
     }
-    
+
     result = await profiles.find_one_and_update(
         {"_id": to_object_id(profile_id)},
         {
@@ -226,7 +576,7 @@ async def update_template(
     await _assert_owns_profile_or_admin(
         serialize_doc(existing), employee_id, is_admin
     )
-    
+
     # Find template
     templates = existing.get("templates", [])
     template_idx = None
@@ -234,10 +584,10 @@ async def update_template(
         if t.get("id") == template_id:
             template_idx = idx
             break
-    
+
     if template_idx is None:
         raise NotFoundException(f"Template {template_id} not found")
-    
+
     # Update template
     update_dict = {}
     if "name" in template_data:
@@ -248,9 +598,9 @@ async def update_template(
         update_dict[f"templates.{template_idx}.body"] = template_data["body"]
     if "weight" in template_data:
         update_dict[f"templates.{template_idx}.weight"] = template_data["weight"]
-    
+
     update_dict["updatedAt"] = datetime.now(timezone.utc)
-    
+
     result = await profiles.find_one_and_update(
         {"_id": to_object_id(profile_id)},
         {"$set": update_dict},
@@ -270,12 +620,12 @@ async def delete_template(
     await _assert_owns_profile_or_admin(
         serialize_doc(existing), employee_id, is_admin
     )
-    
+
     # Must have at least one template
     templates = existing.get("templates", [])
     if len(templates) <= 1:
         raise BadRequestException("Cannot delete the last template")
-    
+
     # Find and delete any attached files
     for template in templates:
         if template.get("id") == template_id:
@@ -285,7 +635,7 @@ async def delete_template(
                 if filepath:
                     _delete_file(filepath)
             break
-    
+
     result = await profiles.find_one_and_update(
         {"_id": to_object_id(profile_id)},
         {
@@ -303,7 +653,7 @@ async def upload_attachment(
     """Upload an attachment file for a template"""
     import os
     import uuid
-    
+
     profiles = get_collection(COLLECTION)
     existing = await profiles.find_one({"_id": to_object_id(profile_id)})
     if not existing:
@@ -311,7 +661,7 @@ async def upload_attachment(
     await _assert_owns_profile_or_admin(
         serialize_doc(existing), employee_id, is_admin
     )
-    
+
     # Find template
     templates = existing.get("templates", [])
     template_idx = None
@@ -319,16 +669,16 @@ async def upload_attachment(
         if t.get("id") == template_id:
             template_idx = idx
             break
-    
+
     if template_idx is None:
         raise NotFoundException(f"Template {template_id} not found")
-    
+
     # Validate file size (max 10MB)
     max_size = 10 * 1024 * 1024  # 10MB
     file_content = await file.read()
     if len(file_content) > max_size:
         raise BadRequestException(f"File too large. Maximum size is 10MB")
-    
+
     # Validate file type (allow common attachment types)
     allowed_types = {
         "application/pdf",
@@ -342,24 +692,24 @@ async def upload_attachment(
         "text/plain",
         "text/csv",
     }
-    
+
     if file.content_type not in allowed_types:
         raise BadRequestException(f"File type not allowed. Allowed: PDF, DOC, XLS, images, etc.")
-    
+
     # Generate unique filename
     file_id = str(uuid.uuid4())[:8]
     file_ext = os.path.splitext(file.filename)[1]
     safe_filename = f"{file_id}_{file.filename}"
     filepath = f"uploads/templates/{safe_filename}"
-    
+
     # Save file to disk
     upload_dir = os.path.join(os.path.dirname(__file__), "..", "..", "uploads", "templates")
     os.makedirs(upload_dir, exist_ok=True)
     full_path = os.path.join(upload_dir, safe_filename)
-    
+
     with open(full_path, "wb") as f:
         f.write(file_content)
-    
+
     # Create attachment record
     attachment = {
         "id": file_id,
@@ -367,11 +717,11 @@ async def upload_attachment(
         "filepath": filepath,
         "size": len(file_content),
     }
-    
+
     # Add attachment to template
     update_dict = {f"templates.{template_idx}.attachments": attachment}
     update_dict["updatedAt"] = datetime.now(timezone.utc)
-    
+
     # Use $push to add to attachments array
     result = await profiles.find_one_and_update(
         {"_id": to_object_id(profile_id)},
@@ -386,7 +736,7 @@ async def delete_attachment(
 ) -> dict:
     """Delete an attachment from a template"""
     import os
-    
+
     profiles = get_collection(COLLECTION)
     existing = await profiles.find_one({"_id": to_object_id(profile_id)})
     if not existing:
@@ -394,12 +744,12 @@ async def delete_attachment(
     await _assert_owns_profile_or_admin(
         serialize_doc(existing), employee_id, is_admin
     )
-    
+
     # Find template and attachment
     templates = existing.get("templates", [])
     template_idx = None
     attachment_path = None
-    
+
     for idx, template in enumerate(templates):
         if template.get("id") == template_id:
             template_idx = idx
@@ -408,16 +758,16 @@ async def delete_attachment(
                     attachment_path = att.get("filepath")
                     break
             break
-    
+
     if template_idx is None:
         raise NotFoundException(f"Template {template_id} not found")
-    
+
     if not attachment_path:
         raise NotFoundException(f"Attachment {attachment_id} not found")
-    
+
     # Delete file from disk
     _delete_file(attachment_path)
-    
+
     # Remove from database
     result = await profiles.find_one_and_update(
         {"_id": to_object_id(profile_id)},
@@ -447,7 +797,7 @@ async def upload_profile_attachment(
     """Upload an attachment file for the profile (shared across all templates)"""
     import os
     import uuid
-    
+
     profiles = get_collection(COLLECTION)
     existing = await profiles.find_one({"_id": to_object_id(profile_id)})
     if not existing:
@@ -455,13 +805,13 @@ async def upload_profile_attachment(
     await _assert_owns_profile_or_admin(
         serialize_doc(existing), employee_id, is_admin
     )
-    
+
     # Validate file size (max 10MB)
     max_size = 10 * 1024 * 1024  # 10MB
     file_content = await file.read()
     if len(file_content) > max_size:
         raise BadRequestException("File too large. Maximum size is 10MB")
-    
+
     # Validate file type (allow common attachment types)
     allowed_types = {
         "application/pdf",
@@ -475,23 +825,23 @@ async def upload_profile_attachment(
         "text/plain",
         "text/csv",
     }
-    
+
     if file.content_type not in allowed_types:
         raise BadRequestException("File type not allowed. Allowed: PDF, DOC, XLS, images, etc.")
-    
+
     # Generate unique filename
     file_id = str(uuid.uuid4())[:8]
     file_ext = os.path.splitext(file.filename)[1]
     safe_filename = f"{file_id}_{file.filename}"
-    
+
     # Save to local filesystem
     upload_dir = os.path.join(os.path.dirname(__file__), "..", "..", "uploads", "profiles")
     os.makedirs(upload_dir, exist_ok=True)
-    
+
     filepath = os.path.join(upload_dir, safe_filename)
     with open(filepath, "wb") as f:
         f.write(file_content)
-    
+
     # Only one attachment per profile - replace if exists
     relative_filepath = f"uploads/profiles/{safe_filename}"
     attachment = {
@@ -500,7 +850,7 @@ async def upload_profile_attachment(
         "filepath": relative_filepath,
         "size": len(file_content),
     }
-    
+
     result = await profiles.find_one_and_update(
         {"_id": to_object_id(profile_id)},
         {
@@ -511,7 +861,7 @@ async def upload_profile_attachment(
         },
         return_document=True,
     )
-    
+
     return serialize_doc(result)
 
 
@@ -526,25 +876,25 @@ async def delete_profile_attachment(
     await _assert_owns_profile_or_admin(
         serialize_doc(existing), employee_id, is_admin
     )
-    
+
     # Find attachment to delete
     attachments = existing.get("attachments", [])
     attachment_idx = None
     filepath_to_delete = None
-    
+
     for idx, att in enumerate(attachments):
         if att.get("id") == attachment_id:
             attachment_idx = idx
             filepath_to_delete = att.get("filepath")
             break
-    
+
     if attachment_idx is None:
         raise NotFoundException(f"Attachment {attachment_id} not found")
-    
+
     # Delete from filesystem
     if filepath_to_delete:
         _delete_file(filepath_to_delete)
-    
+
     # Remove from profile
     result = await profiles.find_one_and_update(
         {"_id": to_object_id(profile_id)},
@@ -554,5 +904,71 @@ async def delete_profile_attachment(
         },
         return_document=True,
     )
-    
+
     return serialize_doc(result)
+
+
+async def backfill_profile_employee_info() -> dict:
+    """SUPER ADMIN: Backfill employeeName and assignedAdmin for all existing profiles.
+
+    Iterates every profile, resolves the employee's name and assigned admin
+    from the employees+users collections, and patches only profiles where
+    the values are missing or empty.
+    """
+    profiles_col = get_collection(COLLECTION)
+    employees_col = get_collection("employees")
+    users_col = get_collection("users")
+    now = datetime.now(timezone.utc)
+
+    # Backfill ALL profiles — this overwrites stale raw IDs too, not just empty fields
+    cursor = profiles_col.find({}, {"_id": 1, "employeeId": 1})
+
+    # Cache lookups to avoid repeated DB hits for the same employee
+    emp_cache: dict[str, dict] = {}   # employee_id -> {name, assignedAdmin}
+    updated = 0
+    skipped = 0
+
+    async for profile in cursor:
+        emp_id = str(profile.get("employeeId") or "")
+        if not emp_id:
+            skipped += 1
+            continue
+
+        # Use cache or query DB
+        if emp_id not in emp_cache:
+            emp_doc = await employees_col.find_one(
+                {"_id": to_object_id(emp_id)},
+                {"userId": 1, "assignedToAdmin": 1},
+            )
+            if not emp_doc:
+                emp_cache[emp_id] = {"name": "", "assignedAdmin": ""}
+            else:
+                admin_emp_id = str(emp_doc.get("assignedToAdmin") or "")
+                employee_name = ""
+                if emp_doc.get("userId"):
+                    user_doc = await users_col.find_one(
+                        {"_id": to_object_id(str(emp_doc["userId"]))},
+                        {"name": 1, "email": 1},
+                    )
+                    if user_doc:
+                        employee_name = user_doc.get("name") or user_doc.get("email") or ""
+                # Resolve admin name (not raw ID)
+                assigned_admin_name = await _resolve_admin_name(admin_emp_id)
+                emp_cache[emp_id] = {"name": employee_name, "assignedAdmin": assigned_admin_name}
+
+        resolved = emp_cache[emp_id]
+        await profiles_col.update_one(
+            {"_id": profile["_id"]},
+            {"$set": {
+                "employeeName": resolved["name"],
+                "assignedAdmin": resolved["assignedAdmin"],
+                "updatedAt": now,
+            }},
+        )
+        updated += 1
+
+    return {
+        "updated": updated,
+        "skipped": skipped,
+        "message": f"Backfill complete. {updated} profile(s) updated, {skipped} skipped (no employeeId).",
+    }

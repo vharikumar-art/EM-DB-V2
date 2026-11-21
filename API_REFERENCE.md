@@ -86,6 +86,28 @@ curl -X POST http://localhost:8000/auth/logout \
 
 > All endpoints require `Authorization: Bearer <admin_access_token>`
 
+### GET /users/me — Get My Account Profile
+
+Returns the authenticated user's read-only account details and an optional profile-picture URL. Passwords are never included.
+
+### PUT /users/me/profile-picture — Upload or Replace My Profile Picture
+
+Send a JPEG, PNG, or WebP image as multipart form field `file` (maximum 5 MB). Images are stored in the directory configured by `PROFILE_PICTURE_STORAGE_DIR`; configure a separate persistent directory for each environment.
+
+### DELETE /users/me/profile-picture — Remove My Profile Picture
+
+Removes the authenticated user's profile picture from disk. Repeated requests succeed even if no picture is present.
+
+### GET /users/me/profile-picture — Get My Profile Picture
+
+Returns the authenticated user's profile picture. Each user can access only their own image.
+
+Any authenticated user can fetch another user's image using `GET /users/{user_id}/profile-picture`. The admin-only `GET /users` response includes a `profilePictureUrl` for users with an uploaded picture and the decrypted `password` field requested for the users list. Passwords created before reversible password storage was restored may be `null` until reset.
+
+### POST /users/{user_id}/password-reset — Admin Password Reset
+
+Full admins can reset their own password; only super admins can reset another user's password. The new password is never returned by the API.
+
 ### POST /employees — Create Employee
 
 **cURL:**
@@ -236,7 +258,6 @@ curl -X POST http://localhost:8000/email-master/upload \
   -H "Authorization: Bearer <token>" \
   -F "file=@/path/to/leads.csv" \
   -F "insertDuplicates=false" \
-  -F "maxLimit=5000" \
   -F "mailSource=Google Scholar"
 ```
 
@@ -245,7 +266,6 @@ curl -X POST http://localhost:8000/email-master/upload \
 |---|---|---|---|
 | `file` | File | required | .csv, .xlsx, or .xls |
 | `insertDuplicates` | bool | false | Insert duplicate emails (marked as duplicate) |
-| `maxLimit` | int | null | Cap upload at N rows (1-10000) |
 | `mailSource` | string | null | `"Google Scholar"`, `"University"`, or `"Other"` |
 
 **Response:**
@@ -286,6 +306,22 @@ curl "http://localhost:8000/email-master?country=India&domain=gmail.com&mailSour
 | `page` | Page number (1-indexed) |
 | `pageSize` | Items per page (default 20, max 100) |
 
+**Upload-date filters:**
+| Param | Description |
+|---|---|
+| `dateFilter` | Set to `true` to enable upload-date filtering |
+| `dateRange` | `last_30_days`, `last_3_months`, or `custom` |
+| `startDate` | Required for `custom`; `YYYY-MM-DD` or `DD-MM-YYYY` |
+| `endDate` | Required for `custom`; inclusive, `YYYY-MM-DD` or `DD-MM-YYYY` |
+
+**Postman test (custom range):**
+1. Select **GET** and enter `{{baseUrl}}/email-master`.
+2. In **Params**, add `dateFilter=true`, `dateRange=custom`, `startDate=2026-01-01`, and `endDate=2026-03-31`.
+3. In **Authorization**, select **Bearer Token** and paste a valid access token.
+4. Send the request. The response's `data.data` contains matching email records; `data.total` is the matching count.
+
+For a preset range, use `dateFilter=true` and `dateRange=last_30_days` (or `last_3_months`) and omit `startDate` / `endDate`.
+
 ---
 
 ### POST /email-master/count-filtered — Count Filtered Emails
@@ -309,12 +345,52 @@ curl -X POST http://localhost:8000/email-master/count-filtered \
 
 ### GET /email-master/dropdown-options — Get Filter Dropdown Values
 
-Returns distinct values for country, domain, industry, company.
+Returns distinct values for country, state, city, domain, university, and other filter fields.
 
 **cURL:**
 ```bash
 curl http://localhost:8000/email-master/dropdown-options \
   -H "Authorization: Bearer <token>"
+```
+
+---
+
+### POST /email-master/admin/update-filter-value — Rename or Move Filter Values (Full Admin)
+
+Updates matching `email_master` records and linked `profile_emails` copies, then rebuilds the filter dropdowns.
+
+- `sourceField` and `targetField` can each be `country`, `state`, `city`, `domain`, or `university`.
+- Use the same source and target field to rename a value, such as `TAMILNADU` to `TAMIL NADU`. `targetValue` is required.
+- Use different fields to move a value. If omitted, `targetValue` defaults to `sourceValue`.
+- When moving between fields, a populated destination is skipped unless `overwrite` is `true`. A successful move clears the source field.
+- Matching is exact, case-insensitive, and ignores surrounding whitespace. Target values are stored uppercase.
+- The response reports matched, changed, skipped, unchanged, overwritten, and linked profile-copy counts.
+
+**cURL — rename a state value:**
+```bash
+curl -X POST http://localhost:8000/email-master/admin/update-filter-value \
+  -H "Authorization: Bearer <super_admin_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sourceField": "state",
+    "sourceValue": "TAMILNADU",
+    "targetField": "state",
+    "targetValue": "TAMIL NADU",
+    "overwrite": false
+  }'
+```
+
+**cURL — move Country to State and overwrite occupied State values:**
+```bash
+curl -X POST http://localhost:8000/email-master/admin/update-filter-value \
+  -H "Authorization: Bearer <super_admin_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sourceField": "country",
+    "sourceValue": "TAMIL NADU",
+    "targetField": "state",
+    "overwrite": true
+  }'
 ```
 
 ---
@@ -335,6 +411,18 @@ curl http://localhost:8000/email-master/stats/uploaders \
 ```bash
 curl -X DELETE http://localhost:8000/email-master/64f1a2b3c4d5e6f7a8b9c0d1 \
   -H "Authorization: Bearer <admin_token>"
+```
+
+---
+
+### DELETE /email-master/admin/delete-by-upload-date-range — Delete Leads by Date Range (Super Admin)
+
+The selected start and end dates are both included. Dates accept `DD-MM-YYYY` or `YYYY-MM-DD`.
+
+**cURL:**
+```bash
+curl -X DELETE "http://localhost:8000/email-master/admin/delete-by-upload-date-range?startDate=01-01-2000&endDate=01-01-2002" \
+  -H "Authorization: Bearer <super_admin_token>"
 ```
 
 ---
@@ -373,6 +461,18 @@ curl -X POST http://localhost:8000/profiles \
         "weight": 100
       }
     ],
+    "reminderTemplates": [
+      {
+        "name": "Friendly follow-up",
+        "body": "Hello [name], just following up on my previous email.",
+        "weight": 2
+      },
+      {
+        "name": "Short follow-up",
+        "body": "Hello [name], checking whether you had a chance to review my email.",
+        "weight": 1
+      }
+    ],
     "filters": {
       "country": ["India"],
       "domain": [],
@@ -400,6 +500,10 @@ curl -X POST http://localhost:8000/profiles \
 
 ### GET /profiles — List Profiles
 
+Each profile includes `profileAge`, a human-readable age calculated from `createdAt`
+(for example, `1 day`, `2 months, 20 days`, or `1 year, 3 months`). It is `null`
+for profiles without a valid creation date.
+
 **cURL:**
 ```bash
 # Employee sees own profiles
@@ -421,6 +525,47 @@ curl -X PATCH "http://localhost:8000/profiles/64f1a2b3c4d5e6f7a8b9c0d1" \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"sendingOptions": {"dailyLimit": 200, "delayMin": 60, "delayMax": 120}}'
+```
+
+To configure reminder bodies, update the profile with a `reminderTemplates`
+array. Each reminder template has `name`, `body`, and optional `weight`; it has
+no subject field because reminder campaigns use the exact original draft
+subject:
+
+```json
+{
+  "reminderTemplates": [
+    {
+      "name": "Friendly follow-up",
+      "body": "Hello [name], just following up on my previous email.",
+      "weight": 2
+    },
+    {
+      "name": "Short follow-up",
+      "body": "Hello [name], checking whether you had a chance to review my email.",
+      "weight": 1
+    }
+  ]
+}
+```
+
+---
+
+### POST /profiles/{profile_id}/test-email — Send a Test Email
+
+Sends a real test email to `toEmail`. Set `mailType` to `draft` or `reminder`;
+it defaults to `draft`. `templateId` selects a template from the matching list
+(persisted ID or array index). If omitted, a template is selected randomly.
+Reminder templates contain only a body, so the test uses the first configured
+draft subject (or `Test reminder` if none is set). The profile signature and
+attachments are included.
+
+```json
+{
+  "toEmail": "you@example.com",
+  "mailType": "reminder",
+  "templateId": "reminder-template-id"
+}
 ```
 
 ---
@@ -471,6 +616,8 @@ curl -X POST "http://localhost:8000/profiles/64f1a2b3c4d5e6f7a8b9c0d1/attachment
 ### POST /profile-emails/{profile_id}/generate — Generate Working List
 
 Filters leads from Email Master into the working list.
+The profile filter `oldestFirst` defaults to `false`; set it to `true` to select
+matching emails in upload-date order, oldest first, before applying `filterLimit`.
 
 **cURL:**
 ```bash
@@ -494,6 +641,12 @@ curl -X POST "http://localhost:8000/profile-emails/64f1a2b3c4d5e6f7a8b9c0d1/gene
   }'
 ```
 
+To allow previously used emails, include `"allowUsed": true`. Reused emails
+must be outside the configured cooldown period (20 days by default). Super
+admins can configure the cooldown with the `used_email_cooldown_days` setting
+and optionally limit reuse with `used_email_max_usage_count`. Missing settings
+use the defaults and do not prevent connection to an existing database.
+
 **Response:**
 ```json
 {
@@ -515,7 +668,7 @@ curl "http://localhost:8000/profile-emails/64f1a2b3c4d5e6f7a8b9c0d1?sendStatus=p
   -H "Authorization: Bearer <token>"
 ```
 
-**Query Parameters:** `sendStatus` (pending/sent/failed/skipped), `search`, `country`, `domain`, `page`, `pageSize`
+**Query Parameters:** `mailType` (draft/reminder), `sendStatus` (pending/sent/failed/skipped), `search`, `country`, `domain`, `page`, `pageSize`
 
 ---
 
@@ -536,7 +689,39 @@ curl http://localhost:8000/profile-emails/64f1a2b3c4d5e6f7a8b9c0d1/stats \
     "sending": 0,
     "sent": 150,
     "failed": 50,
-    "skipped": 0
+    "skipped": 0,
+    "byType": {
+      "draft": {"total": 320, "pending": 0, "sending": 0, "sent": 300, "failed": 20, "skipped": 0},
+      "reminder": {"total": 180, "pending": 100, "sending": 0, "sent": 70, "failed": 10, "skipped": 0}
+    }
+  }
+}
+```
+
+---
+
+### POST /profile-emails/{profile_id}/convert-to-reminders — Queue Sent Drafts
+
+Moves successfully sent drafts into the reminder queue. This endpoint does not
+send email. The converter uses saved draft subject/message fields first; if a
+subject is missing, it can recover it from the source campaign snapshot when
+the selected template is identified unambiguously. It uses the original
+Message-ID, falling back to the stored thread ID. Rows without a recoverable
+subject or message ID are skipped.
+
+**cURL:**
+```bash
+curl -X POST http://localhost:8000/profile-emails/64f1a2b3c4d5e6f7a8b9c0d1/convert-to-reminders \
+  -H "Authorization: Bearer <access_token>"
+```
+
+**Response:**
+```json
+{
+  "data": {
+    "profileId": "64f1a2b3c4d5e6f7a8b9c0d1",
+    "convertedCount": 12,
+    "skippedMissingThreadData": 2
   }
 }
 ```
@@ -553,7 +738,39 @@ curl -X POST http://localhost:8000/profile-emails/64f1a2b3c4d5e6f7a8b9c0d1/retry
 
 ---
 
+### POST /profile-emails/{profile_id}/retry-sent-reminders — Queue Another Reminder Round
+
+Resets sent reminder rows in the profile to `pending`, allowing them to be sent
+again by a new reminder campaign. Only rows with `mailType: "reminder"` and
+`sendStatus: "sent"` are changed; draft rows and failed or pending reminders
+are left untouched. The request is rejected while the profile has an active
+reminder campaign.
+
+This endpoint does not send emails. Start or schedule a reminder campaign
+after it returns to send the re-queued recipients.
+
+**cURL:**
+```bash
+curl -X POST http://localhost:8000/profile-emails/64f1a2b3c4d5e6f7a8b9c0d1/retry-sent-reminders \
+  -H "Authorization: ******"
+```
+
+**Response data:**
+```json
+{
+  "profileId": "64f1a2b3c4d5e6f7a8b9c0d1",
+  "resetCount": 12
+}
+```
+
+---
+
 ### DELETE /profile-emails/{profile_id}/clear — Clear Entire Working List
+
+Deletes draft and reminder rows and releases their email locks. Usage counts
+are reversed only for pending, unsent draft rows; sent drafts and pending
+reminders keep their usage counts. The response includes `deletedCount` and
+`usageCountReversed`.
 
 **cURL:**
 ```bash
@@ -585,7 +802,10 @@ curl -X POST http://localhost:8000/campaigns/start \
   -d '{
     "profileId": "64f1a2b3c4d5e6f7a8b9c0d1",
     "campaignName": "Q3 India Outreach",
-    "dailyLimit": 100
+    "mailType": "draft",
+    "dailyLimit": 100,
+    "autoReminderEnabled": true,
+    "reminderDelayDays": 6
   }'
 ```
 
@@ -593,8 +813,21 @@ curl -X POST http://localhost:8000/campaigns/start \
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `profileId` | string | ✅ | Profile to run |
+| `mailType` | string | ❌ | `draft` (default) or `reminder` |
 | `campaignName` | string | ❌ | Auto-generated if empty |
 | `dailyLimit` | int | ❌ | Overrides profile default |
+| `autoReminderEnabled` | boolean | ❌ | Automatically create a reminder after a draft completes (default `true`; ignored for reminder campaigns) |
+| `reminderDelayDays` | int | ❌ | Delay after draft completion, from 0 to 15 days (default `6`; empty or null uses `6`). `0` starts the reminder immediately when the draft completes. |
+
+Only one active campaign of each type is allowed per profile. A draft and a
+reminder campaign can run concurrently. Reminder campaigns use the original
+draft's exact subject and SMTP reply headers to keep the message in the thread.
+Their body is selected randomly, using template weights, from the profile's
+`reminderTemplates` list. Configure body-only reminder templates through
+`PATCH /profiles/{profile_id}`; at least one non-empty template is required.
+When enabled, the reminder is scheduled after the draft campaign completes.
+If disabled or automatic setup cannot complete, a reminder can still be
+created and run manually.
 
 ---
 
@@ -608,11 +841,14 @@ curl -X POST http://localhost:8000/campaigns/schedule \
   -d '{
     "profileId": "64f1a2b3c4d5e6f7a8b9c0d1",
     "campaignName": "Scheduled Outreach",
+    "mailType": "draft",
     "recurrenceType": "once",
     "scheduledTimeLocal": "10:00",
     "scheduledDateLocal": "2026-08-01",
     "timezoneOffsetMinutes": -330,
-    "dailyLimit": 100
+    "dailyLimit": 100,
+    "autoReminderEnabled": true,
+    "reminderDelayDays": 6
   }'
 ```
 
@@ -650,10 +886,15 @@ curl -X POST http://localhost:8000/campaigns/schedule \
 ```
 
 > `recurrenceDays`: 0=Monday, 1=Tuesday, 2=Wednesday, 3=Thursday, 4=Friday, 5=Saturday, 6=Sunday
+>
+> Draft campaigns can include `autoReminderEnabled` and `reminderDelayDays`,
+> using the same options as `/campaigns/start`.
 
 ---
 
 ### POST /campaigns/{campaign_id}/pause — Pause Campaign
+
+Pausing stops the worker before it starts another email; an email already handed to the SMTP server may still complete. Reaching the configured send limit pauses an immediate campaign; for a recurring campaign it ends that run and schedules the next occurrence with status `rescheduled`. SMTP-provider errors mark the recipient and campaign as `failed` and save the reason in `errorMessage`. Failed scheduled runs are not automatically retried.
 
 **cURL:**
 ```bash
@@ -665,11 +906,33 @@ curl -X POST http://localhost:8000/campaigns/64f1a2b3c4d5e6f7a8b9c0d1/pause \
 
 ### POST /campaigns/{campaign_id}/resume — Resume Campaign
 
+Resuming an active scheduled execution continues the same run with its existing progress and per-run send count, then uses the existing scheduler logic to complete or schedule the next occurrence.
+
 **cURL:**
 ```bash
 curl -X POST http://localhost:8000/campaigns/64f1a2b3c4d5e6f7a8b9c0d1/resume \
   -H "Authorization: Bearer <token>"
 ```
+
+---
+
+### POST /campaigns/{campaign_id}/reminder/retry — Retry Automatic Reminder Setup
+
+Retries reminder setup for an owned, completed draft campaign. This can recover
+campaigns completed before automatic reminder scheduling was enabled, or
+campaigns previously skipped because the profile was inactive or had no
+eligible recipients. The operation is idempotent for campaigns already marked
+as scheduled.
+
+**cURL:**
+```bash
+curl -X POST http://localhost:8000/campaigns/64f1a2b3c4d5e6f7a8b9c0d1/reminder/retry \
+  -H "Authorization: ******"
+```
+
+When an older sent-email row has no saved draft subject, the backend can recover
+it from the campaign snapshot only when the original template is unambiguous.
+Rows without a recoverable subject or original message ID are not queued.
 
 ---
 
@@ -681,7 +944,37 @@ curl "http://localhost:8000/campaigns?status=running&page=1&pageSize=20" \
   -H "Authorization: Bearer <token>"
 ```
 
-**Query Parameters:** `status` (running/paused/completed/scheduled/failed), `profileId`, `employeeId` (admin only), `page`, `pageSize`
+**Query Parameters:** `status` (`all` or one of `pending`, `running`, `paused`, `completed`, `failed`, `waiting_for_mails`, `scheduled`, `rescheduled`, `processing`), `profileId`, `employeeId` (admin only), `page`, `pageSize`. Filtering by `scheduled` includes both initially scheduled campaigns and recurring campaigns rescheduled for their next occurrence. The frontend's `status=1` value is also treated as `all`.
+
+---
+
+### GET /campaigns/overview — Get My Campaign Overview
+
+Returns an aggregate summary and progress details for every campaign owned by
+the authenticated employee. No `employeeId` query parameter is accepted.
+The frontend can poll this endpoint every five minutes to refresh the campaign
+status bar.
+
+**cURL:**
+```bash
+curl http://localhost:8000/campaigns/overview \
+  -H "Authorization: Bearer <access_token>"
+```
+
+**Response data:**
+```json
+{
+  "summary": "Campaigns: 2 | Total emails: 2000 | Sent: 900 | Pending: 1100 | Failed: 0 | Skipped: 0 | Processed: 900 | Progress: 45%",
+  "campaigns": "Summer Campaign is about to end.; Product Launch starts within 10 minutes."
+}
+```
+
+Both values are strings, not objects or arrays. `campaigns` only contains alert
+messages: active campaigns at 85% progress or higher are reported as "is about
+to end", and scheduled/rescheduled campaigns starting in the next 10 minutes
+are reported as "starts within 10 minutes". Multiple alerts are joined with
+semicolons; an empty string means there are no alerts. Other campaign details
+are not included in this field.
 
 ---
 
@@ -796,6 +1089,54 @@ curl http://localhost:8000/dashboard/dropdown-options \
 
 ---
 
+### GET /achievements/leaderboard — Monthly Achievement Leaderboard
+
+Admins and super admins receive the live leaderboard for the current office
+month (26th through 25th). Optional inclusive `startDate` and `endDate` values
+can instead filter the live leaderboard to a custom period. The current and
+previous monthly top-three lists remain on their respective monthly periods.
+Employees receive the current-period top three and unfiltered combined live
+leaderboard for their own branch. Period display dates use the campaign
+12-hour format without a timezone suffix. Closed-period awards are archived
+automatically and include each participant's number of top-three achievements
+for that metric and scope.
+Participants include employee, admin, and super-admin accounts; uploads and
+conversions are attributed to the account that performed each action.
+
+**Global leaderboard (super admin):**
+```bash
+curl "http://localhost:8000/achievements/leaderboard?metric=both&scope=global" \
+  -H "Authorization: Bearer <super_admin_token>"
+```
+
+**Branch leaderboard:**
+```bash
+curl "http://localhost:8000/achievements/leaderboard?metric=convert&scope=branch&branch=Vellore" \
+  -H "Authorization: Bearer <admin_token>"
+```
+
+**Query parameters:**
+| Param | Description |
+|---|---|
+| `metric` | `mail` (100 uploads = 1 point), `convert` (1 converted reply = 5 points), or `both` (sum of the weighted points). Defaults to `mail` for admins and super admins; employees always receive `both`. |
+| `scope` | `branch` or `global`. Super admins may select either; admins are restricted to their own branch. Employees always receive their own branch. |
+| `branch` | Branch name; required for a super-admin branch leaderboard. |
+| `startDate` | Optional inclusive start date for the live leaderboard (`YYYY-MM-DD`). Must be supplied with `endDate`. |
+| `endDate` | Optional inclusive end date for the live leaderboard (`YYYY-MM-DD`). Must be on or after `startDate`. |
+
+Employees cannot pass leaderboard filters and receive `scope`, `branch`,
+`metric`, `livePeriod`, `liveLeaderboard`, `currentPeriod`, and `currentTop3`.
+They do not receive previous-period winners. Admin and super-admin responses
+also include `data.currentPeriod`, `data.currentTop3` for the current month's
+top three, and `data.previousTop3` for the archived winners from the last
+completed period. Rankings include upload, conversion, combined score, rank,
+and `timesAchieved`. Participants are ordered by score, then name, for
+deterministic ties. Scores may include two decimal places (for example, 70
+uploads = 0.7 points). The legacy `employeeId` and `employeeName` response
+fields also identify admin and super-admin participants.
+
+---
+
 ## 9. Reports / CSV Exports
 
 These endpoints return a CSV file download, not JSON.
@@ -901,6 +1242,16 @@ curl "http://localhost:8000/logs?action=UPLOAD&page=1&pageSize=50" \
 Used by the frontend to populate dropdown selects.
 
 ### GET /options/employees — Employee List for Dropdown (Admin)
+
+Returns employee and admin options visible to the caller. Super admins also
+receive super-admin user options. Since super-admin accounts normally have no
+employee record, their `id` falls back to their user ID; `userId` is also
+included. Partial admins see employees assigned to them; full admins see
+employees in their branch; super admins see all employees and super-admin
+accounts. After a user is deleted, eligible callers also see one **Unknown**
+option for that caller's retained data. Selecting it lists the deleted users'
+profiles and other employee-owned records together. The original owner IDs are
+retained internally so profiles with duplicate names remain distinct.
 
 **cURL:**
 ```bash

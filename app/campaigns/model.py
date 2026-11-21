@@ -13,6 +13,7 @@ class CampaignStatus(str, Enum):
     WAITING_FOR_MAILS = "waiting_for_mails"
     # Scheduled execution statuses
     SCHEDULED = "scheduled"
+    RESCHEDULED = "rescheduled"
     PROCESSING = "processing"
 
 
@@ -22,6 +23,7 @@ def build_campaign_document(
     campaign_name: str,
     total_emails: int,
     scheduled_for: datetime | None = None,
+    mail_type: str = "draft",
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     
@@ -31,12 +33,14 @@ def build_campaign_document(
     return {
         "campaignName": campaign_name,
         "profileId": profile_id,
+        "mailType": mail_type,
         "employeeId": employee_id,
         "status": initial_status,
         # Counters — updated in real-time during the send loop
         "totalEmails": total_emails,
         "pending": total_emails,
         "sent": 0,
+        "executionSent": 0,
         "failed": 0,
         "skipped": 0,
         "replies": 0,
@@ -56,4 +60,3 @@ def build_campaign_document(
         "retryCount": 0,  # Number of times this campaign has been retried
         "maxRetries": 3,  # Maximum retry attempts
     }
-

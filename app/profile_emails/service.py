@@ -1,14 +1,24 @@
 from datetime import datetime, timezone
+import re
 from typing import Any
+
+from bson import ObjectId
 
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
 from app.database.mongodb import get_collection
-from app.email_master.service import mark_used_in_profile, mark_emails_assigned_to_employee, query_for_profile
+from app.email_master.service import (
+    decrement_email_usage,
+    mark_used_in_profile,
+    mark_emails_assigned_to_employee,
+    query_for_profile,
+    release_email_locks,
+)
 from app.notifications.schema import NotificationType
 from app.notifications.service import create_notification
-from app.profile_emails.model import SendStatus, build_profile_email_document
+from app.profile_emails.model import ProfileEmailType, SendStatus, build_profile_email_document
 from app.profiles.service import get_profile
 from app.schemas.common import PaginationParams
+from app.utils.personalizer import personalize
 from app.utils.pagination import build_paginated_response
 from app.utils.response import serialize_doc, serialize_list, to_object_id
 
@@ -24,7 +34,7 @@ async def generate_list(
     employee_id: str,
     is_admin: bool,
     override_filters: dict | None = None,
-    limit_override: int | None = None,
+    allow_used: bool = False,
 ) -> dict:
     """
     Read email_master applying profile filters, snapshot matching records
@@ -34,18 +44,18 @@ async def generate_list(
     profile = await get_profile(profile_id, employee_id, is_admin)
 
     filters: dict = override_filters or profile.get("filters", {})
-    sending_opts: dict = profile.get("sendingOptions", {})
-    daily_limit: int = limit_override or sending_opts.get("dailyLimit", 100)
-    filter_limit: int = profile.get("filterLimit", 0)
-    
+    # Inject the allow_used flag: request value takes priority, else fall back to profile's stored setting
+    filters["allowUsed"] = allow_used or filters.get("allowUsed", False)
+    generation_limit = int(profile.get("filterLimit") or 0)
+    profile_emails_col = get_collection(COLLECTION)
+
     # CHECK: Profile email generation LOCK
     # If profile already has emails generated, cannot generate again
     # unless they delete them first or send and clear
-    profile_emails_col = get_collection(COLLECTION)
     existing_emails_count = await profile_emails_col.count_documents(
         {"profileId": profile_id, "sendStatus": SendStatus.PENDING.value}
     )
-    
+
     if existing_emails_count > 0:
         raise BadRequestException(
             f"❌ Cannot generate more emails. This profile already has {existing_emails_count} pending emails. "
@@ -59,8 +69,8 @@ async def generate_list(
     # Pass employee_id so query skips emails assigned to OTHER employees
     master_records = await query_for_profile(
         filters=filters,
-        daily_limit=daily_limit,
-        filter_limit=filter_limit,
+        daily_limit=0,
+        filter_limit=generation_limit,
         employee_id=profile["employeeId"],  # Pass employee ID
     )
 
@@ -68,7 +78,7 @@ async def generate_list(
         # Count total emails in master to help diagnose
         master_col = get_collection(COLLECTION)
         total_in_master = await master_col.count_documents({"isDuplicate": False})
-        
+
         if total_in_master == 0:
             raise BadRequestException(
                 "❌ Email Master is empty. Please upload emails first via the 'Email Master' page. "
@@ -83,6 +93,15 @@ async def generate_list(
             )
 
     # Remove only PENDING rows — preserve already-sent/failed/sending rows
+    pending_cursor = profile_emails_col.find(
+        {"profileId": profile_id, "sendStatus": SendStatus.PENDING.value},
+        {"masterEmailId": 1}
+    )
+    pending_master_ids = [doc["masterEmailId"] async for doc in pending_cursor]
+
+    if pending_master_ids:
+        await release_email_locks(pending_master_ids)
+
     await profile_emails_col.delete_many(
         {"profileId": profile_id, "sendStatus": SendStatus.PENDING.value}
     )
@@ -122,8 +141,9 @@ async def generate_list(
             master_ids=master_ids_to_mark,
             profile_id=profile_id,
             employee_id=profile["employeeId"],
+            profile_name=profile["profileName"],
         )
-        
+
         # Also mark emails as assigned to this employee (claim them)
         # Get employee name from employees collection
         from app.employees.service import get_employee
@@ -132,7 +152,7 @@ async def generate_list(
             employee_name = employee.get("name", profile["employeeId"])
         except:
             employee_name = profile["employeeId"]
-        
+
         await mark_emails_assigned_to_employee(
             master_ids=master_ids_to_mark,
             employee_id=profile["employeeId"],
@@ -169,6 +189,7 @@ async def list_profile_emails(
     employee_id: str,
     is_admin: bool,
     params: PaginationParams,
+    mail_type: str | None = None,
     send_status: str | None = None,
     search: str | None = None,
     country: str | None = None,
@@ -179,7 +200,19 @@ async def list_profile_emails(
 
     col = get_collection(COLLECTION)
     query: dict = {"profileId": profile_id}
+    or_filters: list[dict] = []
 
+    if mail_type == ProfileEmailType.DRAFT.value:
+        or_filters.append(
+            {
+                "$or": [
+                    {"mailType": ProfileEmailType.DRAFT.value},
+                    {"mailType": {"$exists": False}},
+                ]
+            }
+        )
+    elif mail_type:
+        query["mailType"] = mail_type
     if send_status:
         query["sendStatus"] = send_status
     if country:
@@ -187,11 +220,17 @@ async def list_profile_emails(
     if domain:
         query["domain"] = domain
     if search:
-        query["$or"] = [
-            {"email": {"$regex": search, "$options": "i"}},
-            {"fullName": {"$regex": search, "$options": "i"}},
-            {"company": {"$regex": search, "$options": "i"}},
-        ]
+        or_filters.append(
+            {
+                "$or": [
+                    {"email": {"$regex": search, "$options": "i"}},
+                    {"fullName": {"$regex": search, "$options": "i"}},
+                    {"university": {"$regex": search, "$options": "i"}},
+                ]
+            }
+        )
+    if or_filters:
+        query["$and"] = or_filters
 
     total = await col.count_documents(query)
     cursor = (
@@ -210,12 +249,38 @@ async def get_stats(profile_id: str, employee_id: str, is_admin: bool) -> dict:
 
     pipeline = [
         {"$match": {"profileId": profile_id}},
-        {"$group": {"_id": "$sendStatus", "count": {"$sum": 1}}},
+        {
+            "$group": {
+                "_id": {
+                    "mailType": {"$ifNull": ["$mailType", ProfileEmailType.DRAFT.value]},
+                    "sendStatus": "$sendStatus",
+                },
+                "count": {"$sum": 1},
+            }
+        },
     ]
     rows = col.aggregate(pipeline)
     counts: dict[str, int] = {}
+    by_type = {
+        mail_type.value: {
+            "total": 0,
+            "pending": 0,
+            "sending": 0,
+            "sent": 0,
+            "failed": 0,
+            "skipped": 0,
+        }
+        for mail_type in ProfileEmailType
+    }
     async for row in rows:
-        counts[row["_id"]] = row["count"]
+        mail_type = row["_id"]["mailType"]
+        send_status = row["_id"]["sendStatus"]
+        count = row["count"]
+        counts[send_status] = counts.get(send_status, 0) + count
+        if mail_type in by_type:
+            by_type[mail_type]["total"] += count
+            if send_status in by_type[mail_type]:
+                by_type[mail_type][send_status] += count
 
     total = sum(counts.values())
     return {
@@ -225,6 +290,184 @@ async def get_stats(profile_id: str, employee_id: str, is_admin: bool) -> dict:
         "sent": counts.get(SendStatus.SENT.value, 0),
         "failed": counts.get(SendStatus.FAILED.value, 0),
         "skipped": counts.get(SendStatus.SKIPPED.value, 0),
+        "byType": by_type,
+    }
+
+
+async def convert_sent_drafts_to_reminders(
+    profile_id: str,
+    employee_id: str,
+    is_admin: bool,
+) -> dict:
+    return await _convert_sent_drafts_to_reminders(
+        profile_id, employee_id, is_admin, campaign_id=None
+    )
+
+
+async def convert_campaign_sent_drafts_to_reminders(
+    profile_id: str,
+    employee_id: str,
+    is_admin: bool,
+    campaign_id: str,
+) -> dict:
+    """Queue sent drafts from one campaign for its automatic reminder."""
+    return await _convert_sent_drafts_to_reminders(
+        profile_id, employee_id, is_admin, campaign_id=campaign_id
+    )
+
+
+async def queue_sent_reminders_for_second_campaign(
+    profile_id: str,
+    reminder1_campaign_id: str,
+    reminder2_campaign_id: str,
+) -> int:
+    """Queue only successfully sent, threadable Reminder 1 recipients."""
+    now = datetime.now(timezone.utc)
+    result = await get_collection(COLLECTION).update_many(
+        {
+            "profileId": profile_id,
+            "campaignId": reminder1_campaign_id,
+            "mailType": ProfileEmailType.REMINDER.value,
+            "sendStatus": SendStatus.SENT.value,
+            "reminderMessageId": {"$type": "string", "$ne": ""},
+        },
+        {
+            "$set": {
+                "campaignId": reminder2_campaign_id,
+                "sendStatus": SendStatus.PENDING.value,
+                "errorMessage": None,
+                "updatedAt": now,
+            }
+        },
+    )
+    return result.modified_count
+
+
+async def _convert_sent_drafts_to_reminders(
+    profile_id: str,
+    employee_id: str,
+    is_admin: bool,
+    campaign_id: str | None,
+) -> dict:
+    """Queue sent drafts with saved subject and Message-ID for reminder campaigns."""
+    await get_profile(profile_id, employee_id, is_admin)
+    col = get_collection(COLLECTION)
+    campaigns = get_collection("campaigns")
+    campaign_snapshots: dict[str, dict] = {}
+
+    async def get_campaign_snapshot(doc: dict) -> dict:
+        source_campaign_id = campaign_id or doc.get("campaignId")
+        if not source_campaign_id:
+            return {}
+        source_campaign_id = str(source_campaign_id)
+        if source_campaign_id not in campaign_snapshots:
+            if not ObjectId.is_valid(source_campaign_id):
+                campaign_snapshots[source_campaign_id] = {}
+            else:
+                campaign = await campaigns.find_one(
+                    {"_id": ObjectId(source_campaign_id)},
+                    {"profileSnapshot": 1},
+                )
+                campaign_snapshots[source_campaign_id] = (
+                    (campaign or {}).get("profileSnapshot") or {}
+                )
+        return campaign_snapshots[source_campaign_id]
+
+    def resolve_original_subject(doc: dict, snapshot: dict) -> str | None:
+        subject = doc.get("draftSubject")
+        if isinstance(subject, str) and subject.strip():
+            return subject
+
+        templates = snapshot.get("templates") or []
+        template_id = doc.get("templateId")
+        matching_templates = [
+            template
+            for template in templates
+            if template_id
+            and template_id != "default"
+            and str(template.get("id")) == str(template_id)
+        ]
+        if not matching_templates and isinstance(template_id, str) and template_id.startswith("index:"):
+            try:
+                template_index = int(template_id.removeprefix("index:"))
+            except ValueError:
+                template_index = -1
+            if 0 <= template_index < len(templates):
+                matching_templates = [templates[template_index]]
+        if not matching_templates and len(templates) == 1:
+            matching_templates = templates
+        if not matching_templates and not templates:
+            snapshot_subject = snapshot.get("subject")
+            if isinstance(snapshot_subject, str) and snapshot_subject.strip():
+                matching_templates = [{"subject": snapshot_subject}]
+
+        if len(matching_templates) != 1:
+            return None
+
+        template_subject = matching_templates[0].get("subject")
+        if not isinstance(template_subject, str) or not template_subject.strip():
+            return None
+        resolved_subject, _ = personalize(template_subject, "", "", doc)
+        return resolved_subject if resolved_subject.strip() else None
+
+    sent_draft_query = {
+        "profileId": profile_id,
+        "sendStatus": SendStatus.SENT.value,
+        "$or": [
+            {"mailType": ProfileEmailType.DRAFT.value},
+            {"mailType": {"$exists": False}},
+        ],
+    }
+    if campaign_id:
+        sent_draft_query["campaignId"] = campaign_id
+
+    cursor = col.find(sent_draft_query)
+    converted_count = 0
+    skipped_missing_thread_data = 0
+    now = datetime.now(timezone.utc)
+
+    async for doc in cursor:
+        snapshot = await get_campaign_snapshot(doc)
+        original_subject = resolve_original_subject(doc, snapshot)
+        original_message_id = (
+            doc.get("draftMessageId")
+            or doc.get("messageId")
+            or doc.get("threadId")
+        )
+        if not original_subject or not original_message_id:
+            skipped_missing_thread_data += 1
+            continue
+
+        conversion_query = {
+            "_id": doc["_id"],
+            "profileId": profile_id,
+            "sendStatus": SendStatus.SENT.value,
+            "$or": [
+                {"mailType": ProfileEmailType.DRAFT.value},
+                {"mailType": {"$exists": False}},
+            ],
+        }
+        if campaign_id:
+            conversion_query["campaignId"] = campaign_id
+
+        result = await col.update_one(
+            conversion_query,
+            {
+                "$set": {
+                    "mailType": ProfileEmailType.REMINDER.value,
+                    "sendStatus": SendStatus.PENDING.value,
+                    "draftSubject": original_subject,
+                    "draftMessageId": original_message_id,
+                    "updatedAt": now,
+                }
+            },
+        )
+        converted_count += result.modified_count
+
+    return {
+        "profileId": profile_id,
+        "convertedCount": converted_count,
+        "skippedMissingThreadData": skipped_missing_thread_data,
     }
 
 
@@ -287,6 +530,10 @@ async def delete_profile_email(
         raise NotFoundException("Profile email record not found")
     if not is_admin and doc.get("employeeId") != employee_id:
         raise ForbiddenException("Access denied")
+    master_email_id = doc.get("masterEmailId")
+    if master_email_id:
+        await release_email_locks([master_email_id])
+
     await col.delete_one({"_id": to_object_id(profile_email_id)})
 
 
@@ -313,6 +560,56 @@ async def retry_failed(profile_id: str, employee_id: str, is_admin: bool) -> dic
     return {"resetCount": result.modified_count}
 
 
+async def retry_sent_reminders(
+    profile_id: str,
+    employee_id: str,
+    is_admin: bool,
+) -> dict:
+    """Re-queue sent reminder rows for another reminder campaign."""
+    await get_profile(profile_id, employee_id, is_admin)
+
+    campaigns = get_collection("campaigns")
+    active_campaign = await campaigns.find_one(
+        {
+            "profileId": profile_id,
+            "mailType": ProfileEmailType.REMINDER.value,
+            "status": {
+                "$in": [
+                    "pending",
+                    "running",
+                    "paused",
+                    "scheduled",
+                    "rescheduled",
+                    "processing",
+                ]
+            },
+        },
+        {"_id": 1},
+    )
+    if active_campaign:
+        raise BadRequestException(
+            "Cannot re-queue sent reminders while this profile has an active "
+            "reminder campaign."
+        )
+
+    now = datetime.now(timezone.utc)
+    result = await get_collection(COLLECTION).update_many(
+        {
+            "profileId": profile_id,
+            "mailType": ProfileEmailType.REMINDER.value,
+            "sendStatus": SendStatus.SENT.value,
+        },
+        {
+            "$set": {
+                "sendStatus": SendStatus.PENDING.value,
+                "errorMessage": None,
+                "updatedAt": now,
+            }
+        },
+    )
+    return {"profileId": profile_id, "resetCount": result.modified_count}
+
+
 async def clear_profile_list(profile_id: str, employee_id: str, is_admin: bool) -> dict:
     """
     Delete ALL profile_email rows for this profile.
@@ -320,8 +617,36 @@ async def clear_profile_list(profile_id: str, employee_id: str, is_admin: bool) 
     """
     await get_profile(profile_id, employee_id, is_admin)
     col = get_collection(COLLECTION)
+
+    cursor = col.find(
+        {"profileId": profile_id},
+        {"masterEmailId": 1, "sendStatus": 1, "mailType": 1},
+    )
+    master_ids: list[str] = []
+    unused_master_ids: list[str] = []
+    async for doc in cursor:
+        master_id = doc.get("masterEmailId")
+        if not master_id:
+            continue
+        master_ids.append(master_id)
+        # Reminder rows are pending after their original draft was sent, so
+        # they must retain their usage count. Missing mailType means legacy draft.
+        if (
+            doc.get("sendStatus") == SendStatus.PENDING.value
+            and doc.get("mailType", ProfileEmailType.DRAFT.value)
+            == ProfileEmailType.DRAFT.value
+        ):
+            unused_master_ids.append(master_id)
+
+    if master_ids:
+        await release_email_locks(master_ids)
+
     result = await col.delete_many({"profileId": profile_id})
-    return {"deletedCount": result.deleted_count}
+    usage_reversed = await decrement_email_usage(unused_master_ids)
+    return {
+        "deletedCount": result.deleted_count,
+        "usageCountReversed": usage_reversed,
+    }
 
 
 async def bulk_delete(
@@ -335,13 +660,18 @@ async def bulk_delete(
     object_ids = [
         ObjectId(i) for i in profile_email_ids if ObjectId.is_valid(i)
     ]
+
+    query = {"_id": {"$in": object_ids}}
     if not is_admin:
-        # Only delete rows that belong to this employee
-        result = await col.delete_many(
-            {"_id": {"$in": object_ids}, "employeeId": employee_id}
-        )
-    else:
-        result = await col.delete_many({"_id": {"$in": object_ids}})
+        query["employeeId"] = employee_id
+
+    # Get all masterEmailIds before deleting
+    cursor = col.find(query, {"masterEmailId": 1})
+    master_ids = [doc["masterEmailId"] async for doc in cursor if doc.get("masterEmailId")]
+    if master_ids:
+        await release_email_locks(master_ids)
+
+    result = await col.delete_many(query)
 
     return {"deletedCount": result.deleted_count}
 
@@ -351,24 +681,78 @@ async def bulk_delete(
 # ---------------------------------------------------------------------------
 
 async def get_pending_batch(
-    profile_id: str, batch_size: int
+    profile_id: str,
+    batch_size: int,
+    excluded_domains: set[str] | None = None,
+    mail_type: str = ProfileEmailType.DRAFT.value,
 ) -> list[dict]:
     """Fetch the next batch of PENDING rows for a campaign run."""
     col = get_collection(COLLECTION)
-    cursor = (
-        col.find({"profileId": profile_id, "sendStatus": SendStatus.PENDING.value})
-        .sort("createdAt", 1)
-        .limit(batch_size)
+    query: dict = {
+        "profileId": profile_id,
+        "sendStatus": SendStatus.PENDING.value,
+    }
+    if mail_type == ProfileEmailType.DRAFT.value:
+        query["$or"] = [
+            {"mailType": ProfileEmailType.DRAFT.value},
+            {"mailType": {"$exists": False}},
+        ]
+    else:
+        query["mailType"] = mail_type
+    if excluded_domains:
+        query["$and"] = [
+            {
+                "email": {
+                    "$not": {
+                        "$regex": f"@{re.escape(domain)}$",
+                        "$options": "i",
+                    }
+                }
+            }
+            for domain in excluded_domains
+        ]
+    sort_fields = (
+        [("sentDate", 1), ("createdAt", 1)]
+        if mail_type == ProfileEmailType.REMINDER.value
+        else [("createdAt", 1)]
     )
+    cursor = col.find(query).sort(sort_fields).limit(batch_size)
     return serialize_list([d async for d in cursor])
 
 
-async def mark_sending(profile_email_id: str) -> None:
+async def get_sent_domain_counts_today(profile_id: str) -> dict[str, int]:
+    """Count this profile's successfully sent recipients per domain today (UTC)."""
     col = get_collection(COLLECTION)
-    await col.update_one(
-        {"_id": to_object_id(profile_email_id)},
+    now = datetime.now(timezone.utc)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    cursor = col.find(
+        {
+            "profileId": profile_id,
+            "sendStatus": SendStatus.SENT.value,
+            "sentDate": {"$gte": day_start},
+        },
+        {"email": 1},
+    )
+
+    counts: dict[str, int] = {}
+    async for doc in cursor:
+        domain = str(doc.get("email") or "").rsplit("@", 1)
+        if len(domain) == 2 and domain[1]:
+            key = domain[1].casefold()
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+async def mark_sending(profile_email_id: str) -> bool:
+    col = get_collection(COLLECTION)
+    result = await col.update_one(
+        {
+            "_id": to_object_id(profile_email_id),
+            "sendStatus": SendStatus.PENDING.value,
+        },
         {"$set": {"sendStatus": SendStatus.SENDING.value, "updatedAt": datetime.now(timezone.utc)}},
     )
+    return result.modified_count == 1
 
 
 async def mark_sent(
@@ -376,22 +760,49 @@ async def mark_sent(
     thread_id: str | None,
     message_id: str | None,
     template_id: str | None = None,
+    mail_type: str = ProfileEmailType.DRAFT.value,
+    subject: str | None = None,
+    reminder_stage: int = 1,
 ) -> None:
     col = get_collection(COLLECTION)
     now = datetime.now(timezone.utc)
+    persisted_message_id = message_id or thread_id
+    update_fields = {
+        "sendStatus": SendStatus.SENT.value,
+        "threadId": thread_id or persisted_message_id,
+        "messageId": persisted_message_id,
+        "sentDate": now,
+        "errorMessage": None,
+        "templateId": template_id or "default",
+        "updatedAt": now,
+    }
+    if mail_type == ProfileEmailType.DRAFT.value:
+        update_fields.update(
+            {
+                "draftSubject": subject,
+                "draftMessageId": persisted_message_id,
+                "draftSentDate": now,
+            }
+        )
+    elif reminder_stage == 2:
+        update_fields.update(
+            {
+                "reminder2Subject": subject,
+                "reminder2MessageId": persisted_message_id,
+                "reminder2SentDate": now,
+            }
+        )
+    else:
+        update_fields.update(
+            {
+                "reminderSubject": subject,
+                "reminderMessageId": persisted_message_id,
+                "reminderSentDate": now,
+            }
+        )
     await col.update_one(
         {"_id": to_object_id(profile_email_id)},
-        {
-            "$set": {
-                "sendStatus": SendStatus.SENT.value,
-                "threadId": thread_id,
-                "messageId": message_id,
-                "sentDate": now,
-                "errorMessage": None,
-                "templateId": template_id or "default",  # Track which template was used
-                "updatedAt": now,
-            }
-        },
+        {"$set": update_fields},
     )
 
 
@@ -404,6 +815,22 @@ async def mark_failed(profile_email_id: str, error: str) -> None:
             "$set": {
                 "sendStatus": SendStatus.FAILED.value,
                 "errorMessage": error[:500],
+                "updatedAt": now,
+            }
+        },
+    )
+
+
+async def mark_pending(profile_email_id: str) -> None:
+    """Revert a claimed email to PENDING when sending stops before dispatch."""
+    col = get_collection(COLLECTION)
+    now = datetime.now(timezone.utc)
+    await col.update_one(
+        {"_id": to_object_id(profile_email_id)},
+        {
+            "$set": {
+                "sendStatus": SendStatus.PENDING.value,
+                "errorMessage": None,
                 "updatedAt": now,
             }
         },

@@ -1,14 +1,15 @@
 """
 Pure Python Personalizer
 ========================
-Replaces [name], [company], [industry], etc. with lead data.
+Replaces [name], [university], [industry], etc. with lead data.
 Does not use LangChain or AI.
 """
 
 PLACEHOLDER_MAP = {
-    "name":        lambda lead: _get_first_name(lead.get("fullName", "")),
+    "name":        lambda lead: lead.get("fullName", "") or "there",
+    "first_name":  lambda lead: _get_first_name(lead.get("fullName", "")),
     "full_name":   lambda lead: lead.get("fullName", ""),
-    "company":     lambda lead: lead.get("company", ""),
+    "university":     lambda lead: lead.get("university", ""),
     "industry":    lambda lead: lead.get("industry", ""),
     "designation": lambda lead: lead.get("designation", ""),
     "country":     lambda lead: lead.get("country", ""),

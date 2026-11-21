@@ -30,6 +30,8 @@ class EmployeeDashboard(BaseModel):
     last7DaysUploadCount: int
     totalUploadCount: int
     uniqueEmailCount: int
+    allTimeUploadCount: int
+    allTimeUniqueEmailCount: int
     sentEmailCount: int
 
 
@@ -38,4 +40,20 @@ class AdminDashboard(BaseModel):
     totalUploads: int
     totalUniqueEmails: int
     totalSentEmails: int
+    totalProfiles: int
+    activeProfiles: int
     employeeStatistics: list[dict]
+
+
+class AdminScopedDashboard(BaseModel):
+    adminOwnUploads: int
+    assignedEmployeeUploads: int
+    totalUploads: int
+    totalDuplicates: int
+    totalUniqueEmails: int
+    totalSentToProfiles: int
+    totalSent: int
+    totalCampaigns: int
+    runningCampaigns: int
+    totalProfiles: int
+    activeProfiles: int

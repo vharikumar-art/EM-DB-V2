@@ -11,6 +11,11 @@ async def create_indexes() -> None:
     await db["employees"].create_index("userId", unique=True)
     await db["employees"].create_index("employeeCode", unique=True, sparse=True)
 
+    # ── deleted-user ownership mappings ──────────────────────────────────────
+    await db["deleted_user_mappings"].create_index("employeeId")
+    await db["deleted_user_mappings"].create_index("assignedToAdmin")
+    await db["deleted_user_mappings"].create_index("branch")
+
     # ── email_master (permanent lead database) ───────────────────────────────
     await db["email_master"].create_index("email")
     await db["email_master"].create_index("employeeId")
@@ -18,11 +23,56 @@ async def create_indexes() -> None:
     await db["email_master"].create_index("isDuplicate")
     await db["email_master"].create_index("country")
     await db["email_master"].create_index("domain")
+    await db["email_master"].create_index("domain_group")        # used in distinct + $or filter
+    await db["email_master"].create_index("state")               # used in distinct
+    await db["email_master"].create_index("mailSource")          # used in distinct + filter
     await db["email_master"].create_index("industry")
-    await db["email_master"].create_index("company")
+    await db["email_master"].create_index("university")
+    await db["email_master"].create_index("designation")         # used in distinct
+    await db["email_master"].create_index("uploadedBy")          # used in uploader filter
+    await db["email_master"].create_index("uploadedByName")      # used in dropdown scan
+    await db["email_master"].create_index("uploadedDate")        # primary sort field for list
     await db["email_master"].create_index("createdAt")
     await db["email_master"].create_index("usedByEmployeeId")
+    await db["email_master"].create_index("usedByEmployeeIds")   # new array field
     await db["email_master"].create_index("inProfileEmails")
+    await db["email_master"].create_index("lastUsedAt")
+    await db["email_master"].create_index("hasReply")
+    await db["email_master"].create_index(
+        [("hasReply", 1), ("replyMarkedAt", -1)]
+    )
+    # Compound: fast list with isDuplicate filter + sort by uploadedDate
+    await db["email_master"].create_index(
+        [("isDuplicate", 1), ("uploadedDate", -1)]
+    )
+    await db["email_master"].create_index(
+        [("isDuplicate", 1), ("createdAt", -1)]
+    )
+    await db["email_master"].create_index(
+        [("isDuplicate", 1), ("hasReply", 1), ("inProfileEmails", 1), ("usageCount", 1)]
+    )
+    # Compound: country / state / domain / etc scoped to non-duplicates (used in distinct)
+    await db["email_master"].create_index(
+        [("isDuplicate", 1), ("country", 1)]
+    )
+    await db["email_master"].create_index(
+        [("isDuplicate", 1), ("state", 1)]
+    )
+    await db["email_master"].create_index(
+        [("isDuplicate", 1), ("domain", 1)]
+    )
+    await db["email_master"].create_index(
+        [("isDuplicate", 1), ("domain_group", 1)]
+    )
+    await db["email_master"].create_index(
+        [("isDuplicate", 1), ("university", 1)]
+    )
+    await db["email_master"].create_index(
+        [("isDuplicate", 1), ("designation", 1)]
+    )
+    await db["email_master"].create_index(
+        [("isDuplicate", 1), ("mailSource", 1)]
+    )
     # Dedup check is scoped per employee
     await db["email_master"].create_index(
         [("employeeId", 1), ("email", 1)], unique=True
@@ -50,6 +100,9 @@ async def create_indexes() -> None:
     await db["profile_emails"].create_index(
         [("profileId", 1), ("sendStatus", 1), ("createdAt", 1)]
     )
+    await db["profile_emails"].create_index(
+        [("profileId", 1), ("mailType", 1), ("sendStatus", 1), ("createdAt", 1)]
+    )
 
     # ── campaigns ────────────────────────────────────────────────────────────
     await db["campaigns"].create_index("profileId")
@@ -57,17 +110,42 @@ async def create_indexes() -> None:
     await db["campaigns"].create_index("status")
     await db["campaigns"].create_index("createdAt")
     await db["campaigns"].create_index(
+        "sourceReminderCampaignId",
+        unique=True,
+        sparse=True,
+        name="unique_source_reminder_campaign",
+    )
+    await db["campaigns"].create_index(
         [("profileId", 1), ("status", 1)]
+    )
+    await db["campaigns"].create_index(
+        [("profileId", 1), ("mailType", 1), ("status", 1)]
     )
     # Scheduling indexes - for Linux Cron scheduler to find due campaigns
     await db["campaigns"].create_index(
         [("status", 1), ("scheduledFor", 1)]
     )
-    # Find campaigns due for execution: status='scheduled' AND scheduledFor <= now
+    # Find scheduled/rescheduled campaigns due for execution.
     await db["campaigns"].create_index("scheduledFor")
     # Compound index for efficient query: find scheduled campaigns due for execution
     await db["campaigns"].create_index(
         [("status", 1), ("scheduledFor", 1), ("retryCount", 1)]
+    )
+
+    # ── achievements ──────────────────────────────────────────────────────────
+    await db["achievement_periods"].create_index("periodKey", unique=True)
+    await db["achievement_awards"].create_index(
+        [
+            ("periodKey", 1),
+            ("scope", 1),
+            ("branchKey", 1),
+            ("metric", 1),
+            ("employeeId", 1),
+        ],
+        unique=True,
+    )
+    await db["achievement_awards"].create_index(
+        [("scope", 1), ("branchKey", 1), ("metric", 1), ("employeeId", 1)]
     )
 
     # ── templates ────────────────────────────────────────────────────────────
@@ -94,11 +172,17 @@ async def create_indexes() -> None:
     await db["notifications"].create_index(
         [("employeeId", 1), ("isRead", 1), ("createdAt", -1)]
     )
-    # TTL index: auto-delete read notifications 2 hours (7200s) after readAt is set.
+    # TTL index: auto-delete read notifications 8 hours (28800s) after readAt is set.
     # sparse=True means unread docs (readAt=None) are NOT touched by this index.
+    # Drop old index if it exists with different TTL settings
+    try:
+        await db["notifications"].drop_index("notifications_readAt_ttl")
+    except Exception:
+        pass  # Index doesn't exist, that's fine
+    
     await db["notifications"].create_index(
         "readAt",
-        expireAfterSeconds=7200,
+        expireAfterSeconds=28800,
         sparse=True,
         name="notifications_readAt_ttl"
     )

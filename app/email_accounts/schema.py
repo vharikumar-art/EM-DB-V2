@@ -14,16 +14,19 @@ class EmailAccountCreate(BaseModel):
     smtpHost: str = Field(default="smtp.gmail.com")
     smtpPort: int = Field(default=587)
     useTls: bool = Field(default=True)
+    employeeId: str | None = Field(default=None, description="Target employee for admin requests.")
 
 
 class EmailAccountUpdate(BaseModel):
     email: EmailStr | None = Field(default=None)
     appPassword: str | None = Field(default=None, min_length=1)
     displayName: str | None = Field(default=None, max_length=100)
+    accountType: AccountType | None = Field(default=AccountType.GMAIL_SMTP)
     smtpHost: str | None = None
     smtpPort: int | None = None
     useTls: bool | None = None
     isActive: bool | None = None
+    employeeId: str | None = Field(default=None, description="Reassign email account to a different employee (super_admin only)")
 
 
 class EmailAccountOut(BaseModel):

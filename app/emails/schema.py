@@ -7,7 +7,7 @@ class EmailRecordOut(BaseModel):
     uploadedByName: str | None = None
     fullName: str
     email: str
-    company: str
+    university: str
     website: str
     country: str
     state: str
@@ -28,12 +28,13 @@ class UploadResult(BaseModel):
     duplicate: int
     failed: int
     uploadBatch: str
+    failedEmails: list[dict] = Field(default_factory=list)
+    duplicateEmails: list[dict] = Field(default_factory=list)
 
 
 class EmailFilterQuery(BaseModel):
     country: list[str] | None = None
     domain: list[str] | None = None
-    industry: list[str] | None = None
     type: list[str] | None = None
     includeDuplicates: bool = False
 
