@@ -5,6 +5,7 @@ import re
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
+from app.core.config import settings
 from app.core.exceptions import BadRequestException, ForbiddenException
 from app.database.mongodb import get_collection
 from app.email_master.model import build_email_master_document
@@ -47,9 +48,8 @@ FILTER_UPDATE_BATCH_SIZE = 500
 
 
 # Redis dropdown cache
-_DROPDOWN_CACHE_KEY = "email_master_production:dropdown_options"
-# _DROPDOWN_CACHE_KEY = "email_master:dropdown_options"
-_DROPDOWN_CACHE_TTL_SECONDS = 30 * 60
+_DROPDOWN_CACHE_KEY = settings.EMAIL_MASTER_DROPDOWN_CACHE_KEY
+_DROPDOWN_CACHE_TTL_SECONDS = settings.EMAIL_MASTER_DROPDOWN_CACHE_TTL_SECONDS
 
 
 async def invalidate_dropdown_cache() -> None:
@@ -146,7 +146,6 @@ async def upload_file(
 
     docs_to_insert: list[dict] = []
     seen_in_batch: set[str] = set()
-    # duplicate_existing_ids: set[Any] = set()
     unique_count = 0
     duplicate_count = 0
 
@@ -155,8 +154,6 @@ async def upload_file(
         is_dup = email_addr in existing_emails or email_addr in seen_in_batch
         if is_dup:
             duplicate_count += 1
-            # if email_addr in existing_emails:
-            #     duplicate_existing_ids.add(existing_emails[email_addr])
             if not insert_duplicates:
                 continue
         else:
@@ -176,17 +173,6 @@ async def upload_file(
                 row=row,
             )
         )
-    # if duplicate_existing_ids:
-    #     await master.update_many(
-    #         {"_id": {"$in": list(duplicate_existing_ids)}},
-    #         {
-    #             "$set": {
-    #                 "uploadedDate": datetime.now(timezone.utc),
-    #                 "uploadedBy": uploaded_by_id,
-    #                 "uploadedByName": uploaded_by_name,
-    #             }
-    #         },
-    #     )
     if docs_to_insert:
         await master.insert_many(docs_to_insert)
         await _update_dropdown_filters(docs_to_insert, uploaded_by_id, uploaded_by_name)

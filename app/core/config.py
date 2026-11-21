@@ -22,7 +22,9 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
-    CORS_ORIGINS: str = "http://localhost:3000"
+    CORS_ORIGINS: str = "http://localhost:5173"
+    EMAIL_MASTER_DROPDOWN_CACHE_KEY: str = "email_master:dropdown_options"
+    EMAIL_MASTER_DROPDOWN_CACHE_TTL_SECONDS: int = 1800
 
 
     PASSWORD_ENCRYPTION_KEY: str = "dev-password-encryption-key-123456"

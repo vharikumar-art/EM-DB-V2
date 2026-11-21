@@ -1,9 +1,13 @@
 from fastapi import APIRouter, Depends, File, Query, UploadFile
 
-from app.core.dependencies import CurrentUser, get_current_user, require_write_access
+from app.core.dependencies import (
+    CurrentUser,
+    get_current_user,
+    require_write_access,
+    resolve_employee_context,
+)
 from app.emails import service
 from app.emails.schema import UploadResult
-from app.employees.service import get_employee_by_user_id
 from app.schemas.common import ApiResponse, PaginationParams
 from app.utils.pagination import pagination_params
 
@@ -32,14 +36,11 @@ async def get_dropdown_options(
     employeeId: str | None = Query(default=None),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    if current_user.role == "admin":
-        if not employeeId:
-            from app.core.exceptions import BadRequestException
-            raise BadRequestException("employeeId is required for admins")
-        target_employee_id = employeeId
-    else:
-        employee = await get_employee_by_user_id(current_user.user_id)
-        target_employee_id = employee["id"]
+    if current_user.role in {"admin", "super_admin"} and not employeeId:
+        from app.core.exceptions import BadRequestException
+
+        raise BadRequestException("employeeId is required for admins")
+    target_employee_id, _ = await resolve_employee_context(current_user, employeeId)
 
     result = await service.get_dropdown_options(target_employee_id)
     return ApiResponse(message="Dropdown options fetched", data=result)
@@ -54,11 +55,7 @@ async def list_emails(
     params: PaginationParams = Depends(pagination_params),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    if current_user.role == "admin":
-        target_employee_id = employeeId
-    else:
-        employee = await get_employee_by_user_id(current_user.user_id)
-        target_employee_id = employee["id"]
+    target_employee_id, _ = await resolve_employee_context(current_user, employeeId)
 
     result = await service.list_emails(
         target_employee_id, params, country=country, domain=domain, include_duplicates=includeDuplicates

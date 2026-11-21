@@ -3,6 +3,7 @@ from fastapi import Depends, Header
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.config import settings
+from app.core.auth_state import load_active_user_auth_state
 from app.core.exceptions import ForbiddenException, UnauthorizedException, NotFoundException
 from app.core.security import decode_token
 
@@ -30,12 +31,15 @@ async def get_current_user(
         raise UnauthorizedException("Provide an access token, not a refresh token")
 
     user_id = payload.get("sub")
-    role = payload.get("role")
-    access_level = payload.get("accessLevel", "full")
-    if not user_id or not role:
+    if not user_id:
         raise UnauthorizedException("Malformed token payload")
 
-    return CurrentUser(user_id=user_id, role=role, access_level=access_level)
+    auth_state = await load_active_user_auth_state(user_id)
+    return CurrentUser(
+        user_id=user_id,
+        role=auth_state.role,
+        access_level=auth_state.access_level,
+    )
 
 
 def require_roles(*allowed_roles: str):

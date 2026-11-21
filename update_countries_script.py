@@ -6,8 +6,8 @@ from motor.motor_asyncio import AsyncIOMotorClient
 # ==============================================================================
 # CONFIGURATION: Replace these with your production credentials
 # ==============================================================================
-MONGO_URI = "mongodb+srv://Email_db_user:Hari%401234@emaildatabase.xzhhrz2.mongodb.net/EmailDataBase_Production?retryWrites=true&w=majority&appName=EmailDataBase_Production"
-MONGO_DB_NAME = "EmailDataBase_Production"
+MONGO_URI = "enter your production MongoDB URI here"
+MONGO_DB_NAME = "enter your production MongoDB database name here"
 
 COUNTRY_MAPPING = {
   "\"Oman\"": "OMAN",

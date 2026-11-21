@@ -1,5 +1,6 @@
 from app.auth.model import REVOKED_TOKENS_COLLECTION, build_revoked_token_document
 from app.auth.schema import LoginRequest, TokenPair
+from app.core.auth_state import load_active_user_auth_state
 from app.core.exceptions import UnauthorizedException
 from app.core.security import (
     create_access_token,
@@ -55,10 +56,16 @@ async def refresh_access_token(refresh_token: str) -> TokenPair:
     if payload.get("type") != "refresh":
         raise UnauthorizedException("Provide a refresh token")
 
-    user_id = payload["sub"]
-    role = payload["role"]
-    access_level = payload.get("accessLevel", "full")
-    employee_id = payload.get("employee_id")  # Extract employee_id from token
+    user_id = payload.get("sub")
+    if not user_id:
+        raise UnauthorizedException("Malformed token payload")
+    auth_state = await load_active_user_auth_state(user_id)
+    role = auth_state.role
+    access_level = auth_state.access_level
+    employee_id = None
+    if role == "employee":
+        employee = await get_employee_by_user_id(user_id)
+        employee_id = employee["id"]
 
     return TokenPair(
         accessToken=create_access_token(user_id, role, employee_id, access_level),

@@ -89,7 +89,7 @@ class EmailDomainLimitTests(unittest.TestCase):
             ["user1@gmail.com", "user2@gmail.com"],
         )
 
-    def test_duplicate_upload_refreshes_upload_metadata_without_insert(self):
+    def test_duplicate_upload_does_not_refresh_metadata_or_insert(self):
         existing_id = ObjectId()
 
         class Cursor:
@@ -165,25 +165,7 @@ class EmailDomainLimitTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(
-            master_collection.update_call[0],
-            {"_id": {"$in": [existing_id]}},
-        )
-        self.assertEqual(
-            set(master_collection.update_call[1]["$set"]),
-            {"uploadedDate", "uploadedBy", "uploadedByName"},
-        )
-        self.assertEqual(
-            master_collection.update_call[1]["$set"]["uploadedBy"],
-            "uploader-1",
-        )
-        self.assertEqual(
-            master_collection.update_call[1]["$set"]["uploadedByName"],
-            "Uploader",
-        )
-        self.assertIsNotNone(
-            master_collection.update_call[1]["$set"]["uploadedDate"].tzinfo
-        )
+        self.assertIsNone(master_collection.update_call)
         self.assertFalse(master_collection.insert_called)
 
     def test_gmail_is_kept_and_non_gmail_domains_are_capped_after_filters(self):

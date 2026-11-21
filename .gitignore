@@ -10,3 +10,4 @@ documents/*
 !documents/BACKEND_PROJECT_OVERVIEW.md
 academic_domain_normalization_cross_verified.json
 domain_name_mapping.json
+requirements-dev.txt
