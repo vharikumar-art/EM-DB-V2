@@ -3,9 +3,9 @@ name: Python CI
 
 on:
   push:
-    branches: [main]
+    branches: [phase-3]
   pull_request:
-    branches: [main]
+    branches: [phase-3]
 
 permissions:
   contents: read
