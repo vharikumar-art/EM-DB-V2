@@ -41,12 +41,14 @@ def _create_token(
     role: str, 
     token_type: Literal["access", "refresh"], 
     expires_delta: timedelta,
-    employee_id: str | None = None
+    employee_id: str | None = None,
+    access_level: str = "full",
 ) -> str:
     now = datetime.now(timezone.utc)
     payload = {
         "sub": subject,
         "role": role,
+        "accessLevel": access_level,
         "type": token_type,
         "iat": now,
         "exp": now + expires_delta,
@@ -58,15 +60,15 @@ def _create_token(
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
-def create_access_token(subject: str, role: str, employee_id: str | None = None) -> str:
+def create_access_token(subject: str, role: str, employee_id: str | None = None, access_level: str = "full") -> str:
     return _create_token(
-        subject, role, "access", timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES), employee_id
+        subject, role, "access", timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES), employee_id, access_level
     )
 
 
-def create_refresh_token(subject: str, role: str, employee_id: str | None = None) -> str:
+def create_refresh_token(subject: str, role: str, employee_id: str | None = None, access_level: str = "full") -> str:
     return _create_token(
-        subject, role, "refresh", timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS), employee_id
+        subject, role, "refresh", timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS), employee_id, access_level
     )
 
 

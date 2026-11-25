@@ -10,6 +10,7 @@ class EmployeeCreate(BaseModel):
     password: str = Field(min_length=8, max_length=128)
     role: UserRole = UserRole.EMPLOYEE
     branch: str | None = None
+    assignedToAdmin: str | None = None
 
 
 
@@ -17,6 +18,7 @@ class EmployeeUpdate(BaseModel):
     department: str | None = None
     branch: str | None = None
     status: EmployeeStatus | None = None
+    assignedToAdmin: str | None = None
 
 
 
@@ -24,5 +26,6 @@ class EmployeeOut(BaseModel):
     id: str
     userId: str
     status: EmployeeStatus
+    assignedToAdmin: str | None = None
     createdAt: str | None = None
     updatedAt: str | None = None

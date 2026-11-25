@@ -133,7 +133,7 @@ def _replace_placeholders(text: str, lead: dict) -> str:
     """Simple [placeholder] substitution used for preview and plain-text personalization."""
     replacements = {
         "[name]": lead.get("fullName") or lead.get("name") or "there",
-        "[company]": lead.get("company", "your company"),
+        "[university]": lead.get("university", "your university"),
         "[industry]": lead.get("industry", "your industry"),
         "[designation]": lead.get("designation", ""),
         "[country]": lead.get("country", ""),

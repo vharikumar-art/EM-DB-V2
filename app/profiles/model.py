@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any
 
-MAX_PROFILES_PER_EMPLOYEE = 5
+MAX_PROFILES_PER_EMPLOYEE = 7
 
 
 def build_profile_document(
@@ -14,7 +14,10 @@ def build_profile_document(
     sending_options: dict[str, Any],
     prompt_settings: dict[str, Any],
     templates: list[dict[str, str]],
+    reminder_templates: list[dict[str, Any]] | None = None,
     attachments: list[dict[str, Any]] | None = None,
+    employee_name: str | None = None,
+    assigned_admin: str | None = None,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     
@@ -23,6 +26,7 @@ def build_profile_document(
         "profileName": profile_name,
         "gmailAccount": gmail_account,
         "templates": templates,
+        "reminderTemplates": reminder_templates or [],
         "attachments": attachments or [],
         "signature": signature,
         "isActive": True,
@@ -30,6 +34,8 @@ def build_profile_document(
         "filterLimit": filter_limit,
         "sendingOptions": sending_options,
         "promptSettings": prompt_settings,
+        "employeeName": employee_name or "",
+        "assignedAdmin": assigned_admin or "",
         "createdAt": now,
         "updatedAt": now,
     }

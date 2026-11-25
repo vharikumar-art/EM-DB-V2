@@ -7,6 +7,7 @@ from app.database.mongodb import get_collection
 from app.email_accounts.model import AccountType, build_email_account_document
 from app.email_accounts.schema import EmailAccountCreate, EmailAccountUpdate
 from app.utils.response import serialize_doc, serialize_list, to_object_id
+from app.users.unknown import UNKNOWN_EMPLOYEE_ID, resolve_unknown_employee_ids
 
 COLLECTION = "email_accounts"
 
@@ -36,9 +37,16 @@ async def create_account(employee_id: str, payload: EmailAccountCreate) -> dict:
     return _safe_serialize(created)
 
 
-async def list_accounts(employee_id: str | None, is_admin: bool) -> list[dict]:
+async def list_accounts(employee_id: str | list[str] | None, is_admin: bool) -> list[dict]:
     col = get_collection(COLLECTION)
-    query: dict = {} if is_admin and employee_id is None else {"employeeId": employee_id}
+    query: dict = {}
+    if not is_admin or employee_id is not None:
+        if isinstance(employee_id, list):
+            query["employeeId"] = {"$in": employee_id}
+        elif employee_id == UNKNOWN_EMPLOYEE_ID:
+            query["employeeId"] = {"$in": await resolve_unknown_employee_ids()}
+        else:
+            query["employeeId"] = employee_id
     cursor = col.find(query).sort("createdAt", -1)
     return [_safe_serialize(d) async for d in cursor]
 
@@ -136,7 +144,7 @@ async def test_connection(account_id: str, employee_id: str, is_admin: bool) -> 
 
 
 def _smtp_login_check(host: str, port: int, email: str, password: str, use_tls: bool) -> None:
-    if use_tls:
+    if use_tls and port != 465:
         server = smtplib.SMTP(host, port, timeout=10)
         server.ehlo()
         server.starttls()

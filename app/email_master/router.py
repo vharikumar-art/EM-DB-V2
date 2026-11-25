@@ -1,30 +1,55 @@
-from fastapi import APIRouter, Depends, File, Query, UploadFile
+import csv
+import io
+import logging
+import os
+import re
+import tempfile
+from datetime import date
+from typing import List, Literal
+import time
 
-from app.core.dependencies import CurrentUser, get_current_user, require_admin
+from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
+from starlette.background import BackgroundTask
+
+from app.core.dependencies import CurrentUser, get_current_user, require_admin, require_full_admin, require_super_admin, require_write_access
 from app.core.exceptions import BadRequestException
+from app.email_master.date_filters import (
+    CUSTOM_DATE_RANGE,
+    UPLOAD_DATE_RANGE_VALUES,
+    build_upload_date_query,
+    parse_filter_date,
+)
 from app.email_master import service
+from app.email_master.schema import (
+    EmailMasterUpdate,
+    FilterValueUpdate,
+    MarkReplyRequest,
+    UpdateReplyRequest,
+    UploadResult,
+)
 from app.schemas.common import ApiResponse, PaginationParams
 from app.utils.pagination import pagination_params
 
 router = APIRouter(prefix="/email-master", tags=["Email Master"])
+logger = logging.getLogger(__name__)
 
 _ALLOWED_EXTENSIONS = (".csv", ".xlsx", ".xls")
 
 
-@router.post("/upload", response_model=ApiResponse)
+@router.post("/upload", response_model=ApiResponse[UploadResult])
 async def upload_emails(
     file: UploadFile = File(...),
     insertDuplicates: bool = Query(default=False),
-    maxLimit: int | None = Query(default=None, ge=1, le=10000, description="Maximum emails to upload from file"),
     mailSource: str | None = Query(default=None, description="Mail source: Google Scholar, University, Other"),
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(require_write_access),
 ):
     """Upload email CSV/Excel file to global pool. Tracks who uploaded."""
     if not any(file.filename.lower().endswith(ext) for ext in _ALLOWED_EXTENSIONS):
         raise BadRequestException("Only .csv, .xlsx, and .xls files are supported")
 
     file_bytes = await file.read()
-    
+
     # Get employee name from database
     from app.employees.service import get_employee_by_user_id
     try:
@@ -33,16 +58,18 @@ async def upload_emails(
     except:
         # Fallback to user_id if employee not found
         uploaded_by_name = current_user.user_id
-    
+
     result = await service.upload_file(
         uploaded_by_id=current_user.user_id,
         uploaded_by_name=uploaded_by_name,
         file_bytes=file_bytes,
         filename=file.filename,
         insert_duplicates=insertDuplicates,
-        max_limit=maxLimit,
         mail_source=mailSource,
     )
+    # Invalidate the dropdown cache so the new upload's countries/domains
+    # appear immediately the next time the dropdown endpoint is called.
+    service.invalidate_dropdown_cache()
     return ApiResponse(message="File processed", data=result)
 
 
@@ -55,11 +82,186 @@ async def get_dropdown_options(
     return ApiResponse(message="Dropdown options fetched", data=options)
 
 
+@router.get("/download")
+async def download_emails(
+    format: Literal["xlsx", "csv"] = Query(
+        default="xlsx",
+        description="Download format: xlsx or csv",
+    ),
+    country: str | None = Query(default=None),
+    state: str | None = Query(default=None),
+    domain: str | None = Query(default=None),
+    university: str | None = Query(default=None),
+    mailSource: str | None = Query(default=None),
+    search: str | None = Query(default=None),
+    includeDuplicates: bool = Query(default=True),
+    dateFilter: bool = Query(default=False, description="Enable upload-date filtering"),
+    dateRange: str | None = Query(
+        default=None,
+        description=" | ".join(UPLOAD_DATE_RANGE_VALUES),
+    ),
+    startDate: str | None = Query(default=None, description="Custom start date: YYYY-MM-DD or DD-MM-YYYY"),
+    endDate: str | None = Query(default=None, description="Custom end date: YYYY-MM-DD or DD-MM-YYYY"),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Download the global email-master pool as CSV or Excel with optional filters."""
+    query: dict = {}
+    and_filters: list[dict] = []
+    if dateFilter:
+        if dateRange not in UPLOAD_DATE_RANGE_VALUES:
+            raise BadRequestException(
+                "dateRange must be one of "
+                f"{', '.join(UPLOAD_DATE_RANGE_VALUES)} when dateFilter is true"
+            )
+        parsed_start: date | None = None
+        parsed_end: date | None = None
+        if dateRange == CUSTOM_DATE_RANGE:
+            if not startDate or not endDate:
+                raise BadRequestException(
+                    "startDate and endDate are required when dateRange is custom"
+                )
+            parsed_start = parse_filter_date(startDate, "startDate")
+            parsed_end = parse_filter_date(endDate, "endDate")
+            if parsed_start > parsed_end:
+                raise BadRequestException("startDate must be on or before endDate")
+        query["uploadedDate"] = build_upload_date_query(
+            dateRange, parsed_start, parsed_end
+        )
+    if country:
+        query["country"] = country
+    if state:
+        query["state"] = state
+    domains = service.parse_filter_values(domain)
+    if domains:
+        domain_regexes = [
+            re.compile(f"^{re.escape(value)}$", re.IGNORECASE)
+            for value in domains
+        ]
+        if len(domain_regexes) == 1:
+            domain_filter = {
+                "$or": [
+                    {"domain": domain_regexes[0]},
+                    {"domain_group": domain_regexes[0]},
+                ]
+            }
+        else:
+            domain_filter = {
+                "$or": [
+                    {"domain": {"$in": domain_regexes}},
+                    {"domain_group": {"$in": domain_regexes}},
+                ]
+            }
+        and_filters.append(
+            domain_filter
+        )
+    if university:
+        query["university"] = {"$regex": university, "$options": "i"}
+    if mailSource:
+        query["mailSource"] = mailSource
+    if not includeDuplicates:
+        query["isDuplicate"] = False
+    if search:
+        and_filters.append({"$or": [
+            {"email": {"$regex": search, "$options": "i"}},
+            {"fullName": {"$regex": search, "$options": "i"}},
+            {"university": {"$regex": search, "$options": "i"}},
+            {"domain": {"$regex": search, "$options": "i"}},
+            {"domain_group": {"$regex": search, "$options": "i"}},
+            {"country": {"$regex": search, "$options": "i"}},
+        ]})
+    if and_filters:
+        query["$and"] = and_filters
+
+    fields = [
+        "fullName", "email", "university", "website", "country", "state",
+        "city", "domain", "domain_group", "industry", "designation", "phone",
+        "linkedin", "citation", "mailSource",
+        "uploadedByName", "createdAt",
+    ]
+    master = service.get_collection(service.COLLECTION)
+    projection = {field: 1 for field in fields}
+
+    if format == "xlsx":
+        from openpyxl import Workbook
+
+        temp_file = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+        temp_path = temp_file.name
+        temp_file.close()
+
+        workbook = Workbook(write_only=True)
+        worksheet = workbook.create_sheet("Email Master")
+        worksheet.append(fields)
+
+        cursor = master.find(query, projection).sort("createdAt", -1).batch_size(10000)
+        async for doc in cursor:
+            worksheet.append([str(doc.get(field, "")) for field in fields])
+        workbook.save(temp_path)
+
+        return FileResponse(
+            temp_path,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename="email_master.xlsx",
+            background=BackgroundTask(os.unlink, temp_path),
+        )
+
+    async def generate_csv():
+        cursor = master.find(
+            query,
+            projection
+        ).sort("createdAt", -1).batch_size(10000)
+        buffer = io.StringIO(newline="")
+        writer = csv.writer(buffer)
+        writer.writerow(fields)
+        yield buffer.getvalue()
+        buffer.seek(0)
+        buffer.truncate(0)
+
+        row_count = 0
+        cursor_wait_seconds = 0.0
+        row_prepare_seconds = 0.0
+        csv_write_seconds = 0.0
+        while True:
+            fetch_started = time.perf_counter()
+            docs = await cursor.to_list(length=5000)
+            cursor_wait_seconds += time.perf_counter() - fetch_started
+            if not docs:
+                break
+
+            encode_started = time.perf_counter()
+            rows = [
+                [str(doc.get(field, "")) for field in fields]
+                for doc in docs
+            ]
+            row_prepare_seconds += time.perf_counter() - encode_started
+            row_count += len(rows)
+
+            write_started = time.perf_counter()
+            writer.writerows(rows)
+            csv_write_seconds += time.perf_counter() - write_started
+            yield buffer.getvalue()
+            buffer.seek(0)
+            buffer.truncate(0)
+
+        logger.info(
+            "email_master_csv_export rows=%d cursor_wait_seconds=%.3f row_prepare_seconds=%.3f csv_write_seconds=%.3f",
+            row_count,
+            cursor_wait_seconds,
+            row_prepare_seconds,
+            csv_write_seconds,
+        )
+
+    return StreamingResponse(
+        generate_csv(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=email_master.csv"},
+    )
+
+
 @router.get("/stats/uploaders", response_model=ApiResponse)
 async def get_uploader_stats(
-    current_user: CurrentUser = Depends(require_admin),
+    current_user: CurrentUser = Depends(require_super_admin),
 ):
-    """ADMIN ONLY: Get upload contribution statistics."""
+    """SUPER ADMIN ONLY: Get upload contribution statistics."""
     stats = await service.get_uploader_stats()
     return ApiResponse(message="Uploader statistics", data=stats)
 
@@ -74,6 +276,107 @@ async def count_filtered_emails(
     return ApiResponse(message="Filtered email count", data=result)
 
 
+@router.get("/stats/replies", response_model=ApiResponse)
+async def get_reply_stats(
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Get aggregated statistics for email replies."""
+    stats = await service.get_reply_stats(
+        user_id=current_user.user_id,
+        role=current_user.role,
+    )
+    return ApiResponse(message="Reply statistics fetched", data=stats)
+
+
+@router.post("/replies", response_model=ApiResponse)
+async def mark_email_reply(
+    payload: MarkReplyRequest,
+    current_user: CurrentUser = Depends(require_write_access),
+):
+    """Mark all matching email-master records as having received a reply."""
+    record = await service.mark_email_reply(
+        email=str(payload.email),
+        reason=payload.reason,
+        custom_reason=payload.customReason,
+        phone_no=payload.phone_no,
+        marked_by=current_user.user_id, 
+        marked_by_name=await service.get_user_display_name(current_user.user_id),
+    )
+    return ApiResponse(message="Email reply marked", data=record)
+
+
+@router.get("/replies", response_model=ApiResponse)
+async def list_email_replies(
+    search: str | None = Query(default=None),
+    reason: str | None = Query(default=None),
+    replyMarkedByName: str | None = Query(default=None),
+    updatedTime: str | None = Query(default=None),
+    updatedStartDate: date | None = Query(default=None),
+    updatedEndDate: date | None = Query(default=None),
+    params: PaginationParams = Depends(pagination_params),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """List email-master records that have received a reply."""
+    result = await service.list_email_replies(
+        params=params,
+        search=search,
+        user_id=current_user.user_id,
+        role=current_user.role,
+        reason=reason,
+        reply_marked_by_name=replyMarkedByName,
+        updated_time=updatedTime,
+        updated_start_date=updatedStartDate,
+        updated_end_date=updatedEndDate,
+    )
+    options = await service.get_reply_filter_options(
+        user_id=current_user.user_id,
+        role=current_user.role,
+    )
+    return ApiResponse(message="Email replies fetched", data=result, options=options)
+
+
+@router.patch("/replies/{email_id}", response_model=ApiResponse)
+async def update_email_reply(
+    email_id: str,
+    payload: UpdateReplyRequest,
+    current_user: CurrentUser = Depends(require_write_access),
+):
+    """Edit or clear reply tracking for one email-master record."""
+    record = await service.update_email_reply(
+        email_id=email_id,
+        payload=payload.model_dump(exclude_unset=True),
+        marked_by=current_user.user_id,
+        role=current_user.role,
+    )
+    return ApiResponse(message="Email reply updated", data=record)
+
+
+@router.delete("/admin/delete-filtered", response_model=ApiResponse)
+async def delete_emails_filtered(
+    startDate: str = Query(None, description="Start date (DD-MM-YYYY or YYYY-MM-DD)"),
+    endDate: str = Query(None, description="End date (DD-MM-YYYY or YYYY-MM-DD, inclusive)"),
+    uploadedBy: str = Query(None, description="Uploaded By (name or ID)"),
+    domains: str = Query(None, description="Comma-separated domains"),
+    country: str = Query(None, description="Comma-separated countries"),
+    current_user: CurrentUser = Depends(require_full_admin),
+):
+    """FULL ADMIN + SUPER ADMIN: Delete email-master records based on optional filters: date range, uploadedBy, domains, country."""
+    start_dt = parse_filter_date(startDate, "startDate") if startDate else None
+    end_dt = parse_filter_date(endDate, "endDate") if endDate else None
+
+    result = await service.delete_emails_filtered(
+        start_date=start_dt,
+        end_date=end_dt,
+        uploaded_by=uploadedBy,
+        domains=domains,
+        country=country,
+    )
+    return ApiResponse(
+        message=f"Deleted {result['deletedCount']} email(s) from email master",
+        data=result,
+    )
+
+
 @router.get("/{email_id}", response_model=ApiResponse)
 async def get_email(
     email_id: str,
@@ -84,58 +387,140 @@ async def get_email(
     return ApiResponse(message="Email record fetched", data=record)
 
 
+@router.patch("/{email_id}", response_model=ApiResponse)
+async def update_email(
+    email_id: str,
+    payload: EmailMasterUpdate,
+    current_user: CurrentUser = Depends(require_full_admin),
+):
+    """FULL ADMIN + SUPER ADMIN: Update editable contact fields of an email master record.
+    Email address cannot be changed."""
+    update_data = payload.model_dump(exclude_unset=True)
+    record = await service.update_email(email_id, update_data)
+    return ApiResponse(message="Email record updated", data=record)
+
+
 @router.delete("/{email_id}", response_model=ApiResponse)
 async def delete_email(
     email_id: str,
-    current_user: CurrentUser = Depends(require_admin),
+    current_user: CurrentUser = Depends(require_full_admin),
 ):
-    """ADMIN ONLY: Delete email from GLOBAL pool."""
+    """FULL ADMIN + SUPER ADMIN: Delete a single email from GLOBAL pool."""
     await service.delete_email(email_id)
     return ApiResponse(message="Email deleted")
 
 
 @router.post("/admin/clear-all", response_model=ApiResponse)
 async def clear_all_emails(
-    current_user: CurrentUser = Depends(require_admin),
+    current_user: CurrentUser = Depends(require_super_admin),
 ):
-    """ADMIN ONLY: Delete ALL emails from email_master table. WARNING: Irreversible!"""
+    """SUPER ADMIN ONLY: Delete ALL emails from email_master table. WARNING: Irreversible!"""
     result = await service.clear_all_emails()
     return ApiResponse(message="Email master cleared", data=result)
 
 
+@router.post("/admin/rebuild-dropdowns", response_model=ApiResponse)
+async def rebuild_dropdowns(
+    current_user: CurrentUser = Depends(require_super_admin),
+):
+    """SUPER ADMIN ONLY: Rebuild filter_dropdowns from scratch based on current
+    email_master data. Use after bulk deletions to remove stale country/domain/state options."""
+    result = await service.rebuild_dropdown_filters()
+    return ApiResponse(
+        message="Filter dropdowns rebuilt successfully from current email_master data",
+        data=result,
+    )
+
+
+@router.post("/admin/update-filter-value", response_model=ApiResponse)
+async def update_filter_value(
+    payload: FilterValueUpdate,
+    current_user: CurrentUser = Depends(require_full_admin),
+):
+    """Rename or move a country, state, city, domain, or university value."""
+    result = await service.update_filter_value(payload.model_dump())
+    message = (
+        f"Filter update completed: {result['changed']} changed, "
+        f"{result['skipped']} skipped."
+    )
+    if result["overwritten"]:
+        message += f" {result['overwritten']} existing values overwritten."
+    return ApiResponse(message=message, data=result)
+
+
 @router.get("", response_model=ApiResponse)
 async def list_emails(
-    country: str | None = Query(default=None),
-    domain: str | None = Query(default=None),
-    industry: str | None = Query(default=None),
-    company: str | None = Query(default=None),
-    uploadedBy: str | None = Query(default=None),
-    usedByEmployee: str | None = Query(default=None),
-    mailSource: str | None = Query(default=None),
+    country: List[str] = Query(default=[]),
+    state: List[str] = Query(default=[]),
+    domain: List[str] = Query(default=[]),
+    university: List[str] = Query(default=[]),
+    uploadedBy: List[str] = Query(default=[]),
+    usedByEmployee: List[str] = Query(default=[]),
+    mailSource: List[str] = Query(default=[]),
     search: str | None = Query(default=None),
     includeDuplicates: bool = Query(default=True),
+    # uploadedDate: str | None = Query(default=None, description="Filter by upload date: last_30_days | last_3_months | custom"),
+    # ── Date filter ─────────────────────────────────────────────────────────
+    dateFilter: bool = Query(default=False, description="Enable upload-date filtering"),
+    dateRange: str | None = Query(
+        default=None,
+        description=" | ".join(UPLOAD_DATE_RANGE_VALUES),
+    ),
+    startDate: str | None = Query(default=None, description="Custom start date: YYYY-MM-DD or DD-MM-YYYY"),
+    endDate: str | None = Query(default=None, description="Custom end date: YYYY-MM-DD or DD-MM-YYYY"),
     params: PaginationParams = Depends(pagination_params),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    """List emails from GLOBAL pool with filters."""
+    """List emails from GLOBAL pool with filters.
+    
+    All filter params support multi-selection:
+    - Repeat the param:  ?country=India&country=USA
+    - Or comma-separate: ?country=India,USA
+    Both formats work and are combined with OR logic (match any selected value).
+    Wrap values containing commas in double quotes, e.g. domain="ai,ml",automation.
+
+    Date filter examples:
+    - ?dateFilter=true&dateRange=last_30_days
+    - ?dateFilter=true&dateRange=last_3_months
+    - ?dateFilter=true&dateRange=custom&startDate=2026-01-01&endDate=2026-03-31
+    """
+    # Parse custom date strings if provided
+    parsed_start: date | None = None
+    parsed_end: date | None = None
+    if dateFilter:
+        if dateRange not in UPLOAD_DATE_RANGE_VALUES:
+            raise BadRequestException(
+                "dateRange must be one of "
+                f"{', '.join(UPLOAD_DATE_RANGE_VALUES)} when dateFilter is true"
+            )
+        if dateRange == CUSTOM_DATE_RANGE:
+            if not startDate or not endDate:
+                raise BadRequestException(
+                    "startDate and endDate are required when dateRange is custom"
+                )
+            parsed_start = parse_filter_date(startDate, "startDate")
+            parsed_end = parse_filter_date(endDate, "endDate")
+            if parsed_start > parsed_end:
+                raise BadRequestException("startDate must be on or before endDate")
+
     result = await service.list_emails(
         params,
-        country=country,
-        domain=domain,
-        industry=industry,
-        company=company,
-        uploaded_by=uploadedBy,
-        used_by_employee=usedByEmployee,
-        mail_source=mailSource,
+        country=country or None,
+        state=state or None,
+        domain=domain or None,
+        university=university or None,
+        uploaded_by=uploadedBy or None,
+        used_by_employee=usedByEmployee or None,
+        mail_source=mailSource or None,
         include_duplicates=includeDuplicates,
         search=search,
+        date_filter=dateFilter,
+        date_range=dateRange,
+        start_date=parsed_start,
+        end_date=parsed_end,
     )
-    
-    # Get dropdown options to include in response
-    options = await service.get_dropdown_options()
-    
+
     return ApiResponse(
         message="Emails fetched",
         data=result,
-        options=options,
     )

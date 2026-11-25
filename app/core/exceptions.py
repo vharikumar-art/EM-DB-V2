@@ -31,3 +31,6 @@ class ForbiddenException(AppException):
 class ConflictException(AppException):
     def __init__(self, detail: str = "Resource conflict"):
         super().__init__(status.HTTP_409_CONFLICT, detail)
+class AlreadyExistsException(AppException):
+    def __init__(self, detail: str = "Resource already exists"):
+        super().__init__(status.HTTP_409_CONFLICT, detail)

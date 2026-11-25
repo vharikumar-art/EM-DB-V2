@@ -29,14 +29,15 @@ def build_email_master_document(
         # Contact fields
         "fullName": row.get("fullName", ""),
         "email": row["email"],
-        "company": row.get("company", ""),
+        "university": row.get("university", ""),
         "website": row.get("website", ""),
-        "country": row.get("country", ""),
-        "state": row.get("state", ""),
-        "city": row.get("city", ""),
-        "domain": row.get("domain", ""),
-        "industry": row.get("industry", ""),
-        "designation": row.get("designation", ""),
+        "country": (row.get("country") or "").strip().upper(),
+        "state": row.get("state", "").strip().upper(),
+        "city": row.get("city", "").strip().upper(),
+        "domain": row.get("domain", "").strip().upper(),
+        "domain_group": row.get("domain_group") or [],
+        "industry": row.get("industry", "").strip().upper(),
+        "designation": row.get("designation", "").strip().upper(),
         "phone": row.get("phone", ""),
         "linkedin": row.get("linkedin", ""),
         "citation": row.get("citation", ""),
@@ -44,12 +45,23 @@ def build_email_master_document(
         # Profile usage tracking
         # List of { profileId, employeeId, usedDate }
         "usedInProfiles": [],
+        "profileNames": [],
         
         # Employee assignment tracking (NEW FIELDS)
-        "inProfileEmails": False,        # YES/NO - Has it been added to any profile?
-        "usedByEmployeeId": None,        # Employee ID who claimed this email
-        "usedByEmployeeName": None,      # Employee name who claimed this email
-        "assignedDate": None,            # When assigned to employee
+        "inProfileEmails": False,        # YES/NO - Is it currently locked in a profile?
+        "usedByEmployeeIds": [],         # List of employee IDs who claimed this email
+        "usedByEmployeeNames": [],       # List of employee names who claimed this email
+        "usageCount": 0,                 # How many times this email has been used
+        "assignedDate": None,            # When assigned to current employee
+        "lastUsedAt": None,               # When the email was successfully sent
+
+        # Reply tracking
+        "hasReply": False,
+        "replyReason": None,
+        "replyCustomReason": None,
+        "replyMarkedAt": None,
+        "replyMarkedBy": None,
+        "replyMarkedByName": None,
         
         "createdAt": now,
         "updatedAt": now,

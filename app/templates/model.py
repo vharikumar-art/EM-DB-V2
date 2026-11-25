@@ -17,7 +17,7 @@ def build_template_document(
     is_global=True  → created by admin, visible to all employees (read-only for employees).
     is_global=False → owned by the employee, private to them.
 
-    Supports placeholders: [name], [company], [industry], [designation], [country]
+    Supports placeholders: [name], [university], [industry], [designation], [country]
     These are replaced at send time by the LangChain personalizer.
     """
     now = datetime.now(timezone.utc)

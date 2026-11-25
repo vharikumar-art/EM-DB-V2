@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 from app.campaigns.model import CampaignStatus
@@ -6,14 +7,57 @@ from app.campaigns.model import CampaignStatus
 
 class CampaignStartRequest(BaseModel):
     profileId: str
+    mailType: Literal["draft", "reminder"] = Field(
+        default="draft",
+        description="Send pending draft emails or queued reminder emails",
+    )
     campaignName: str = Field(default="", max_length=200)
     dailyLimit: int | None = Field(default=None, ge=1, le=10000, description="Daily email limit for this campaign (required, not optional)")
     limitOverride: int | None = Field(default=None, ge=1, le=10000, description="[DEPRECATED] Use dailyLimit instead")
+    autoReminderEnabled: bool = Field(
+        default=True,
+        description="Automatically schedule a reminder after a draft campaign completes",
+    )
+    reminderDelayDays: int = Field(
+        default=1,
+        ge=0,
+        le=15,
+        description="Days after draft completion before the automatic reminder runs; 0 starts immediately",
+    )
+
+    @field_validator("reminderDelayDays", mode="before")
+    @classmethod
+    def default_empty_reminder_delay(cls, value):
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return 1
+        return value
+
+    autoReminder2Enabled: bool = Field(
+        default=False,
+        description="Automatically schedule a second reminder after the first reminder completes",
+    )
+    reminder2DelayDays: int = Field(
+        default=1,
+        ge=0,
+        le=15,
+        description="Days after the first reminder completes before the second reminder runs",
+    )
+
+    @field_validator("reminder2DelayDays", mode="before")
+    @classmethod
+    def default_empty_reminder2_delay(cls, value):
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return 1
+        return value
 
 
 class CampaignScheduleRequest(BaseModel):
     """Request to create a scheduled campaign"""
     profileId: str
+    mailType: Literal["draft", "reminder"] = Field(
+        default="draft",
+        description="Send pending draft emails or queued reminder emails",
+    )
     campaignName: str = Field(default="", max_length=200)
     scheduledDateLocal: str | None = Field(default=None, description="Local date string (YYYY-MM-DD), required for 'once'")
     scheduledTimeLocal: str = Field(description="Local time string (HH:MM)")
@@ -23,6 +67,41 @@ class CampaignScheduleRequest(BaseModel):
     recurrenceType: str = Field(default="once", description="Recurrence type: 'once', 'daily', or 'weekly'")
     recurrenceDays: list[int] = Field(default_factory=list, description="Days for weekly recurrence (0=Mon, 6=Sun)")
     recurrenceEndDate: str | None = Field(default=None, description="End date for recurring campaigns (YYYY-MM-DD)")
+    autoReminderEnabled: bool = Field(
+        default=True,
+        description="Automatically schedule a reminder after a draft campaign completes",
+    )
+    reminderDelayDays: int = Field(
+        default=1,
+        ge=0,
+        le=15,
+        description="Days after draft completion before the automatic reminder runs; 0 starts immediately",
+    )
+
+    @field_validator("reminderDelayDays", mode="before")
+    @classmethod
+    def default_empty_reminder_delay(cls, value):
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return 1
+        return value
+
+    autoReminder2Enabled: bool = Field(
+        default=False,
+        description="Automatically schedule a second reminder after the first reminder completes",
+    )
+    reminder2DelayDays: int = Field(
+        default=1,
+        ge=0,
+        le=15,
+        description="Days after the first reminder completes before the second reminder runs",
+    )
+
+    @field_validator("reminder2DelayDays", mode="before")
+    @classmethod
+    def default_empty_reminder2_delay(cls, value):
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return 1
+        return value
 
 
 class SchedulerProcessResponse(BaseModel):
@@ -51,6 +130,7 @@ class CampaignOut(BaseModel):
     id: str
     campaignName: str
     profileId: str
+    mailType: Literal["draft", "reminder"] = "draft"
     employeeId: str
     status: CampaignStatus
     totalEmails: int
@@ -59,9 +139,12 @@ class CampaignOut(BaseModel):
     failed: int
     skipped: int
     replies: int
+    processedEmails: int = 0
+    progressPercent: float = 0
     dailyLimit: int | None = None
     limitOverride: int | None = None
     startedAt: str | None = None
+    startedAtDisplay: str | None = None
     completedAt: str | None = None
     pausedAt: str | None = None
     createdAt: str | None = None
@@ -74,6 +157,18 @@ class CampaignOut(BaseModel):
     errorMessage: str | None = None
     retryCount: int = 0
     maxRetries: int = 3
+    autoReminderEnabled: bool = True
+    reminderDelayDays: int = 1
+    reminderAutomationStatus: str | None = None
+    reminderAutomationError: str | None = None
+    reminderCampaignId: str | None = None
+    reminderScheduledFor: str | None = None
+    autoReminder2Enabled: bool = False
+    reminder2DelayDays: int = 1
+    reminder2AutomationStatus: str | None = None
+    reminder2AutomationError: str | None = None
+    reminder2CampaignId: str | None = None
+    reminder2ScheduledFor: str | None = None
     # Recurrence fields
     recurrenceType: str = "once"
     recurrenceDays: list[int] = []

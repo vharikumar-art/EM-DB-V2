@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from app.campaigns.model import CampaignStatus
+from app.dashboard.roles import is_admin_dashboard_role, is_super_admin_role
 from app.dashboard.schema import DashboardQuery
 from app.dashboard.utils import resolve_date_range
 from app.database.mongodb import get_collection
@@ -16,6 +17,29 @@ def _safe_oid(id_str: str):
     return ObjectId(id_str) if ObjectId.is_valid(id_str) else None
 
 
+def _build_admin_scope(
+    admin_user_id: str,
+    admin_emp_id: str | None,
+    assigned_emp_ids: list[str],
+    assigned_user_ids: list[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    scope_emp_ids: list[str] = []
+    if admin_emp_id:
+        scope_emp_ids.append(admin_emp_id)
+
+    for emp_id in assigned_emp_ids:
+        if emp_id and emp_id not in scope_emp_ids:
+            scope_emp_ids.append(emp_id)
+
+    scope_user_ids = [admin_user_id]
+    if assigned_user_ids:
+        for user_id in assigned_user_ids:
+            if user_id and user_id not in scope_user_ids:
+                scope_user_ids.append(user_id)
+
+    return scope_emp_ids, scope_user_ids
+
+
 async def _employee_name(employee_id: str) -> str:
     employees = get_collection("employees")
     emp = await employees.find_one({"_id": _safe_oid(employee_id)})
@@ -24,6 +48,110 @@ async def _employee_name(employee_id: str) -> str:
     users = get_collection("users")
     user = await users.find_one({"_id": _safe_oid(str(emp["userId"]))})
     return user["name"] if user else "Unknown"
+
+
+async def _resolve_dashboard_scope(role: str | None, user_id: str | None) -> dict:
+    if is_super_admin_role(role):
+        return {"is_global": True, "scope_emp_ids": [], "scope_user_ids": []}
+
+    if is_admin_dashboard_role(role):
+        employees = get_collection("employees")
+        admin_emp = await employees.find_one({"userId": user_id}) if user_id else None
+        admin_emp_id = str(admin_emp["_id"]) if admin_emp else None
+        admin_branch = admin_emp.get("branch") if admin_emp else None
+        if not admin_branch and user_id:
+            users_col = get_collection("users")
+            admin_u = await users_col.find_one({"_id": _safe_oid(user_id)}, {"branch": 1})
+            admin_branch = (admin_u or {}).get("branch")
+
+        if not admin_emp_id:
+            return {
+                "is_global": False,
+                "scope_emp_ids": [],
+                "scope_user_ids": [user_id] if user_id else [],
+            }
+
+        # Check admin access level
+        users_col = get_collection("users")
+        admin_u = await users_col.find_one({"_id": _safe_oid(user_id)}, {"accessLevel": 1}) if user_id else None
+        admin_access_level = (admin_u or {}).get("accessLevel", "full")
+
+        if admin_access_level == "full" and admin_branch:
+            import re
+            branch_regex = {"$regex": f"^{re.escape(str(admin_branch).strip())}$", "$options": "i"}
+            # Only include branch users whose role is 'employee'
+            branch_users = [
+                u async for u in users_col.find(
+                    {"branch": branch_regex, "role": "employee"},
+                    {"_id": 1}
+                )
+            ]
+            branch_uids = [str(u["_id"]) for u in branch_users] + [u["_id"] for u in branch_users]
+
+            assigned_employees = await employees.find({
+                "userId": {"$in": branch_uids}
+            }).to_list(None)
+        else:
+            assigned_employees = await employees.find({"assignedToAdmin": admin_emp_id}).to_list(None)
+
+        assigned_emp_ids = [str(e["_id"]) for e in assigned_employees]
+        assigned_user_ids = [str(e["userId"]) for e in assigned_employees if e.get("userId")]
+
+        scope_emp_ids, scope_user_ids = _build_admin_scope(
+            admin_user_id=user_id or "",
+            admin_emp_id=admin_emp_id,
+            assigned_emp_ids=assigned_emp_ids,
+            assigned_user_ids=assigned_user_ids,
+        )
+
+        return {
+            "is_global": False,
+            "scope_emp_ids": scope_emp_ids,
+            "scope_user_ids": scope_user_ids,
+        }
+
+    return {
+        "is_global": False,
+        "scope_emp_ids": [],
+        "scope_user_ids": [user_id] if user_id else [],
+    }
+
+
+def _get_current_week_range(now: datetime) -> tuple[datetime, datetime]:
+    """Return the Monday-Sunday range for the current week in UTC."""
+    start_of_week = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=now.weekday())
+    end_of_week = start_of_week + timedelta(days=6)
+    return start_of_week, end_of_week
+
+
+def _get_last_week_range(now: datetime) -> tuple[datetime, datetime]:
+    """Return the previous Monday-Sunday range in UTC."""
+    current_week_start, _ = _get_current_week_range(now)
+    last_week_end = current_week_start - timedelta(days=1)
+    last_week_start = last_week_end - timedelta(days=6)
+    return last_week_start, last_week_end
+
+
+def _get_current_month_range(now: datetime) -> tuple[datetime, datetime]:
+    """Return the current office month range (26th through 25th) in UTC."""
+    if now.day >= 26:
+        month_start = now.replace(day=26, hour=0, minute=0, second=0, microsecond=0)
+        next_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0) + timedelta(days=32)
+        month_end = next_month.replace(day=25)
+    else:
+        previous_month_end = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+        month_start = previous_month_end.replace(day=26)
+        month_end = now.replace(day=25, hour=0, minute=0, second=0, microsecond=0)
+    return month_start, month_end
+
+
+def _get_last_month_range(now: datetime) -> tuple[datetime, datetime]:
+    """Return the previous completed office month range (26th through 25th)."""
+    current_month_start, _ = _get_current_month_range(now)
+    last_month_end = current_month_start - timedelta(days=1)
+    previous_month_end = last_month_end.replace(day=1) - timedelta(days=1)
+    last_month_start = previous_month_end.replace(day=26)
+    return last_month_start, last_month_end
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -37,6 +165,7 @@ async def get_employee_dashboard(employee_id: str, query: DashboardQuery) -> dic
     profiles   = get_collection("profiles")
     logs       = get_collection("logs")
     employees  = get_collection("employees")
+    send_stats = get_collection("daily_send_stats")
 
     # email_master is global: uploads are owned by users._id in uploadedBy,
     # while the other employee resources use employees._id in employeeId.
@@ -65,20 +194,16 @@ async def get_employee_dashboard(employee_id: str, query: DashboardQuery) -> dic
             "createdAt": {"$gte": start_dt, "$lte": end_dt},
         }
     )
+    all_time_uploads = await master.count_documents({"uploadedBy": uploader_id})
+    all_time_unique_emails = await master.count_documents({"uploadedBy": uploader_id, "isDuplicate": False})
 
     # ── Campaign counts ──────────────────────────────────────────────────────
     active_profiles  = await profiles.count_documents(
         {"employeeId": employee_id, "isActive": True}
     )
-    # Count unique campaigns (by campaignId/name, not all status instances)
-    unique_campaigns_pipeline = [
-        {"$match": {"employeeId": employee_id}},
-        {"$group": {"_id": "$campaignName"}},
-        {"$count": "total"}
-    ]
-    unique_campaigns_result = await campaigns.aggregate(unique_campaigns_pipeline).to_list(length=1)
-    total_campaigns = unique_campaigns_result[0]["total"] if unique_campaigns_result else 0
-    
+    # Each campaign document is one campaign, even when names are reused.
+    total_campaigns = await campaigns.count_documents({"employeeId": employee_id})
+
     running_campaigns = await campaigns.count_documents(
         {
             "employeeId": employee_id,
@@ -86,54 +211,341 @@ async def get_employee_dashboard(employee_id: str, query: DashboardQuery) -> dic
         }
     )
 
-    # ── Sent today (profile_emails) ──────────────────────────────────────────
-    sent_today = await pe_col.count_documents(
-        {
-            "employeeId": employee_id,
-            "sendStatus": "sent",
-            "sentDate": {"$gte": today_start},
-        }
-    )
-
-    # ── Aggregate pending / failed across all profiles ───────────────────────
+    # ── Aggregate pending across all profiles ──────────────────────────────
     pending_total = await pe_col.count_documents(
         {"employeeId": employee_id, "sendStatus": "pending"}
     )
-    failed_total  = await pe_col.count_documents(
-        {"employeeId": employee_id, "sendStatus": "failed"}
-    )
 
-    # ── Total sent (range) from logs ─────────────────────────────────────────
-    sent_pipeline = [
+    # ── Overall Sent (All Time) — immutable daily_send_stats ────────────────────────
+    overall_sent_pipeline = [
+        {"$match": {"employeeId": employee_id}},
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    overall_sent_res = await send_stats.aggregate(overall_sent_pipeline).to_list(length=1)
+    overall_sent = overall_sent_res[0]["total"] if overall_sent_res else 0
+
+    # ── Current Week Sent (Monday–Sunday) — immutable daily_send_stats ───────────
+    week_start, week_end = _get_current_week_range(now)
+    week_start_str = week_start.strftime("%Y-%m-%d")
+    week_end_str = week_end.strftime("%Y-%m-%d")
+
+    weekly_sent_pipeline = [
         {
             "$match": {
                 "employeeId": employee_id,
-                "action": "CAMPAIGN_COMPLETED",
-                "runDate": {"$gte": start_dt, "$lte": end_dt},
+                "date": {"$gte": week_start_str, "$lte": week_end_str},
             }
         },
         {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
     ]
-    sent_result = await logs.aggregate(sent_pipeline).to_list(length=1)
-    sent_total  = sent_result[0]["total"] if sent_result else 0
+    weekly_sent_res = await send_stats.aggregate(weekly_sent_pipeline).to_list(length=1)
+    current_week_sent = weekly_sent_res[0]["total"] if weekly_sent_res else 0
+
+    month_start, month_end = _get_current_month_range(now)
+    monthly_sent_pipeline = [
+        {
+            "$match": {
+                "employeeId": employee_id,
+                "date": {
+                    "$gte": month_start.strftime("%Y-%m-%d"),
+                    "$lte": month_end.strftime("%Y-%m-%d"),
+                },
+            }
+        },
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    monthly_sent_res = await send_stats.aggregate(monthly_sent_pipeline).to_list(length=1)
+    current_month_sent = monthly_sent_res[0]["total"] if monthly_sent_res else 0
+
+    last_month_start, last_month_end = _get_last_month_range(now)
+    last_monthly_sent_pipeline = [
+        {
+            "$match": {
+                "employeeId": employee_id,
+                "date": {
+                    "$gte": last_month_start.strftime("%Y-%m-%d"),
+                    "$lte": last_month_end.strftime("%Y-%m-%d"),
+                },
+            }
+        },
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    last_monthly_sent_res = await send_stats.aggregate(last_monthly_sent_pipeline).to_list(length=1)
+    last_month_sent = last_monthly_sent_res[0]["total"] if last_monthly_sent_res else 0
+
+    last_week_start, last_week_end = _get_last_week_range(now)
+    last_weekly_sent_pipeline = [
+        {
+            "$match": {
+                "employeeId": employee_id,
+                "date": {
+                    "$gte": last_week_start.strftime("%Y-%m-%d"),
+                    "$lte": last_week_end.strftime("%Y-%m-%d"),
+                },
+            }
+        },
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    last_weekly_sent_res = await send_stats.aggregate(last_weekly_sent_pipeline).to_list(length=1)
+    last_week_sent = last_weekly_sent_res[0]["total"] if last_weekly_sent_res else 0
 
     return {
         "todayUploadCount":    today_uploads,
         "last7DaysUploadCount": last_7_uploads,
         "totalUploadCount":    total_uploads,
         "uniqueEmailCount":    unique_emails,
+        "allTimeUploadCount":  all_time_uploads,
+        "allTimeUniqueEmailCount": all_time_unique_emails,
         "activeProfiles":      active_profiles,
         "totalCampaigns":      total_campaigns,
         "runningCampaigns":    running_campaigns,
-        "sentToday":           sent_today,
-        "sentEmailCount":      sent_total,
+        "overallSent":         overall_sent,
+        "currentWeekSent":     current_week_sent,
+        "currentMonthSent":    current_month_sent,
+        "lastMonthSent":       last_month_sent,
+        "lastWeekSent":        last_week_sent,
         "pendingCount":        pending_total,
-        "failedCount":         failed_total,
     }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Admin dashboard
+# Admin scoped dashboard (for 'admin' role)
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def get_admin_scoped_dashboard(admin_user_id: str, query: DashboardQuery) -> dict:
+    """
+    Get dashboard data scoped to admin's own uploads + assigned employees only.
+
+    Args:
+        admin_user_id: The user._id of the admin user
+        query: Dashboard query with date range
+
+    Returns:
+        dict with scoped stats, including adminOwnUploads, assignedEmployeeUploads, etc.
+    """
+    employees  = get_collection("employees")
+    master     = get_collection("email_master")
+    pe_col     = get_collection("profile_emails")
+    campaigns  = get_collection("campaigns")
+    profiles   = get_collection("profiles")
+    logs       = get_collection("logs")
+    accounts   = get_collection("email_accounts")
+    send_stats = get_collection("daily_send_stats")
+
+    start_dt, end_dt = resolve_date_range(query)
+    range_match = {"createdAt": {"$gte": start_dt, "$lte": end_dt}}
+
+    # ── Find admin's employee record ──────────────────────────────────────────
+    admin_emp = await employees.find_one({"userId": admin_user_id})
+    admin_emp_id = str(admin_emp["_id"]) if admin_emp else None
+
+    if not admin_emp_id:
+        # Admin has no employee record, return empty scoped dashboard
+        return {
+            "adminOwnUploads": 0,
+            "assignedEmployeeUploads": 0,
+            "totalUploads": 0,
+            "totalDuplicates": 0,
+            "totalUniqueEmails": 0,
+            "totalSentToProfiles": 0,
+            "totalSent": 0,
+            "totalCampaigns": 0,
+            "runningCampaigns": 0,
+            "totalProfiles": 0,
+            "activeProfiles": 0,
+
+        }
+
+    # ── Find all employees in the same branch as this admin ──────────────────
+    admin_branch = admin_emp.get("branch") if admin_emp else None
+    if not admin_branch:
+        users_col = get_collection("users")
+        admin_u = await users_col.find_one({"_id": _safe_oid(admin_user_id)}, {"branch": 1})
+        admin_branch = (admin_u or {}).get("branch")
+
+    if admin_branch:
+        import re
+        branch_regex = {"$regex": f"^{re.escape(str(admin_branch).strip())}$", "$options": "i"}
+        users_col = get_collection("users")
+        # Only include branch users whose role is 'employee'
+        branch_users = [
+            u async for u in users_col.find(
+                {"branch": branch_regex, "role": "employee"},
+                {"_id": 1}
+            )
+        ]
+        branch_uids = [str(u["_id"]) for u in branch_users] + [u["_id"] for u in branch_users]
+
+        assigned_employees = await employees.find({
+            "userId": {"$in": branch_uids}
+        }).to_list(None)
+    else:
+        # Fallback: if admin has no branch, only see themselves
+        assigned_employees = [admin_emp] if admin_emp else []
+    assigned_emp_ids = [str(e["_id"]) for e in assigned_employees]
+    assigned_user_ids = [str(e["userId"]) for e in assigned_employees if e.get("userId")]
+
+    # Build the scope once so uploads, profiles, campaigns, and sent records all use the same employee/user context.
+    scope_emp_ids, scope_user_ids = _build_admin_scope(
+        admin_user_id=admin_user_id,
+        admin_emp_id=admin_emp_id,
+        assigned_emp_ids=assigned_emp_ids,
+        assigned_user_ids=assigned_user_ids,
+    )
+
+    # ── Admin's own upload count (all time) ─────────────────────────────────
+    admin_own_uploads = await master.count_documents({"uploadedBy": admin_user_id})
+
+    # ── Assigned employees' total upload count (all time) ────────────────────
+    assigned_uploads_count = 0
+    if assigned_user_ids:
+        assigned_uploads_count = await master.count_documents({
+            "uploadedBy": {"$in": assigned_user_ids}
+        })
+
+    total_uploads = admin_own_uploads + assigned_uploads_count
+
+    # ── Duplicates (scoped to these employees) ────────────────────────────────
+    duplicates_pipeline = [
+        {
+            "$match": {
+                "action": "UPLOAD",
+                "runDate": {"$gte": start_dt, "$lte": end_dt},
+                "employeeId": {"$in": scope_emp_ids}
+            }
+        },
+        {"$group": {"_id": None, "total": {"$sum": "$duplicateCount"}}}
+    ]
+    duplicates_result = await logs.aggregate(duplicates_pipeline).to_list(length=1)
+    total_duplicates = duplicates_result[0]["total"] if duplicates_result else 0
+
+    # ── Unique emails (scoped) ───────────────────────────────────────────────
+    # Query email_master by userId (not employeeId)
+    total_unique_all_uploads = await master.count_documents({
+        "isDuplicate": False,
+        "uploadedBy": {"$in": scope_user_ids},
+        **range_match
+    })
+
+    # ── Profiles (scoped to these employees) ──────────────────────────────────
+    total_profiles = await profiles.count_documents({
+        "employeeId": {"$in": scope_emp_ids}
+    })
+
+    active_profiles = await profiles.count_documents({
+        "employeeId": {"$in": scope_emp_ids},
+        "isActive": True
+    })
+
+    # ── Campaigns (scoped) ───────────────────────────────────────────────────
+    total_campaigns = await campaigns.count_documents({"employeeId": {"$in": scope_emp_ids}})
+
+    running_campaigns = await campaigns.count_documents({
+        "employeeId": {"$in": scope_emp_ids},
+        "status": {"$in": [CampaignStatus.RUNNING.value, CampaignStatus.PROCESSING.value]}
+    })
+
+    # ── Sent to profiles (scoped) ────────────────────────────
+    total_sent_profiles = await pe_col.count_documents({
+        "employeeId": {"$in": scope_emp_ids},
+        "sentDate": {"$gte": start_dt, "$lte": end_dt}
+    })
+
+    # ── Overall Sent (All Time) — immutable daily_send_stats ────────────────────────
+    overall_sent_pipeline = [
+        {"$match": {"employeeId": {"$in": scope_emp_ids}}},
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    overall_sent_res = await send_stats.aggregate(overall_sent_pipeline).to_list(length=1)
+    overall_sent = overall_sent_res[0]["total"] if overall_sent_res else 0
+
+    # ── Current Week Sent (Monday–Sunday) — immutable daily_send_stats ───────────
+    now_admin = datetime.now(timezone.utc)
+    week_start, week_end = _get_current_week_range(now_admin)
+    week_start_str = week_start.strftime("%Y-%m-%d")
+    week_end_str = week_end.strftime("%Y-%m-%d")
+
+    weekly_sent_pipeline = [
+        {
+            "$match": {
+                "employeeId": {"$in": scope_emp_ids},
+                "date": {"$gte": week_start_str, "$lte": week_end_str},
+            }
+        },
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    weekly_sent_res = await send_stats.aggregate(weekly_sent_pipeline).to_list(length=1)
+    current_week_sent = weekly_sent_res[0]["total"] if weekly_sent_res else 0
+
+    month_start, month_end = _get_current_month_range(now_admin)
+    monthly_sent_pipeline = [
+        {
+            "$match": {
+                "employeeId": {"$in": scope_emp_ids},
+                "date": {
+                    "$gte": month_start.strftime("%Y-%m-%d"),
+                    "$lte": month_end.strftime("%Y-%m-%d"),
+                },
+            }
+        },
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    monthly_sent_res = await send_stats.aggregate(monthly_sent_pipeline).to_list(length=1)
+    current_month_sent = monthly_sent_res[0]["total"] if monthly_sent_res else 0
+
+    last_month_start, last_month_end = _get_last_month_range(now_admin)
+    last_monthly_sent_pipeline = [
+        {
+            "$match": {
+                "employeeId": {"$in": scope_emp_ids},
+                "date": {
+                    "$gte": last_month_start.strftime("%Y-%m-%d"),
+                    "$lte": last_month_end.strftime("%Y-%m-%d"),
+                },
+            }
+        },
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    last_monthly_sent_res = await send_stats.aggregate(last_monthly_sent_pipeline).to_list(length=1)
+    last_month_sent = last_monthly_sent_res[0]["total"] if last_monthly_sent_res else 0
+
+    last_week_start, last_week_end = _get_last_week_range(now_admin)
+    last_weekly_sent_pipeline = [
+        {
+            "$match": {
+                "employeeId": {"$in": scope_emp_ids},
+                "date": {
+                    "$gte": last_week_start.strftime("%Y-%m-%d"),
+                    "$lte": last_week_end.strftime("%Y-%m-%d"),
+                },
+            }
+        },
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    last_weekly_sent_res = await send_stats.aggregate(last_weekly_sent_pipeline).to_list(length=1)
+    last_week_sent = last_weekly_sent_res[0]["total"] if last_weekly_sent_res else 0
+
+    return {
+        "adminOwnUploads": admin_own_uploads,
+        "assignedEmployeeUploads": assigned_uploads_count,
+        "totalUploads": total_uploads,
+        "totalDuplicates": total_duplicates,
+        "totalUniqueEmails": total_unique_all_uploads,
+        "totalSentToProfiles": total_sent_profiles,
+        "overallSent": overall_sent,
+        "currentWeekSent": current_week_sent,
+        "currentMonthSent": current_month_sent,
+        "lastMonthSent": last_month_sent,
+        "lastWeekSent": last_week_sent,
+        "totalCampaigns": total_campaigns,
+        "runningCampaigns": running_campaigns,
+        "totalProfiles": total_profiles,
+        "activeProfiles": active_profiles,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Admin dashboard (for 'super_admin' role - global view)
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def get_admin_dashboard(query: DashboardQuery) -> dict:
@@ -144,52 +556,111 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
     profiles   = get_collection("profiles")
     logs       = get_collection("logs")
     accounts   = get_collection("email_accounts")
+    send_stats = get_collection("daily_send_stats")
 
     start_dt, end_dt = resolve_date_range(query)
     range_match = {"createdAt": {"$gte": start_dt, "$lte": end_dt}}
 
-    # ── Totals ───────────────────────────────────────────────────────────────
+    # ── Global totals for super_admin ───────────────────────────────────────────
     total_employees   = await employees.count_documents({})
-    total_uploads     = await master.count_documents(range_match)
-    total_unique      = await master.count_documents({**range_match, "isDuplicate": False})
-    
+    total_uploads     = await master.count_documents({})
+    total_unique      = await master.count_documents({"isDuplicate": False})
+
     # Get total duplicates from logs (this is where duplicate count is stored)
     duplicates_pipeline = [
-        {"$match": {"action": "UPLOAD", "runDate": {"$gte": start_dt, "$lte": end_dt}}},
+        {"$match": {"action": "UPLOAD"}},
         {"$group": {"_id": None, "total": {"$sum": "$duplicateCount"}}}
     ]
     duplicates_result = await logs.aggregate(duplicates_pipeline).to_list(length=1)
     total_duplicates = duplicates_result[0]["total"] if duplicates_result else 0
-    
+
     # Count unique campaigns (by campaignName, not all status instances)
-    unique_campaigns_pipeline = [
-        {"$group": {"_id": "$campaignName"}},
-        {"$count": "total"}
-    ]
-    unique_campaigns_result = await campaigns.aggregate(unique_campaigns_pipeline).to_list(length=1)
-    total_campaigns = unique_campaigns_result[0]["total"] if unique_campaigns_result else 0
-    
-    running_campaigns = await campaigns.count_documents({"status": "running"})
+    total_campaigns = await campaigns.count_documents({})
+
+    running_campaigns = await campaigns.count_documents({
+        "status": {"$in": [CampaignStatus.RUNNING.value, CampaignStatus.PROCESSING.value]}
+    })
     total_accounts    = await accounts.count_documents({"isActive": True})
     total_profiles    = await profiles.count_documents({})  # Count all profiles
 
     # Total sent to profiles (count of profile_emails records)
-    total_sent_profiles = await pe_col.count_documents(
-        {"sentDate": {"$gte": start_dt, "$lte": end_dt}}
-    )
-    
-    # Total actually sent (profile_emails with sent status) - count ALL sent emails, not date-filtered
-    total_sent = await pe_col.count_documents(
-        {"sendStatus": "sent"}
-    )
+    total_sent_profiles = await pe_col.count_documents({})
 
-    # Global pending / failed
-    total_pending = await pe_col.count_documents({"sendStatus": "pending"})
-    total_failed  = await pe_col.count_documents({"sendStatus": "failed"})
+    # ── Overall Sent (All Time) — immutable daily_send_stats ────────────────────────
+    overall_sent_pipeline = [
+        {"$match": {}},
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    overall_sent_res = await send_stats.aggregate(overall_sent_pipeline).to_list(length=1)
+    overall_sent = overall_sent_res[0]["total"] if overall_sent_res else 0
+
+    # ── Current Week Sent (Monday–Sunday) — immutable daily_send_stats ───────────
+    now = datetime.now(timezone.utc)
+    week_start, week_end = _get_current_week_range(now)
+    week_start_str = week_start.strftime("%Y-%m-%d")
+    week_end_str = week_end.strftime("%Y-%m-%d")
+
+    weekly_sent_pipeline = [
+        {
+            "$match": {
+                "date": {"$gte": week_start_str, "$lte": week_end_str},
+            }
+        },
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    weekly_sent_res = await send_stats.aggregate(weekly_sent_pipeline).to_list(length=1)
+    current_week_sent = weekly_sent_res[0]["total"] if weekly_sent_res else 0
+
+    month_start, month_end = _get_current_month_range(now)
+    monthly_sent_pipeline = [
+        {
+            "$match": {
+                "date": {
+                    "$gte": month_start.strftime("%Y-%m-%d"),
+                    "$lte": month_end.strftime("%Y-%m-%d"),
+                },
+            }
+        },
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    monthly_sent_res = await send_stats.aggregate(monthly_sent_pipeline).to_list(length=1)
+    current_month_sent = monthly_sent_res[0]["total"] if monthly_sent_res else 0
+
+    last_month_start, last_month_end = _get_last_month_range(now)
+    last_monthly_sent_pipeline = [
+        {
+            "$match": {
+                "date": {
+                    "$gte": last_month_start.strftime("%Y-%m-%d"),
+                    "$lte": last_month_end.strftime("%Y-%m-%d"),
+                },
+            }
+        },
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    last_monthly_sent_res = await send_stats.aggregate(last_monthly_sent_pipeline).to_list(length=1)
+    last_month_sent = last_monthly_sent_res[0]["total"] if last_monthly_sent_res else 0
+
+    last_week_start, last_week_end = _get_last_week_range(now)
+    last_weekly_sent_pipeline = [
+        {
+            "$match": {
+                "date": {
+                    "$gte": last_week_start.strftime("%Y-%m-%d"),
+                    "$lte": last_week_end.strftime("%Y-%m-%d"),
+                },
+            }
+        },
+        {"$group": {"_id": None, "total": {"$sum": "$sentCount"}}},
+    ]
+    last_weekly_sent_res = await send_stats.aggregate(last_weekly_sent_pipeline).to_list(length=1)
+    last_week_sent = last_weekly_sent_res[0]["total"] if last_weekly_sent_res else 0
+
+    # Active profiles
+    active_profiles = await profiles.count_documents({"isActive": True})
 
     # ── Employee upload ranking ───────────────────────────────────────────────
     ranking_pipeline = [
-        {"$match": range_match},
         {"$group": {"_id": "$employeeId", "uploadedCount": {"$sum": 1}}},
         {"$sort": {"uploadedCount": -1}},
         {"$limit": 20},
@@ -200,7 +671,6 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
         {
             "$match": {
                 "action": "CAMPAIGN_COMPLETED",
-                "runDate": {"$gte": start_dt, "$lte": end_dt},
             }
         },
         {"$group": {"_id": "$employeeId", "sentCount": {"$sum": "$sentCount"}}},
@@ -252,7 +722,6 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
                 "_id":           "$employeeId",
                 "totalCampaigns": {"$sum": 1},
                 "totalSent":     {"$sum": "$sent"},
-                "totalFailed":   {"$sum": "$failed"},
             }
         },
         {"$sort": {"totalSent": -1}},
@@ -268,99 +737,64 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
                 "employeeName":   emp_name,
                 "totalCampaigns": row["totalCampaigns"],
                 "totalSent":      row["totalSent"],
-                "totalFailed":    row["totalFailed"],
             }
         )
 
     # ── Detailed employee performance ──────────────────────────────────────────
     employee_performance = []
+
+    # Pre-fetch users for name mapping to avoid N+1 query overhead
+    users_col = get_collection("users")
+    user_map = {str(u["_id"]): u.get("name", "Unknown") async for u in users_col.find()}
+
     async for emp in employees.find():
         emp_id = str(emp["_id"])
-        emp_name = await _employee_name(emp_id)
-        
-        # Get employee's userId to track uploads
         user_id = str(emp.get("userId", "")) if emp.get("userId") else None
-        
-        # DEBUG: Log employee and their userId
-        import sys
-        print(f"[DEBUG] Employee: {emp_name} | emp_id: {emp_id} | user_id: {user_id}", file=sys.stderr)
-        
+        emp_name = user_map.get(user_id, "Unknown") if user_id else "Unknown"
+
         # Get uploads (count by userId who uploaded)
         total_emp_uploads = await master.count_documents({
             "uploadedBy": user_id
         }) if user_id else 0
-        
-        print(f"[DEBUG] {emp_name} uploads: {total_emp_uploads}", file=sys.stderr)
-        
+
         # Get duplicate count from logs for this employee (by userId)
         emp_duplicates_pipeline = [
             {
                 "$match": {
                     "employeeId": emp_id,
                     "action": "UPLOAD",
-                    "runDate": {"$gte": start_dt, "$lte": end_dt}
                 }
             },
             {"$group": {"_id": None, "total": {"$sum": "$duplicateCount"}}}
         ]
         emp_duplicates_result = await logs.aggregate(emp_duplicates_pipeline).to_list(length=1)
         emp_duplicates = emp_duplicates_result[0]["total"] if emp_duplicates_result else 0
-        
+
         # Get sent to profiles (total records added to profile_emails from email_master)
         emp_sent_profiles = await pe_col.count_documents({
             "employeeId": emp_id,
-            "sentDate": {"$gte": start_dt, "$lte": end_dt}
         })
-        
-        # Get actually sent (sendStatus: sent) - count ALL, not date-filtered
+
+        # Get actually sent (sendStatus: sent)
         emp_sent = await pe_col.count_documents({
             "employeeId": emp_id,
-            "sendStatus": "sent"
+            "sendStatus": "sent",
         })
-        
+
         # Get employee's profiles count (using employeeId)
         emp_total_profiles = await profiles.count_documents({
             "employeeId": emp_id
         })
-        
-        profiles_with_emp_id = await profiles.find({"employeeId": emp_id}).to_list(None)
-        print(f"[DEBUG] {emp_name} - Query employeeId: {emp_id} | Found profiles: {len(profiles_with_emp_id) if profiles_with_emp_id else 0}", file=sys.stderr)
-        if profiles_with_emp_id:
-            print(f"[DEBUG] Profile employeeIds: {[p.get('employeeId') for p in profiles_with_emp_id]}", file=sys.stderr)
-        
-        # DEBUG: Find ALL profiles for this employee (regardless of employeeId)
-        all_user_profiles = await profiles.find({"employeeId": {"$exists": True}}).to_list(None)
-        matching_profiles = [p for p in all_user_profiles if emp_name.lower() in str(p.get("profileName", "")).lower() or emp_id in str(p.get("employeeId", ""))]
-        if matching_profiles:
-            print(f"[DEBUG] Found matching profiles for {emp_name}: {[(p.get('profileName'), p.get('employeeId')) for p in matching_profiles]}", file=sys.stderr)
-        
-        # Get employee's total campaigns (unique campaigns by campaignName, using employeeId)
-        emp_total_campaigns_pipeline = [
-            {"$match": {"employeeId": emp_id}},
-            {"$group": {"_id": "$campaignName"}},
-            {"$count": "total"}
-        ]
-        emp_total_campaigns_result = await campaigns.aggregate(emp_total_campaigns_pipeline).to_list(length=1)
-        emp_total_campaigns = emp_total_campaigns_result[0]["total"] if emp_total_campaigns_result else 0
-        
-        campaigns_with_emp_id = await campaigns.find({"employeeId": emp_id}).to_list(None)
-        print(f"[DEBUG] {emp_name} - Query employeeId: {emp_id} | Found campaigns: {len(campaigns_with_emp_id) if campaigns_with_emp_id else 0}", file=sys.stderr)
-        if campaigns_with_emp_id:
-            print(f"[DEBUG] Campaign employeeIds: {[c.get('employeeId') for c in campaigns_with_emp_id]}", file=sys.stderr)
-        
-        # DEBUG: Find campaigns with user_id instead (legacy data)
-        campaigns_with_user_id = await campaigns.find({"employeeId": user_id}).to_list(None)
-        if campaigns_with_user_id:
-            print(f"[DEBUG] {emp_name} HAS CAMPAIGNS under user_id {user_id}: {[(c.get('campaignName'), c.get('employeeId')) for c in campaigns_with_user_id]}", file=sys.stderr)
-        
+
+        # Each campaign document is one campaign, even when names are reused.
+        emp_total_campaigns = await campaigns.count_documents({"employeeId": emp_id})
+
         # Get employee's running campaigns (status: "running", using employeeId)
         emp_running_campaigns = await campaigns.count_documents({
             "employeeId": emp_id,
-            "status": "running"
+            "status": {"$in": [CampaignStatus.RUNNING.value, CampaignStatus.PROCESSING.value]}
         })
-        
-        print(f"[DEBUG] {emp_name} running campaigns: {emp_running_campaigns}", file=sys.stderr)
-        
+
         employee_performance.append({
             "employeeId": emp_id,
             "employeeName": emp_name,
@@ -380,22 +814,19 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
         "totalDuplicates":     total_duplicates,
         "totalUniqueEmails":   total_unique,
         "totalSentToProfiles": total_sent_profiles,
-        "totalSent":           total_sent,
+        "overallSent":         overall_sent,
+        "currentWeekSent":     current_week_sent,
+        "currentMonthSent":    current_month_sent,
+        "lastMonthSent":       last_month_sent,
+        "lastWeekSent":        last_week_sent,
         "totalCampaigns":      total_campaigns,
         "runningCampaigns":    running_campaigns,
         "activeEmailAccounts": total_accounts,
         "totalProfiles":       total_profiles,
-        "totalPending":        total_pending,
-        "totalFailed":         total_failed,
+        "activeProfiles":      active_profiles,
         # Overall metrics (not date-filtered)
         "overallEmailMaster":  await master.count_documents({}),
         "overallProfileEmails": await pe_col.count_documents({}),
-        "overallSent":         await pe_col.count_documents({"sendStatus": "sent"}),
-        # Sent today
-        "sentToday":           await pe_col.count_documents(
-            {"sendStatus": "sent", "sentDate": {"$gte": now.replace(hour=0, minute=0, second=0, microsecond=0)}}
-        ),
-        "employeePerformance": employee_performance,
     }
 
 
@@ -403,17 +834,27 @@ async def get_admin_dashboard(query: DashboardQuery) -> dict:
 # Dropdown Options
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def get_dropdown_options() -> dict:
-    """Get all dropdown options: employees, admins, profiles, campaigns."""
+async def get_dropdown_options(current_user=None) -> dict:
+    """Get dropdown options scoped to the current admin or the full system for super admins."""
     employees_col = get_collection("employees")
     users_col = get_collection("users")
     profiles_col = get_collection("profiles")
     campaigns_col = get_collection("campaigns")
 
+    role = getattr(current_user, "role", None)
+    user_id = getattr(current_user, "user_id", None)
+    scope = await _resolve_dashboard_scope(role, user_id)
+    is_global = scope["is_global"]
+    scope_emp_ids = set(scope["scope_emp_ids"])
+    scope_user_ids = set(scope["scope_user_ids"])
+
     # Get employees with names
     employees = []
     async for emp in employees_col.find():
         emp_id = str(emp["_id"])
+        if not is_global and emp_id not in scope_emp_ids:
+            continue
+
         user = await users_col.find_one({"_id": _safe_oid(emp["userId"])})
         emp_name = user.get("name", "Unknown") if user else "Unknown"
         employees.append({
@@ -424,23 +865,36 @@ async def get_dropdown_options() -> dict:
 
     # Get admins (users with role=admin)
     admins = []
-    async for user in users_col.find({"role": "admin"}):
-        user_id = str(user["_id"])
-        admins.append({
-            "id": user_id,
-            "name": user.get("name", "Unknown"),
-            "email": user.get("email", "")
-        })
+    if is_global:
+        async for user in users_col.find({"role": "admin"}):
+            user_id_value = str(user["_id"])
+            admins.append({
+                "id": user_id_value,
+                "name": user.get("name", "Unknown"),
+                "email": user.get("email", "")
+            })
+    elif user_id:
+        user_doc = await users_col.find_one({"_id": _safe_oid(user_id)})
+        if user_doc:
+            admins.append({
+                "id": str(user_doc["_id"]),
+                "name": user_doc.get("name", "Unknown"),
+                "email": user_doc.get("email", "")
+            })
 
     # Get profiles with employee names
     profiles = []
     async for profile in profiles_col.find():
         profile_id = str(profile["_id"])
         emp_id = profile.get("employeeId")
+        emp_id_str = str(emp_id) if emp_id is not None else None
+        if not is_global and emp_id_str not in scope_emp_ids:
+            continue
+
         emp = await employees_col.find_one({"_id": _safe_oid(emp_id)})
         emp_user = await users_col.find_one({"_id": _safe_oid(emp.get("userId"))}) if emp else None
         emp_name = emp_user.get("name", "Unknown") if emp_user else "Unknown"
-        
+
         profiles.append({
             "id": profile_id,
             "name": profile.get("profileName", "Unnamed"),
@@ -454,10 +908,14 @@ async def get_dropdown_options() -> dict:
     async for campaign in campaigns_col.find():
         campaign_id = str(campaign["_id"])
         emp_id = campaign.get("employeeId")
+        emp_id_str = str(emp_id) if emp_id is not None else None
+        if not is_global and emp_id_str not in scope_emp_ids:
+            continue
+
         emp = await employees_col.find_one({"_id": _safe_oid(emp_id)})
         emp_user = await users_col.find_one({"_id": _safe_oid(emp.get("userId"))}) if emp else None
         emp_name = emp_user.get("name", "Unknown") if emp_user else "Unknown"
-        
+
         campaigns.append({
             "id": campaign_id,
             "name": campaign.get("campaignName", "Unnamed"),
@@ -486,11 +944,19 @@ async def get_upload_history(
     employee_id: str | None = None,
     page: int = 1,
     page_size: int = 20,
+    current_user=None,
 ) -> dict:
-    """Fetch paginated upload history from logs, filtering out deleted users."""
+    """Fetch paginated upload history from logs, grouped by employee per day."""
     logs = get_collection("logs")
     users_col = get_collection("users")
     employees_col = get_collection("employees")
+
+    role = getattr(current_user, "role", None)
+    user_id = getattr(current_user, "user_id", None)
+    scope = await _resolve_dashboard_scope(role, user_id)
+    is_global = scope["is_global"]
+    scope_user_ids = set(scope["scope_user_ids"])
+    scope_emp_ids = set(scope["scope_emp_ids"])
 
     start_dt, end_dt = resolve_date_range(query)
 
@@ -503,15 +969,15 @@ async def get_upload_history(
         }
 
     # Build map: employeeId -> userId  (employees collection links them)
-    # Also build dropdown list of employees that appear in upload logs within date range
     emp_to_user: dict[str, str] = {}
     async for emp in employees_col.find({}, {"_id": 1, "userId": 1}):
         emp_to_user[str(emp["_id"])] = str(emp.get("userId", ""))
+    user_to_emp = {user_id: employee_id for employee_id, user_id in emp_to_user.items()}
 
-    # Resolve the requested employeeId filter to a userId for matching
-    filter_user_id: str | None = None
+    # Logs may contain either the user ID or the employee document ID.
+    filter_user_id = None
     if employee_id:
-        filter_user_id = emp_to_user.get(employee_id)
+        filter_user_id = emp_to_user.get(employee_id, employee_id)
 
     match_stage: dict = {
         "action": "UPLOAD",
@@ -519,21 +985,23 @@ async def get_upload_history(
     }
     pipeline = [{"$match": match_stage}, {"$sort": {"runDate": -1}}]
 
-    # ── First pass: build full record list (needed for totals & employee dropdown)
-    all_records: list[dict] = []
+    # ── First pass: collect all raw log records
+    raw_records: list[dict] = []
     employee_set: dict[str, dict] = {}  # employeeId -> {id, name, email}
 
     async for log in logs.aggregate(pipeline):
-        emp_id = log.get("employeeId")
+        logged_id = str(log.get("employeeId", ""))
+        emp_id = emp_to_user.get(logged_id, logged_id)
 
-        # emp_id here is the userId stored in logs (not employees._id)
+        # Older /emails uploads store employees._id; newer email-master uploads
+        # store users._id. Normalize both to userId for consistent display.
         if emp_id not in active_users:
             continue
 
-        user_info = active_users[emp_id]
+        if not is_global and emp_id not in scope_user_ids and user_to_emp.get(emp_id) not in scope_emp_ids:
+            continue
 
-        # Resolve back to employees._id for the dropdown
-        # (logs store userId as employeeId; find the matching employee doc)
+        user_info = active_users[emp_id]
         resolved_emp_id = emp_id  # fallback — use userId if no employee doc exists
 
         # Track unique employees for the dropdown
@@ -544,44 +1012,88 @@ async def get_upload_history(
                 "email": user_info["email"],
             }
 
-        up = log.get("uploadedCount", 0)
-        uq = log.get("uniqueCount", 0)
-        dp = log.get("duplicateCount", 0)
+        up  = log.get("uploadedCount", 0)
+        uq  = log.get("uniqueCount", 0)
+        dp  = log.get("duplicateCount", 0)
         inv = max(0, up - uq - dp)
 
-        all_records.append({
-            "id": str(log["_id"]),
-            "employeeId": resolved_emp_id,
-            "employeeName": user_info["name"],
+        # Extract the calendar date (YYYY-MM-DD) for grouping — multiple uploads
+        # on the same day will be collapsed into a single row per employee.
+        run_date: datetime = log.get("runDate")
+        date_key = run_date.strftime("%Y-%m-%d") if run_date else "unknown"
+
+        raw_records.append({
+            "employeeId":    resolved_emp_id,
+            "employeeName":  user_info["name"],
             "employeeEmail": user_info["email"],
-            "uploadCount": up,
-            "uniqueCount": uq,
+            "uploadCount":   up,
+            "uniqueCount":   uq,
             "duplicateCount": dp,
-            "invalidCount": inv,
-            "date": log.get("runDate"),
+            "invalidCount":  inv,
+            "date_key":      date_key,   # for grouping (not sent to client)
+            "date":          date_key,   # date-only string (YYYY-MM-DD), no time
         })
 
-    # ── Apply employee filter (server-side, after resolving)
+    # ── Apply employee filter
     if employee_id:
-        # employee_id may be either an employees._id or a userId — match both
-        filtered = [
-            r for r in all_records
-            if r["employeeId"] == employee_id or r["employeeId"] == filter_user_id
-        ]
-    else:
-        filtered = all_records
+        if (
+            not is_global
+            and employee_id not in scope_emp_ids
+            and filter_user_id not in scope_user_ids
+        ):
+            raw_records = []
+        else:
+            raw_records = [
+                r for r in raw_records
+                if r["employeeId"] == filter_user_id
+            ]
 
-    # ── Compute totals on the filtered (but un-paginated) set
-    total_uploads = sum(r["uploadCount"] for r in filtered)
-    total_unique = sum(r["uniqueCount"] for r in filtered)
+    # ── Group by (employeeId, date_key) → one row per employee per calendar day
+    grouped: dict[tuple, dict] = {}
+
+    for r in raw_records:
+        key = (r["employeeId"], r["date_key"])
+        if key not in grouped:
+            grouped[key] = {
+                "employeeId":    r["employeeId"],
+                "employeeName":  r["employeeName"],
+                "employeeEmail": r["employeeEmail"],
+                "uploadCount":   0,
+                "uniqueCount":   0,
+                "duplicateCount": 0,
+                "invalidCount":  0,
+                "date":          r["date"],
+                "date_key":      r["date_key"],
+            }
+        g = grouped[key]
+        g["uploadCount"]    += r["uploadCount"]
+        g["uniqueCount"]    += r["uniqueCount"]
+        g["duplicateCount"] += r["duplicateCount"]
+        g["invalidCount"]   += r["invalidCount"]
+        # date is already a date-only string (YYYY-MM-DD); no timestamp comparison needed
+
+    # Sort: latest date first, then employee name
+    filtered = sorted(
+        grouped.values(),
+        key=lambda x: (x["date_key"], x["employeeName"]),
+        reverse=True,
+    )
+
+    # ── Compute totals on the full filtered set
+    total_uploads   = sum(r["uploadCount"]    for r in filtered)
+    total_unique    = sum(r["uniqueCount"]    for r in filtered)
     total_duplicate = sum(r["duplicateCount"] for r in filtered)
-    total_invalid = sum(r["invalidCount"] for r in filtered)
+    total_invalid   = sum(r["invalidCount"]   for r in filtered)
 
     # ── Paginate
     total_records = len(filtered)
-    total_pages = max(1, (total_records + page_size - 1) // page_size)
-    skip = (page - 1) * page_size
-    paginated = filtered[skip: skip + page_size]
+    total_pages   = max(1, (total_records + page_size - 1) // page_size)
+    skip          = (page - 1) * page_size
+    paginated     = filtered[skip: skip + page_size]
+
+    # Remove internal helper field before sending to client
+    for rec in paginated:
+        rec.pop("date_key", None)
 
     # ── Build employee dropdown list sorted by name
     employees_dropdown = sorted(employee_set.values(), key=lambda e: e["name"])
@@ -593,8 +1105,9 @@ async def get_upload_history(
     pe_col = get_collection("profile_emails")
     campaigns_col = get_collection("campaigns")
 
-    # All unique userIds seen in logs (these are stored as employeeId in logs)
     all_user_ids = list(employee_set.keys())
+    emp_ids_for_today = [user_to_emp[uid] for uid in all_user_ids if uid in user_to_emp]
+    today_log_ids = list(set(all_user_ids + emp_ids_for_today))
 
     # Today's upload stats from logs (grouped by employeeId = userId)
     today_upload_agg = await logs.aggregate([
@@ -602,7 +1115,7 @@ async def get_upload_history(
             "$match": {
                 "action": "UPLOAD",
                 "runDate": {"$gte": today_start},
-                "employeeId": {"$in": all_user_ids},
+                "employeeId": {"$in": today_log_ids},
             }
         },
         {
@@ -615,14 +1128,12 @@ async def get_upload_history(
             }
         }
     ]).to_list(None)
-    today_upload_map = {r["_id"]: r for r in today_upload_agg}
+    today_upload_map = {
+        emp_to_user.get(str(r["_id"]), str(r["_id"])): r
+        for r in today_upload_agg
+    }
 
-    # Build reverse map: userId -> employees._id  (needed for pe_col / campaigns queries)
-    user_to_emp: dict[str, str] = {v: k for k, v in emp_to_user.items()}
-
-    emp_ids_for_today = [user_to_emp[uid] for uid in all_user_ids if uid in user_to_emp]
-
-    # Today's sent emails from profile_emails (grouped by employeeId = employees._id)
+    # Today's sent emails from profile_emails
     today_sent_agg = await pe_col.aggregate([
         {
             "$match": {
@@ -666,7 +1177,6 @@ async def get_upload_history(
             "duplicateCount":  dp,
             "invalidCount":    inv,
             "uploadEvents":    up_stats.get("uploadEvents", 0),
-            "sentToday":       today_sent_map.get(eid, 0),
             "runningCampaigns": running_map.get(eid, 0),
         })
 
@@ -690,4 +1200,3 @@ async def get_upload_history(
         },
         "todayStatus": today_status,
     }
-

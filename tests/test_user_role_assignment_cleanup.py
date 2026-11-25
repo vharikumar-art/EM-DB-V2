@@ -1,0 +1,299 @@
+import asyncio
+
+from bson import ObjectId
+import pytest
+
+from app.core.dependencies import CurrentUser
+from app.core.exceptions import ForbiddenException
+from app.employees import service as employee_service
+from app.employees.schema import EmployeeUpdate
+from app.users.model import UserRole
+from app.users.schema import UserUpdate
+from app.users import service
+
+
+class FakeUsersCollection:
+    def __init__(self, doc):
+        self.doc = doc
+
+    async def find_one(self, query, projection=None):
+        return self.doc if query.get("_id") == self.doc["_id"] else None
+
+    async def find_one_and_update(self, query, update, return_document=True):
+        self.doc.update(update["$set"])
+        return self.doc
+
+
+class FakeEmployeesCollection:
+    def __init__(self, docs):
+        self.docs = docs
+
+    async def find_one(self, query, projection=None):
+        return next(
+            (doc for doc in self.docs if doc.get("userId") == query.get("userId")),
+            None,
+        )
+
+    async def update_many(self, query, update):
+        assigned_ids = query["assignedToAdmin"]["$in"]
+        for doc in self.docs:
+            if doc.get("assignedToAdmin") in assigned_ids:
+                doc.update(update["$set"])
+
+    async def update_one(self, query, update):
+        for doc in self.docs:
+            if (
+                doc.get("_id") == query.get("_id")
+                or doc.get("userId") == query.get("userId")
+            ):
+                doc.update(update["$set"])
+                return
+
+
+class FakeProfilesCollection:
+    def __init__(self, docs):
+        self.docs = docs
+
+    async def update_many(self, query, update):
+        for doc in self.docs:
+            if doc.get("employeeId") == query.get("employeeId"):
+                doc.update(update["$set"])
+
+
+def test_demoting_admin_unassigns_subordinate_employees(monkeypatch):
+    admin_user_id = ObjectId()
+    admin_employee_id = ObjectId()
+    user_doc = {"_id": admin_user_id, "role": UserRole.ADMIN.value}
+    employees = FakeEmployeesCollection([
+        {"_id": admin_employee_id, "userId": str(admin_user_id)},
+        {"_id": ObjectId(), "assignedToAdmin": str(admin_employee_id)},
+    ])
+    users = FakeUsersCollection(user_doc)
+    monkeypatch.setattr(
+        service,
+        "get_collection",
+        lambda name: users if name == "users" else employees,
+    )
+    monkeypatch.setattr(service, "serialize_user", lambda doc: doc)
+
+    asyncio.run(
+        service.update_user(
+            str(admin_user_id),
+            UserUpdate(role=UserRole.EMPLOYEE),
+            CurrentUser("super-admin", "super_admin", "full"),
+        )
+    )
+
+    assert user_doc["role"] == UserRole.EMPLOYEE.value
+    assert employees.docs[1]["assignedToAdmin"] is None
+
+
+def test_promoting_employee_to_admin_clears_its_admin_assignment(monkeypatch):
+    user_id = ObjectId()
+    employee_id = ObjectId()
+    user_doc = {"_id": user_id, "role": UserRole.EMPLOYEE.value}
+    employee_doc = {
+        "_id": employee_id,
+        "userId": str(user_id),
+        "assignedToAdmin": str(ObjectId()),
+    }
+    users = FakeUsersCollection(user_doc)
+    employees = FakeEmployeesCollection([employee_doc])
+    monkeypatch.setattr(
+        service,
+        "get_collection",
+        lambda name: users if name == "users" else employees,
+    )
+    monkeypatch.setattr(service, "serialize_user", lambda doc: doc)
+
+    asyncio.run(
+        service.update_user(
+            str(user_id),
+            UserUpdate(role=UserRole.ADMIN, assignedToAdmin=str(ObjectId())),
+            CurrentUser("super-admin", "super_admin", "full"),
+        )
+    )
+
+    assert user_doc["role"] == UserRole.ADMIN.value
+    assert user_doc["accessLevel"] == "full"
+    assert employee_doc["assignedToAdmin"] is None
+
+
+def test_promoting_employee_to_admin_with_access_level(monkeypatch):
+    user_id = ObjectId()
+    employee_id = ObjectId()
+    user_doc = {"_id": user_id, "role": UserRole.EMPLOYEE.value}
+    employee_doc = {"_id": employee_id, "userId": str(user_id)}
+    users = FakeUsersCollection(user_doc)
+    employees = FakeEmployeesCollection([employee_doc])
+    monkeypatch.setattr(
+        service,
+        "get_collection",
+        lambda name: users if name == "users" else employees,
+    )
+    monkeypatch.setattr(service, "serialize_user", lambda doc: doc)
+
+    asyncio.run(
+        service.update_user(
+            str(user_id),
+            UserUpdate(role=UserRole.ADMIN, accessLevel="partial"),
+            CurrentUser("super-admin", "super_admin", "full"),
+        )
+    )
+
+    assert user_doc["role"] == UserRole.ADMIN.value
+    assert user_doc["accessLevel"] == "partial"
+
+
+def test_admin_cannot_change_user_role(monkeypatch):
+    user_id = ObjectId()
+    users = FakeUsersCollection({"_id": user_id, "role": UserRole.EMPLOYEE.value})
+    monkeypatch.setattr(service, "get_collection", lambda name: users)
+
+    with pytest.raises(ForbiddenException, match="Only super admins"):
+        asyncio.run(
+            service.update_user(
+                str(user_id),
+                UserUpdate(role=UserRole.ADMIN),
+                CurrentUser("admin", "admin", "full"),
+            )
+        )
+
+
+def test_changing_employee_admin_refreshes_profile_admin_name(monkeypatch):
+    user_id = ObjectId()
+    employee_id = ObjectId()
+    admin_employee_id = str(ObjectId())
+    user_doc = {"_id": user_id, "role": UserRole.EMPLOYEE.value}
+    employee_doc = {
+        "_id": employee_id,
+        "userId": str(user_id),
+        "assignedToAdmin": None,
+    }
+    profile_doc = {"employeeId": str(employee_id), "assignedAdmin": "Previous Admin"}
+    users = FakeUsersCollection(user_doc)
+    employees = FakeEmployeesCollection([employee_doc])
+    profiles = FakeProfilesCollection([profile_doc])
+    monkeypatch.setattr(
+        service,
+        "get_collection",
+        lambda name: {
+            "users": users,
+            "employees": employees,
+            "profiles": profiles,
+        }[name],
+    )
+    monkeypatch.setattr(service, "serialize_user", lambda doc: doc)
+
+    async def resolve_admin_name(admin_id):
+        assert admin_id == admin_employee_id
+        return "Updated Admin"
+
+    from app.profiles import service as profiles_service
+    monkeypatch.setattr(profiles_service, "_resolve_admin_name", resolve_admin_name)
+
+    asyncio.run(
+        service.update_user(
+            str(user_id),
+            UserUpdate(assignedToAdmin=admin_employee_id),
+            CurrentUser("super-admin", "super_admin", "full"),
+        )
+    )
+
+    assert employee_doc["assignedToAdmin"] == admin_employee_id
+    assert profile_doc["assignedAdmin"] == "Updated Admin"
+
+
+def test_updating_user_branch_updates_employee_branch(monkeypatch):
+    user_id = ObjectId()
+    employee_doc = {
+        "_id": ObjectId(),
+        "userId": str(user_id),
+        "branch": "Vellore",
+    }
+    users = FakeUsersCollection({
+        "_id": user_id,
+        "role": UserRole.EMPLOYEE.value,
+        "branch": "Vellore",
+    })
+    employees = FakeEmployeesCollection([employee_doc])
+    monkeypatch.setattr(
+        service,
+        "get_collection",
+        lambda name: users if name == "users" else employees,
+    )
+    monkeypatch.setattr(service, "serialize_user", lambda doc: doc)
+
+    asyncio.run(
+        service.update_user(
+            str(user_id),
+            UserUpdate(branch="Chennai"),
+            CurrentUser("super-admin", "super_admin", "full"),
+        )
+    )
+
+    assert users.doc["branch"] == "Chennai"
+    assert employee_doc["branch"] == "Chennai"
+
+
+def test_updating_employee_branch_updates_user_branch(monkeypatch):
+    user_id = ObjectId()
+    employee_doc = {
+        "_id": ObjectId(),
+        "userId": str(user_id),
+        "branch": "Vellore",
+    }
+    user_doc = {
+        "_id": user_id,
+        "name": "Test User",
+        "email": "test@example.com",
+        "branch": "Vellore",
+        "status": "active",
+    }
+
+    class BranchUsersCollection:
+        async def find_one(self, query, _projection=None):
+            return user_doc if query.get("_id") == user_id else None
+
+        async def update_one(self, query, update):
+            assert query == {"_id": user_id}
+            user_doc.update(update["$set"])
+
+    class BranchEmployeesCollection:
+        async def find_one(self, query, _projection=None):
+            if query.get("_id") == employee_doc["_id"]:
+                return employee_doc
+            if query.get("userId") == employee_doc["userId"]:
+                return employee_doc
+            return None
+
+        async def find_one_and_update(
+            self,
+            query,
+            update,
+            return_document=True,
+        ):
+            assert query == {"_id": employee_doc["_id"]}
+            employee_doc.update(update["$set"])
+            return employee_doc
+
+    collections = {
+        "users": BranchUsersCollection(),
+        "employees": BranchEmployeesCollection(),
+    }
+    monkeypatch.setattr(
+        employee_service,
+        "get_collection",
+        lambda name: collections[name],
+    )
+
+    asyncio.run(
+        employee_service.update_employee(
+            str(employee_doc["_id"]),
+            EmployeeUpdate(branch="Chennai"),
+            CurrentUser("super-admin", "super_admin", "full"),
+        )
+    )
+
+    assert employee_doc["branch"] == "Chennai"
+    assert user_doc["branch"] == "Chennai"

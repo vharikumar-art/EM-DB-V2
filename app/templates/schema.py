@@ -44,7 +44,7 @@ class TemplatePreviewRequest(BaseModel):
     sampleLead: dict = Field(
         default_factory=lambda: {
             "fullName": "John Doe",
-            "company": "Acme Corp",
+            "university": "Acme Corp",
             "industry": "Technology",
             "designation": "CTO",
             "country": "USA",
