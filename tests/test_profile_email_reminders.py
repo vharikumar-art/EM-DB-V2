@@ -11,6 +11,16 @@ from app.email_master import service as email_master_service
 from app.profile_emails import service
 from app.campaigns.model import CampaignStatus
 from app.profile_emails.model import SendStatus
+from app.settings.email_domain_policy import DEFAULT_EMAIL_DOMAIN_POLICY
+
+
+@pytest.fixture(autouse=True)
+def use_default_email_domain_policy(monkeypatch):
+    monkeypatch.setattr(
+        worker,
+        "get_email_domain_policy",
+        AsyncMock(return_value=DEFAULT_EMAIL_DOMAIN_POLICY),
+    )
 
 
 class AsyncDocs:

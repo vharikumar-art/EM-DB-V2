@@ -2,8 +2,9 @@ import csv
 import io
 import logging
 import os
+import re
 import tempfile
-from datetime import date, datetime
+from datetime import date
 from typing import List, Literal
 import time
 
@@ -13,6 +14,12 @@ from starlette.background import BackgroundTask
 
 from app.core.dependencies import CurrentUser, get_current_user, require_admin, require_full_admin, require_super_admin, require_write_access
 from app.core.exceptions import BadRequestException
+from app.email_master.date_filters import (
+    CUSTOM_DATE_RANGE,
+    UPLOAD_DATE_RANGE_VALUES,
+    build_upload_date_query,
+    parse_filter_date,
+)
 from app.email_master import service
 from app.email_master.schema import (
     EmailMasterUpdate,
@@ -28,15 +35,6 @@ router = APIRouter(prefix="/email-master", tags=["Email Master"])
 logger = logging.getLogger(__name__)
 
 _ALLOWED_EXTENSIONS = (".csv", ".xlsx", ".xls")
-
-
-def _parse_date_range_param(value: str, field_name: str) -> date:
-    for date_format in ("%d-%m-%Y", "%Y-%m-%d"):
-        try:
-            return datetime.strptime(value, date_format).date()
-        except ValueError:
-            continue
-    raise BadRequestException(f"{field_name} must use DD-MM-YYYY or YYYY-MM-DD format")
 
 
 @router.post("/upload", response_model=ApiResponse[UploadResult])
@@ -97,17 +95,65 @@ async def download_emails(
     mailSource: str | None = Query(default=None),
     search: str | None = Query(default=None),
     includeDuplicates: bool = Query(default=True),
+    dateFilter: bool = Query(default=False, description="Enable upload-date filtering"),
+    dateRange: str | None = Query(
+        default=None,
+        description=" | ".join(UPLOAD_DATE_RANGE_VALUES),
+    ),
+    startDate: str | None = Query(default=None, description="Custom start date: YYYY-MM-DD or DD-MM-YYYY"),
+    endDate: str | None = Query(default=None, description="Custom end date: YYYY-MM-DD or DD-MM-YYYY"),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    """Download the global email-master pool as CSV or Excel."""
+    """Download the global email-master pool as CSV or Excel with optional filters."""
     query: dict = {}
     and_filters: list[dict] = []
+    if dateFilter:
+        if dateRange not in UPLOAD_DATE_RANGE_VALUES:
+            raise BadRequestException(
+                "dateRange must be one of "
+                f"{', '.join(UPLOAD_DATE_RANGE_VALUES)} when dateFilter is true"
+            )
+        parsed_start: date | None = None
+        parsed_end: date | None = None
+        if dateRange == CUSTOM_DATE_RANGE:
+            if not startDate or not endDate:
+                raise BadRequestException(
+                    "startDate and endDate are required when dateRange is custom"
+                )
+            parsed_start = parse_filter_date(startDate, "startDate")
+            parsed_end = parse_filter_date(endDate, "endDate")
+            if parsed_start > parsed_end:
+                raise BadRequestException("startDate must be on or before endDate")
+        query["uploadedDate"] = build_upload_date_query(
+            dateRange, parsed_start, parsed_end
+        )
     if country:
         query["country"] = country
     if state:
         query["state"] = state
-    if domain:
-        and_filters.append({"$or": [{"domain": domain}, {"domain_group": domain}]})
+    domains = service.parse_filter_values(domain)
+    if domains:
+        domain_regexes = [
+            re.compile(f"^{re.escape(value)}$", re.IGNORECASE)
+            for value in domains
+        ]
+        if len(domain_regexes) == 1:
+            domain_filter = {
+                "$or": [
+                    {"domain": domain_regexes[0]},
+                    {"domain_group": domain_regexes[0]},
+                ]
+            }
+        else:
+            domain_filter = {
+                "$or": [
+                    {"domain": {"$in": domain_regexes}},
+                    {"domain_group": {"$in": domain_regexes}},
+                ]
+            }
+        and_filters.append(
+            domain_filter
+        )
     if university:
         query["university"] = {"$regex": university, "$options": "i"}
     if mailSource:
@@ -315,8 +361,8 @@ async def delete_emails_filtered(
     current_user: CurrentUser = Depends(require_full_admin),
 ):
     """FULL ADMIN + SUPER ADMIN: Delete email-master records based on optional filters: date range, uploadedBy, domains, country."""
-    start_dt = _parse_date_range_param(startDate, "startDate") if startDate else None
-    end_dt = _parse_date_range_param(endDate, "endDate") if endDate else None
+    start_dt = parse_filter_date(startDate, "startDate") if startDate else None
+    end_dt = parse_filter_date(endDate, "endDate") if endDate else None
 
     result = await service.delete_emails_filtered(
         start_date=start_dt,
@@ -418,7 +464,7 @@ async def list_emails(
     dateFilter: bool = Query(default=False, description="Enable upload-date filtering"),
     dateRange: str | None = Query(
         default=None,
-        description="last_30_days | last_3_months | custom",
+        description=" | ".join(UPLOAD_DATE_RANGE_VALUES),
     ),
     startDate: str | None = Query(default=None, description="Custom start date: YYYY-MM-DD or DD-MM-YYYY"),
     endDate: str | None = Query(default=None, description="Custom end date: YYYY-MM-DD or DD-MM-YYYY"),
@@ -431,6 +477,7 @@ async def list_emails(
     - Repeat the param:  ?country=India&country=USA
     - Or comma-separate: ?country=India,USA
     Both formats work and are combined with OR logic (match any selected value).
+    Wrap values containing commas in double quotes, e.g. domain="ai,ml",automation.
 
     Date filter examples:
     - ?dateFilter=true&dateRange=last_30_days
@@ -441,17 +488,18 @@ async def list_emails(
     parsed_start: date | None = None
     parsed_end: date | None = None
     if dateFilter:
-        if dateRange not in {"last_30_days", "last_3_months", "custom"}:
+        if dateRange not in UPLOAD_DATE_RANGE_VALUES:
             raise BadRequestException(
-                "dateRange must be last_30_days, last_3_months, or custom when dateFilter is true"
+                "dateRange must be one of "
+                f"{', '.join(UPLOAD_DATE_RANGE_VALUES)} when dateFilter is true"
             )
-        if dateRange == "custom":
+        if dateRange == CUSTOM_DATE_RANGE:
             if not startDate or not endDate:
                 raise BadRequestException(
                     "startDate and endDate are required when dateRange is custom"
                 )
-            parsed_start = _parse_date_range_param(startDate, "startDate")
-            parsed_end = _parse_date_range_param(endDate, "endDate")
+            parsed_start = parse_filter_date(startDate, "startDate")
+            parsed_end = parse_filter_date(endDate, "endDate")
             if parsed_start > parsed_end:
                 raise BadRequestException("startDate must be on or before endDate")
 

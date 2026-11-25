@@ -10,6 +10,10 @@ from app.email_master import service as email_master_service
 from app.email_master.service import _apply_profile_email_domain_limits
 from app.profile_emails import service as profile_email_service
 from app.profiles.schema import ProfileFilters
+from app.settings.email_domain_policy import (
+    DEFAULT_EMAIL_DOMAIN_POLICY,
+    EmailDomainPolicy,
+)
 
 
 class EmailDomainLimitTests(unittest.TestCase):
@@ -70,6 +74,10 @@ class EmailDomainLimitTests(unittest.TestCase):
         collection = Collection(records)
         with patch.object(
             email_master_service, "get_collection", return_value=collection
+        ), patch.object(
+            email_master_service,
+            "get_email_domain_policy",
+            AsyncMock(return_value=DEFAULT_EMAIL_DOMAIN_POLICY),
         ):
             selected = asyncio.run(
                 email_master_service.query_for_profile(
@@ -237,6 +245,10 @@ class EmailDomainLimitTests(unittest.TestCase):
         collection = Collection(records)
         with patch.object(
             email_master_service, "get_collection", return_value=collection
+        ), patch.object(
+            email_master_service,
+            "get_email_domain_policy",
+            AsyncMock(return_value=DEFAULT_EMAIL_DOMAIN_POLICY),
         ):
             selected = asyncio.run(
                 email_master_service.query_for_profile(
@@ -301,6 +313,10 @@ class EmailDomainLimitTests(unittest.TestCase):
 
         with patch.object(
             email_master_service, "get_collection", return_value=Collection()
+        ), patch.object(
+            email_master_service,
+            "get_email_domain_policy",
+            AsyncMock(return_value=DEFAULT_EMAIL_DOMAIN_POLICY),
         ):
             selected = asyncio.run(
                 email_master_service.query_for_profile(
@@ -331,6 +347,20 @@ class EmailDomainLimitTests(unittest.TestCase):
                     records, requested_limit
                 )
                 self.assertEqual(len(selected), expected)
+
+    def test_domain_cap_uses_configured_selection_window_and_limit(self):
+        records = [
+            {"id": str(index), "email": f"user{index}@example.com"}
+            for index in range(10)
+        ]
+        policy = EmailDomainPolicy(
+            selection_window=50,
+            selection_limit_per_domain=2,
+        )
+
+        selected = _apply_profile_email_domain_limits(records, 51, policy)
+
+        self.assertEqual(len(selected), 4)
 
     def test_limit_600_keeps_550_matches_when_domains_are_diverse(self):
         records = [
@@ -400,7 +430,7 @@ class EmailDomainLimitTests(unittest.TestCase):
         self.assertEqual(collection.query["profileId"], "profile-1")
         self.assertEqual(collection.query["sendStatus"], "sent")
 
-    def test_campaign_sends_at_most_five_same_domain_emails_per_day(self):
+    def test_campaign_uses_configured_same_domain_daily_send_limit(self):
         campaign_id = ObjectId()
         profile_id = ObjectId()
         employee_id = "employee-1"
@@ -508,6 +538,13 @@ class EmailDomainLimitTests(unittest.TestCase):
                 ),
             ),
             patch.object(
+                worker,
+                "get_email_domain_policy",
+                AsyncMock(
+                    return_value=EmailDomainPolicy(daily_send_limit_per_domain=2)
+                ),
+            ),
+            patch.object(
                 worker.pe_service,
                 "get_sent_domain_counts_today",
                 AsyncMock(return_value={}),
@@ -555,23 +592,17 @@ class EmailDomainLimitTests(unittest.TestCase):
         ):
             asyncio.run(worker._run(str(campaign_id)))
 
-        self.assertEqual(len(sent_emails), 20)
-        self.assertEqual(
-            sum(email.endswith("@school.example") for email in sent_emails), 5
-        )
-        self.assertEqual(
-            sum(email.endswith("@college.example") for email in sent_emails), 4
-        )
-        self.assertEqual(
-            sum(email.endswith("@company.example") for email in sent_emails), 5
-        )
+        self.assertEqual(len(sent_emails), 12)
+        self.assertEqual(sum(email.endswith("@school.example") for email in sent_emails), 2)
+        self.assertEqual(sum(email.endswith("@college.example") for email in sent_emails), 2)
+        self.assertEqual(sum(email.endswith("@company.example") for email in sent_emails), 2)
         self.assertEqual(
             sum(email.endswith("@gmail.com") for email in sent_emails), 6
         )
         self.assertEqual(campaign["status"], "paused")
         self.assertEqual(pause_calls, [str(campaign_id)])
         self.assertEqual(
-            sum(record["sendStatus"] == "pending" for record in records), 6
+            sum(record["sendStatus"] == "pending" for record in records), 14
         )
 
 

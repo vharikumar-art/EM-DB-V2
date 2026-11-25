@@ -41,12 +41,19 @@ cd backend
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # then edit JWT_SECRET_KEY, MONGO_URI, N8N_API_KEY, etc.
+cp .env.example .env   # then edit JWT_SECRET_KEY, PASSWORD_ENCRYPTION_KEY, MONGO_URI, etc.
 uvicorn main:app --reload
 ```
 
 Requires a running MongoDB instance reachable at `MONGO_URI`. On startup the
 app creates all required indexes automatically (see `app/database/indexes.py`).
+Set `ENV=production` in deployments; if `ENV` is omitted, the app keeps its
+`development` default. For any `ENV` other than `development`, both
+`JWT_SECRET_KEY` and `PASSWORD_ENCRYPTION_KEY` must each be at least 32
+characters and must not be the example/development values. Generate independent
+secrets, for example with Python's `secrets.token_urlsafe(48)`. Keep
+`PASSWORD_ENCRYPTION_KEY` stable: changing it prevents decrypting SMTP
+credentials already stored in the database.
 
 API docs: `http://localhost:8000/docs`
 

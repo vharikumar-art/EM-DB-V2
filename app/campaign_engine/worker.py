@@ -39,13 +39,13 @@ from app.send_stats.model import record_sent
 from app.utils.personalizer import build_email_payload
 from app.notifications.websocket import manager
 from app.profile_emails import service as pe_service
+from app.settings.email_domain_policy import get_email_domain_policy
 from app.utils.response import serialize_doc, to_object_id
 
 logger = logging.getLogger("campaign_engine.worker")
 
 # How many profile_emails to load per iteration (keeps memory bounded)
 BATCH_SIZE = 50
-DOMAIN_DAILY_SEND_LIMIT = 5
 
 def select_template_weighted(templates: list[dict]) -> dict:
     """
@@ -275,11 +275,15 @@ async def _run(campaign_id: str) -> None:
     total_sent = max(int(campaign.get("executionSent") or 0), 0)
     total_failed = 0
     daily_limit: int = campaign.get("dailyLimit", 100)  # Get from campaign
+    domain_policy = await get_email_domain_policy()
     sent_domain_counts = await pe_service.get_sent_domain_counts_today(profile_id)
     excluded_domains = {
         domain
         for domain, sent_count in sent_domain_counts.items()
-        if domain != "gmail.com" and sent_count >= DOMAIN_DAILY_SEND_LIMIT
+        if (
+            domain not in domain_policy.unrestricted_domains
+            and sent_count >= domain_policy.daily_send_limit_per_domain
+        )
     }
 
     while True:
@@ -325,7 +329,7 @@ async def _run(campaign_id: str) -> None:
                         "Campaign %s paused because all remaining recipient domains "
                         "reached the daily limit of %d sends.",
                         campaign_id,
-                        DOMAIN_DAILY_SEND_LIMIT,
+                        domain_policy.daily_send_limit_per_domain,
                     )
                     await campaign_service.pause_campaign_worker(campaign_id)
                     return
@@ -368,9 +372,9 @@ async def _run(campaign_id: str) -> None:
             recipient_domain = lead_email.rpartition("@")[2].casefold()
             if (
                 recipient_domain
-                and recipient_domain != "gmail.com"
+                and recipient_domain not in domain_policy.unrestricted_domains
                 and sent_domain_counts.get(recipient_domain, 0)
-                >= DOMAIN_DAILY_SEND_LIMIT
+                >= domain_policy.daily_send_limit_per_domain
             ):
                 excluded_domains.add(recipient_domain)
                 continue
@@ -533,13 +537,16 @@ async def _run(campaign_id: str) -> None:
                 # ── Record in immutable daily stats (survives campaign deletion) ──
                 await record_sent(employee_id, count=1)
                 total_sent += 1
-                if recipient_domain and recipient_domain != "gmail.com":
+                if (
+                    recipient_domain
+                    and recipient_domain not in domain_policy.unrestricted_domains
+                ):
                     sent_domain_counts[recipient_domain] = (
                         sent_domain_counts.get(recipient_domain, 0) + 1
                     )
                     if (
                         sent_domain_counts[recipient_domain]
-                        >= DOMAIN_DAILY_SEND_LIMIT
+                        >= domain_policy.daily_send_limit_per_domain
                     ):
                         excluded_domains.add(recipient_domain)
 

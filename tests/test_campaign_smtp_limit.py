@@ -2,8 +2,19 @@ from unittest.mock import patch, AsyncMock
 
 import pytest
 
+from app.campaign_engine import worker
 from app.campaign_engine.worker import _run
 from app.campaigns.model import CampaignStatus
+from app.settings.email_domain_policy import DEFAULT_EMAIL_DOMAIN_POLICY
+
+
+@pytest.fixture(autouse=True)
+def use_default_email_domain_policy(monkeypatch):
+    monkeypatch.setattr(
+        worker,
+        "get_email_domain_policy",
+        AsyncMock(return_value=DEFAULT_EMAIL_DOMAIN_POLICY),
+    )
 
 # We will mock the database collections and services
 @pytest.fixture

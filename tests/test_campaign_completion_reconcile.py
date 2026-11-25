@@ -2,9 +2,20 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
 from bson import ObjectId
 
 from app.campaign_engine import worker
+from app.settings.email_domain_policy import DEFAULT_EMAIL_DOMAIN_POLICY
+
+
+@pytest.fixture(autouse=True)
+def use_default_email_domain_policy(monkeypatch):
+    monkeypatch.setattr(
+        worker,
+        "get_email_domain_policy",
+        AsyncMock(return_value=DEFAULT_EMAIL_DOMAIN_POLICY),
+    )
 
 
 def test_resumed_recurring_campaign_preserves_daily_limit_progress(monkeypatch):

@@ -6,6 +6,7 @@ from unittest.mock import patch
 from app.email_master import service
 from app.email_master.router import list_emails
 from app.core.exceptions import BadRequestException
+from app.email_master.date_filters import build_upload_date_query
 from app.schemas.common import PaginationParams
 
 
@@ -40,6 +41,73 @@ class RangeCollection:
 
 
 class EmailMasterDateFilterTests(unittest.TestCase):
+    def test_upload_date_presets_use_shared_windows(self):
+        now = datetime(2026, 3, 31, 12, tzinfo=timezone.utc)
+
+        self.assertEqual(
+            build_upload_date_query("last_30_days", now=now),
+            {"$gte": now - timedelta(days=30)},
+        )
+        self.assertEqual(
+            build_upload_date_query("last_3_months", now=now),
+            {"$gte": now - timedelta(days=90)},
+        )
+
+    def test_profile_custom_date_range_accepts_both_formats_and_includes_end_day(self):
+        query = build_upload_date_query(
+            "custom",
+            "01-03-2026",
+            "2026-03-31",
+        )
+
+        self.assertEqual(
+            query,
+            {
+                "$gte": datetime(2026, 3, 1, tzinfo=timezone.utc),
+                "$lt": datetime(2026, 4, 1, tzinfo=timezone.utc),
+            },
+        )
+
+    def test_invalid_profile_date_filter_fails_instead_of_being_ignored(self):
+        class CountCollection:
+            count_called = False
+
+            async def count_documents(self, _query):
+                self.count_called = True
+                return 0
+
+        collection = CountCollection()
+        with patch.object(service, "get_collection", return_value=collection):
+            with self.assertRaises(BadRequestException):
+                asyncio.run(
+                    service.count_filtered_emails(
+                        {
+                            "date_filter": True,
+                            "date_range": "custom",
+                            "start_date": "2026-02-31",
+                        }
+                    )
+                )
+
+        self.assertFalse(collection.count_called)
+
+    def test_custom_range_requires_at_least_one_date(self):
+        with self.assertRaises(BadRequestException):
+            build_upload_date_query("custom")
+
+    def test_enabled_date_filter_requires_a_preset(self):
+        class CountCollection:
+            async def count_documents(self, _query):
+                raise AssertionError("Invalid date filters must fail before querying")
+
+        with patch.object(
+            service, "get_collection", return_value=CountCollection()
+        ):
+            with self.assertRaises(BadRequestException):
+                asyncio.run(
+                    service.count_filtered_emails({"date_filter": True})
+                )
+
     def test_custom_range_requires_valid_ordered_dates(self):
         requests = (
             {"dateFilter": True, "dateRange": "custom", "startDate": "2026-03-01"},

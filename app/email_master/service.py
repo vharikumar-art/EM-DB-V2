@@ -1,3 +1,4 @@
+import csv
 from pandas import date_range
 from pymongo import UpdateOne
 import uuid
@@ -9,7 +10,15 @@ from app.core.config import settings
 from app.core.exceptions import BadRequestException, ForbiddenException
 from app.database.mongodb import get_collection
 from app.email_master.model import build_email_master_document
-from app.settings.service import get_integer_setting
+from app.email_master.date_filters import (
+    REPLY_UPDATED_TIME_PRESETS,
+    build_upload_date_query,
+)
+from app.settings.email_domain_policy import (
+    DEFAULT_EMAIL_DOMAIN_POLICY,
+    EmailDomainPolicy,
+    get_email_domain_policy,
+)
 from app.logs.model import LogAction, build_log_document
 from app.notifications.schema import NotificationType
 from app.notifications.service import create_notification
@@ -65,34 +74,39 @@ async def invalidate_dropdown_cache() -> None:
         logging.exception("Failed to invalidate Redis dropdown cache")
 
 
-def _filter_values(value: Any) -> list[str]:
-    """Normalize one filter value or a comma-separated value into a list."""
+def parse_filter_values(value: Any) -> list[str]:
+    """Parse filter values, allowing double-quoted values to contain commas."""
     if value is None:
         return []
     values = value if isinstance(value, list) else [value]
-    return [
-        item.strip()
-        for value_item in values
-        for item in str(value_item).split(",")
-        if item.strip()
-    ]
+    parsed_values: list[str] = []
+    for value_item in values:
+        try:
+            items = next(
+                csv.reader([str(value_item)], skipinitialspace=True, strict=True)
+            )
+        except csv.Error as exc:
+            raise BadRequestException(
+                "Filter values containing commas must use balanced double quotes"
+            ) from exc
+        parsed_values.extend(item.strip() for item in items if item.strip())
+    return parsed_values
 
 
 def _apply_profile_email_domain_limits(
-    records: list[dict], requested_limit: int
+    records: list[dict],
+    requested_limit: int,
+    policy: EmailDomainPolicy = DEFAULT_EMAIL_DOMAIN_POLICY,
 ) -> list[dict]:
-    """Keep Gmail recipients unrestricted and cap other domains."""
-    if requested_limit <= 0:
-        domain_limit = None
-    else:
-        domain_limit = ((requested_limit - 1) // 100 + 1) * 5
+    """Keep unrestricted domains uncapped and cap other domains."""
+    domain_limit = policy.selection_limit(requested_limit)
 
     domain_counts: dict[str, int] = {}
     available: list[dict] = []
     for record in records:
         email = str(record.get("email") or "").strip()
         domain = email.rpartition("@")[2].casefold()
-        if domain == "gmail.com" or not domain or domain_limit is None:
+        if domain in policy.unrestricted_domains or not domain or domain_limit is None:
             available.append(record)
             continue
         if domain_counts.get(domain, 0) >= domain_limit:
@@ -234,7 +248,7 @@ async def list_emails(
     """List emails from GLOBAL pool with optional filters.
 
     All filter params support multi-value lists — values are combined with OR logic.
-    Comma-separated strings (e.g. 'India,USA') are also accepted and split automatically.
+    Comma-separated strings are accepted; double quotes preserve commas inside a value.
 
     Date filter:
     date_filter=True + date_range='last_30_days'  → uploaded in last 30 days
@@ -245,10 +259,8 @@ async def list_emails(
     query: dict = {}
     and_clauses: list[dict] = []
 
-    # Helper: normalise a raw filter value (str, list[str], or None)
-    # into a clean de-duplicated list, splitting on commas.++++++++++++++
     def _vals(v) -> list[str]:
-        return _filter_values(v)
+        return parse_filter_values(v)
 
     # ── country (case-insensitive exact match) ───────────────────────────────
     countries = _vals(country)
@@ -323,27 +335,10 @@ async def list_emails(
         ]})
 
     # ── date filter ───────────────────────────────────────────────────────────
-    if date_filter and date_range:
-        now = datetime.now(timezone.utc)
-        if date_range == "last_30_days":
-            query["uploadedDate"] = {"$gte": now - timedelta(days=30)}
-        elif date_range == "last_3_months":
-            query["uploadedDate"] = {"$gte": now - timedelta(days=90)}
-        elif date_range == "custom":
-            date_query: dict = {}
-            if start_date:
-                date_query["$gte"] = datetime(
-                    start_date.year, start_date.month, start_date.day,
-                    0, 0, 0, tzinfo=timezone.utc
-                )
-            if end_date:
-                date_query["$lt"] = datetime.combine(
-                    end_date + timedelta(days=1),
-                    time.min,
-                    tzinfo=timezone.utc,
-                )
-            if date_query:
-                query["uploadedDate"] = date_query
+    if date_filter:
+        date_query = build_upload_date_query(date_range, start_date, end_date)
+        if date_query:
+            query["uploadedDate"] = date_query
 
     if and_clauses:
         query["$and"] = and_clauses
@@ -727,12 +722,13 @@ def _reply_updated_range(
 
     if updated_time == "custom":
         return _reply_updated_range(None, updated_start_date, updated_end_date)
-    if updated_time not in {"last_7_days", "last_15_days", "last_30_days"}:
+    if updated_time not in REPLY_UPDATED_TIME_PRESETS:
         raise BadRequestException(
-            "updatedTime must be last_7_days, last_15_days, last_30_days, or custom"
+            "updatedTime must be one of "
+            f"{', '.join((*REPLY_UPDATED_TIME_PRESETS, 'custom'))}"
         )
 
-    days = int(updated_time.split("_")[1])
+    days = REPLY_UPDATED_TIME_PRESETS[updated_time]
     now = datetime.now(timezone.utc)
     return now - timedelta(days=days), now
 
@@ -777,9 +773,12 @@ async def get_reply_filter_options(
             {"value": name, "label": name} for name in sorted(marker_names, key=str.casefold)
         ],
         "updatedTimePresets": [
-            {"value": "last_7_days", "label": "Last 7 days"},
-            {"value": "last_15_days", "label": "Last 15 days"},
-            {"value": "last_30_days", "label": "Last 30 days"},
+            {
+                "value": preset,
+                "label": f"Last {days} days",
+            }
+            for preset, days in REPLY_UPDATED_TIME_PRESETS.items()
+        ] + [
             {"value": "custom", "label": "Custom date range"},
         ],
     }
@@ -1199,7 +1198,7 @@ async def delete_emails_filtered(
         })
 
     if domains:
-        domain_list = _filter_values(domains)
+        domain_list = parse_filter_values(domains)
         if domain_list:
             and_conditions.append({
                 "$or": [
@@ -1209,7 +1208,7 @@ async def delete_emails_filtered(
             })
 
     if country:
-        country_list = _filter_values(country)
+        country_list = parse_filter_values(country)
         if country_list:
             query["country"] = {"$in": country_list}
 
@@ -1503,15 +1502,15 @@ async def count_filtered_emails(filters: dict) -> dict:
     if not filters.get("allowUsed", False):
         query["usageCount"] = {"$in": [0, None]}
 
-    country_values = _filter_values(filters.get("country"))
-    state_values = _filter_values(filters.get("state"))
+    country_values = parse_filter_values(filters.get("country"))
+    state_values = parse_filter_values(filters.get("state"))
     domain_values = [
-        *_filter_values(filters.get("domain")),
-        *_filter_values(filters.get("domainGroup") or filters.get("domain_group")),
+        *parse_filter_values(filters.get("domain")),
+        *parse_filter_values(filters.get("domainGroup") or filters.get("domain_group")),
     ]
-    university_values = _filter_values(filters.get("university"))
-    mail_source_values = _filter_values(filters.get("mailSource"))
-    type_values = _filter_values(filters.get("type"))
+    university_values = parse_filter_values(filters.get("university"))
+    mail_source_values = parse_filter_values(filters.get("mailSource"))
+    type_values = parse_filter_values(filters.get("type"))
 
     if country_values:
         country_rx = [re.compile(f"^{re.escape(v)}$", re.IGNORECASE) for v in country_values]
@@ -1550,41 +1549,14 @@ async def count_filtered_emails(filters: dict) -> dict:
             query["$or"] = type_or["$or"]
 
     # ── date filter (from profile filters) ───────────────────────────────────
-    if filters.get("date_filter") and filters.get("date_range"):
-        now = datetime.now(timezone.utc)
-        date_range = filters["date_range"]
-        if date_range == "last_30_days":
-            query["uploadedDate"] = {"$gte": now - timedelta(days=30)}
-        elif date_range == "last_3_months":
-            query["uploadedDate"] = {"$gte": now - timedelta(days=90)}
-        elif date_range == "custom":
-            date_q: dict = {}
-            raw_start = filters.get("start_date")
-            raw_end = filters.get("end_date")
-            if raw_start:
-                try:
-                    from datetime import date as _date
-                    parts = raw_start.split("-")
-                    # Support YYYY-MM-DD and DD-MM-YYYY
-                    if len(parts[0]) == 4:
-                        y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
-                    else:
-                        d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
-                    date_q["$gte"] = datetime(y, m, d, 0, 0, 0, tzinfo=timezone.utc)
-                except Exception:
-                    pass
-            if raw_end:
-                try:
-                    parts = raw_end.split("-")
-                    if len(parts[0]) == 4:
-                        y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
-                    else:
-                        d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
-                    date_q["$lte"] = datetime(y, m, d, 23, 59, 59, tzinfo=timezone.utc)
-                except Exception:
-                    pass
-            if date_q:
-                query["uploadedDate"] = date_q
+    if filters.get("date_filter"):
+        date_query = build_upload_date_query(
+            filters.get("date_range"),
+            filters.get("start_date"),
+            filters.get("end_date"),
+        )
+        if date_query:
+            query["uploadedDate"] = date_query
 
     total_count = await master.count_documents(query)
     return {"totalMatching": total_count}
@@ -1607,6 +1579,7 @@ async def query_for_profile(
         employee_id: Current employee ID (to track who claims emails)
     """
     master = get_collection(COLLECTION)
+    domain_policy = await get_email_domain_policy()
     query: dict = {"isDuplicate": False, "hasReply": {"$ne": True}}
 
     # Always skip emails that are currently locked in a profile. Missing legacy
@@ -1616,15 +1589,15 @@ async def query_for_profile(
     if not filters.get("allowUsed", False):
         query["usageCount"] = {"$in": [0, None]}
 
-    country_values = _filter_values(filters.get("country"))
-    state_values = _filter_values(filters.get("state"))
+    country_values = parse_filter_values(filters.get("country"))
+    state_values = parse_filter_values(filters.get("state"))
     domain_values = [
-        *_filter_values(filters.get("domain")),
-        *_filter_values(filters.get("domainGroup") or filters.get("domain_group")),
+        *parse_filter_values(filters.get("domain")),
+        *parse_filter_values(filters.get("domainGroup") or filters.get("domain_group")),
     ]
-    university_values = _filter_values(filters.get("university"))
-    mail_source_values = _filter_values(filters.get("mailSource"))
-    type_values = _filter_values(filters.get("type"))
+    university_values = parse_filter_values(filters.get("university"))
+    mail_source_values = parse_filter_values(filters.get("mailSource"))
+    type_values = parse_filter_values(filters.get("type"))
 
     if country_values:
         country_rx = [re.compile(f"^{re.escape(v)}$", re.IGNORECASE) for v in country_values]
@@ -1663,41 +1636,14 @@ async def query_for_profile(
             query["$or"] = type_or["$or"]
 
     # ── date filter (from profile filters) ───────────────────────────────────
-    if filters.get("date_filter") and filters.get("date_range"):
-        now = datetime.now(timezone.utc)
-        date_range = filters["date_range"]
-        if date_range == "last_30_days":
-            query["uploadedDate"] = {"$gte": now - timedelta(days=30)}
-        elif date_range == "last_3_months":
-            query["uploadedDate"] = {"$gte": now - timedelta(days=90)}
-        elif date_range == "custom":
-            date_q: dict = {}
-            raw_start = filters.get("start_date")
-            raw_end = filters.get("end_date")
-            if raw_start:
-                try:
-                    from datetime import date as _date
-                    parts = raw_start.split("-")
-                    # Support YYYY-MM-DD and DD-MM-YYYY
-                    if len(parts[0]) == 4:
-                        y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
-                    else:
-                        d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
-                    date_q["$gte"] = datetime(y, m, d, 0, 0, 0, tzinfo=timezone.utc)
-                except Exception:
-                    pass
-            if raw_end:
-                try:
-                    parts = raw_end.split("-")
-                    if len(parts[0]) == 4:
-                        y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
-                    else:
-                        d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
-                    date_q["$lte"] = datetime(y, m, d, 23, 59, 59, tzinfo=timezone.utc)
-                except Exception:
-                    pass
-            if date_q:
-                query["uploadedDate"] = date_q
+    if filters.get("date_filter"):
+        date_query = build_upload_date_query(
+            filters.get("date_range"),
+            filters.get("start_date"),
+            filters.get("end_date"),
+        )
+        if date_query:
+            query["uploadedDate"] = date_query
 
     # A positive filter limit caps the result; zero or missing means no limit.
     fetch_limit = filter_limit if filter_limit > 0 else None
@@ -1708,14 +1654,14 @@ async def query_for_profile(
         if oldest_first:
             cursor = cursor.sort([("uploadedDate", 1), ("_id", 1)])
         all_results = serialize_list([d async for d in cursor])
-        return _apply_profile_email_domain_limits(all_results, 0)
+        return _apply_profile_email_domain_limits(all_results, 0, domain_policy)
 
     matching_count = await master.count_documents(query)
     if matching_count == 0:
         return []
 
     if oldest_first:
-        domain_limit = ((fetch_limit - 1) // 100 + 1) * 5
+        domain_limit = domain_policy.selection_limit(fetch_limit)
         domain_counts: dict[str, int] = {}
         available_results: list[dict] = []
         cursor = master.find(query).sort([("uploadedDate", 1), ("_id", 1)])
@@ -1723,7 +1669,15 @@ async def query_for_profile(
             record = serialize_doc(doc)
             email = str(record.get("email") or "").strip()
             email_domain = email.rpartition("@")[2].casefold()
-            if email_domain and email_domain != "gmail.com":
+            if (
+                email_domain
+                and email_domain not in domain_policy.unrestricted_domains
+            ):
+                if domain_limit is None:
+                    available_results.append(record)
+                    if len(available_results) >= fetch_limit:
+                        break
+                    continue
                 if domain_counts.get(email_domain, 0) >= domain_limit:
                     continue
                 domain_counts[email_domain] = domain_counts.get(email_domain, 0) + 1
@@ -1742,10 +1696,9 @@ async def query_for_profile(
                 {"$sample": {"size": sample_size}},
             ])
         candidates = serialize_list([doc async for doc in cursor])
-        # Apply Gmail exclusion and per-domain limits only after the profile
-        # filters have selected the candidate records.
+        # Apply the domain policy only after the profile filters select candidates.
         available_results = _apply_profile_email_domain_limits(
-            candidates, fetch_limit
+            candidates, fetch_limit, domain_policy
         )
         if len(available_results) >= fetch_limit or sample_size >= matching_count:
             return available_results[:fetch_limit]

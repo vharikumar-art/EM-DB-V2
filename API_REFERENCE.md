@@ -21,6 +21,33 @@
 12. [Options (Dropdowns)](#12-options-dropdowns)
 13. [Health Check](#13-health-check)
 
+## Email Domain Limit Settings
+
+Super admins can adjust email-domain limits through the existing settings API.
+Create each setting with `POST /settings`; update an existing setting with
+`PATCH /settings/{setting_id}`. These settings are read when a profile's email
+list is generated or a campaign worker starts, so changes apply to the next
+generation or campaign run.
+
+| Setting key | Default | Meaning |
+|---|---:|---|
+| `email_domain_selection_window` | `100` | Requested profile-generation emails per selection window |
+| `email_domain_selection_limit` | `5` | Maximum emails per non-Gmail domain in each selection window |
+| `email_domain_daily_send_limit` | `5` | Maximum campaign sends per non-Gmail domain per day |
+
+For example, set the selection window and per-domain limit to 50 and 3:
+
+```json
+{
+  "key": "email_domain_selection_window",
+  "values": ["50"]
+}
+```
+
+Create a separate setting with key `email_domain_selection_limit` and value
+`["3"]`. Missing or invalid numeric settings retain the defaults. `gmail.com`
+remains exempt from both domain limits.
+
 ---
 
 ## 1. Authentication
@@ -306,11 +333,15 @@ curl "http://localhost:8000/email-master?country=India&domain=gmail.com&mailSour
 | `page` | Page number (1-indexed) |
 | `pageSize` | Items per page (default 20, max 100) |
 
+Comma-separated filter values remain supported. Wrap any individual value
+containing a comma in double quotes so it is treated as one value; for example,
+pass `domain="ai,ml", "automation", "DL"` to select those three values.
+
 **Upload-date filters:**
 | Param | Description |
 |---|---|
 | `dateFilter` | Set to `true` to enable upload-date filtering |
-| `dateRange` | `last_30_days`, `last_3_months`, or `custom` |
+| `dateRange` | `last_30_days` (30 days), `last_3_months` (90 days), or `custom` |
 | `startDate` | Required for `custom`; `YYYY-MM-DD` or `DD-MM-YYYY` |
 | `endDate` | Required for `custom`; inclusive, `YYYY-MM-DD` or `DD-MM-YYYY` |
 
@@ -321,6 +352,23 @@ curl "http://localhost:8000/email-master?country=India&domain=gmail.com&mailSour
 4. Send the request. The response's `data.data` contains matching email records; `data.total` is the matching count.
 
 For a preset range, use `dateFilter=true` and `dateRange=last_30_days` (or `last_3_months`) and omit `startDate` / `endDate`.
+
+### GET /email-master/download — Download Filtered Emails
+
+Downloads matching records as CSV or Excel. The existing filters (`country`,
+`state`, `domain`, `university`, `mailSource`, `search`, and
+`includeDuplicates`) can be combined with the same upload-date filters above.
+The `domain` filter matches either the `domain` or `domain_group` field using
+an exact, case-insensitive match.
+For example:
+
+```text
+/email-master/download?format=csv&dateFilter=true&dateRange=custom&startDate=2026-01-01&endDate=2026-03-31
+```
+
+For preset date ranges, set `dateFilter=true` and `dateRange` to
+`last_30_days` or `last_3_months`. Custom ranges require both dates; the end
+date is inclusive.
 
 ---
 

@@ -1,10 +1,20 @@
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Resolve .env relative to this file so the path is correct regardless of
 # which working directory the server is launched from.
 _ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+_DEVELOPMENT_SECRET_DEFAULTS = frozenset(
+    {
+        "insecure-dev-secret-change-me",
+        "dev-password-encryption-key-123456",
+        "change-this-to-a-random-jwt-secret",
+        "change-this-to-a-random-encryption-key",
+    }
+)
+_MIN_PRODUCTION_SECRET_LENGTH = 32
 
 
 class Settings(BaseSettings):
@@ -43,6 +53,30 @@ class Settings(BaseSettings):
     # Gmail SMTP defaults (used as fallback; per-account creds stored in email_accounts)
     GMAIL_SMTP_HOST: str = "smtp.gmail.com"
     GMAIL_SMTP_PORT: int = 587
+
+    @model_validator(mode="after")
+    def validate_production_secrets(self) -> "Settings":
+        if self.ENV.strip().casefold() == "development":
+            return self
+
+        invalid_secrets = [
+            field_name
+            for field_name, secret in (
+                ("JWT_SECRET_KEY", self.JWT_SECRET_KEY),
+                ("PASSWORD_ENCRYPTION_KEY", self.PASSWORD_ENCRYPTION_KEY),
+            )
+            if (
+                len(secret.strip()) < _MIN_PRODUCTION_SECRET_LENGTH
+                or secret.strip().casefold() in _DEVELOPMENT_SECRET_DEFAULTS
+            )
+        ]
+        if invalid_secrets:
+            raise ValueError(
+                "For non-development environments, set "
+                f"{', '.join(invalid_secrets)} to non-placeholder secrets "
+                f"of at least {_MIN_PRODUCTION_SECRET_LENGTH} characters"
+            )
+        return self
 
     @property
     def cors_origins_list(self) -> list[str]:
